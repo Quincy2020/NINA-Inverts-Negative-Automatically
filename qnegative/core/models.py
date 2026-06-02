@@ -118,7 +118,7 @@ class AdjustmentParams:
     shadows: int = 0
     contrast: int = 0
     saturation: int = 0
-    camera_color_strength: int = 50
+    camera_color_strength: int = 0
     soft_highlights: bool = False
     soft_shadows: bool = False
     black_point: int = 0
@@ -134,3 +134,6 @@ class ImageProcessingState:
     adjustments: AdjustmentParams = field(default_factory=AdjustmentParams)
     negative_preview_active: bool = False
     auto_levels_pending: bool = True
+    preview_flip_horizontal: bool = False
+    preview_flip_vertical: bool = False
+    preview_rotation_quarters: int = 0

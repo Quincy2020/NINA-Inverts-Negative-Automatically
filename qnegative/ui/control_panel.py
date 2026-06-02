@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -82,20 +83,19 @@ class ControlPanel(QWidget):
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
 
-        self.pan_button = self._make_tool_button("Preview", ToolMode.PAN)
         self.mask_picker_button = self._make_tool_button("Base Picker", ToolMode.MASK_PICKER)
-        self.wb_picker_button = self._make_tool_button("WB Picker", ToolMode.WB_PICKER)
         self.film_rect_button = self._make_tool_button("Frame Area", ToolMode.FILM_RECT)
-        self.pan_button.setChecked(True)
+        self.mask_picker_button.setChecked(True)
 
         self.exposure_slider = self._make_slider(-100, 100, 0)
         self.highlights_slider = self._make_slider(-100, 100, 0)
         self.shadows_slider = self._make_slider(-100, 100, 0)
         self.contrast_slider = self._make_slider(-100, 100, 0)
         self.saturation_slider = self._make_slider(-100, 100, 0)
-        self.camera_color_slider = self._make_slider(0, 100, 50)
+        self.camera_color_slider = self._make_slider(0, 100, 0)
         self.histogram_levels = HistogramLevelsWidget()
         self.density_matrix_panel = DensityMatrixPanel()
+        self.camera_color_panel = self._camera_color_developer_panel()
         self.white_balance_panel = WhiteBalancePanel()
 
         self._build_layout()
@@ -157,16 +157,10 @@ class ControlPanel(QWidget):
         layout = QVBoxLayout(group)
         layout.setSpacing(8)
 
-        row_a = QHBoxLayout()
-        row_a.addWidget(self.pan_button)
-        row_a.addWidget(self.mask_picker_button)
-
-        row_b = QHBoxLayout()
-        row_b.addWidget(self.wb_picker_button)
-        row_b.addWidget(self.film_rect_button)
-
-        layout.addLayout(row_a)
-        layout.addLayout(row_b)
+        row = QHBoxLayout()
+        row.addWidget(self.mask_picker_button)
+        row.addWidget(self.film_rect_button)
+        layout.addLayout(row)
         return group
 
     def _selection_section(self) -> QGroupBox:
@@ -204,7 +198,6 @@ class ControlPanel(QWidget):
         layout.addLayout(self._slider_row("Shadows", self.shadows_slider, "-1", "+1"))
         layout.addLayout(self._slider_row("Contrast", self.contrast_slider, "-1", "+1"))
         layout.addLayout(self._slider_row("Saturation", self.saturation_slider, "-1", "+1"))
-        layout.addLayout(self._slider_row("Camera Color", self.camera_color_slider, "0", "100"))
 
         curve_row = QHBoxLayout()
         curve_row.addWidget(QLabel("Print Curve"))
@@ -223,7 +216,59 @@ class ControlPanel(QWidget):
         group = self._section("Output")
         layout = QVBoxLayout(group)
         layout.addWidget(self.export_button)
+        self.export_progress = QProgressBar()
+        self.export_progress.setRange(0, 0)
+        self.export_progress.setFormat("Exporting TIFF...")
+        self.export_progress.setTextVisible(True)
+        self.export_progress.hide()
+        layout.addWidget(self.export_progress)
         return group
+
+    def _camera_color_developer_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("cameraColorPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        layout.addLayout(self._slider_row("Camera Color", self.camera_color_slider, "0", "100"))
+
+        hint = QLabel("Camera transform mix. Keep at 0 for the current NegPy print workflow.")
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        panel.setStyleSheet(
+            """
+            QWidget#cameraColorPanel {
+                background: #20242b;
+                color: #e8eaed;
+            }
+            QLabel {
+                color: #e8eaed;
+            }
+            QLabel#mutedLabel {
+                color: #9aa4b2;
+                font-size: 12px;
+            }
+            QLabel#sliderValue {
+                color: #cfd6df;
+                min-width: 34px;
+                qproperty-alignment: AlignRight;
+            }
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: #3a414c;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                width: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+                background: #d7dde5;
+            }
+            """
+        )
+        return panel
 
     def _connect(self) -> None:
         self.open_button.clicked.connect(self.openRequested.emit)
@@ -245,6 +290,9 @@ class ControlPanel(QWidget):
             slider.valueChanged.connect(self._emit_adjustments)
         self.density_matrix_panel.matrixChanged.connect(self._emit_adjustments)
         self.white_balance_panel.balanceChanged.connect(self._emit_adjustments)
+        self.white_balance_panel.pickWhiteBalanceRequested.connect(
+            lambda: self.toolChanged.emit(ToolMode.WB_PICKER)
+        )
         self.histogram_levels.levelsChanged.connect(lambda _levels: self._emit_adjustments())
 
     def _make_tool_button(self, text: str, mode: ToolMode) -> QToolButton:
@@ -341,7 +389,7 @@ class ControlPanel(QWidget):
 
     def set_image_loaded(self, loaded: bool) -> None:
         self.invert_button.setEnabled(loaded)
-        self.export_button.setEnabled(loaded)
+        self.export_button.setEnabled(loaded and not self.export_progress.isVisible())
 
     def set_file_status(self, text: str) -> None:
         self.file_label.setText(text)
@@ -366,6 +414,21 @@ class ControlPanel(QWidget):
 
     def set_levels(self, black: int, mid: int, white: int, *, emit: bool = False) -> None:
         self.histogram_levels.set_levels(black, mid, white, emit=emit)
+
+    def set_export_progress(self, active: bool, *, value: int = 0, text: str = "Exporting TIFF...") -> None:
+        self.export_progress.setVisible(active)
+        if active:
+            self.export_progress.setRange(0, 100)
+            self.export_progress.setValue(value)
+            self.export_progress.setFormat(f"{text} %p%")
+        else:
+            self.export_progress.setRange(0, 1)
+            self.export_progress.setValue(0)
+
+    def update_export_progress(self, value: int, text: str) -> None:
+        self.export_progress.setRange(0, 100)
+        self.export_progress.setValue(max(0, min(100, value)))
+        self.export_progress.setFormat(f"{text} %p%")
 
     def set_adjustments(self, adjustments: AdjustmentParams, *, emit: bool = False) -> None:
         widgets = (
@@ -514,6 +577,18 @@ class ControlPanel(QWidget):
             QCheckBox::indicator {
                 width: 15px;
                 height: 15px;
+            }
+            QProgressBar {
+                background: #15191f;
+                border: 1px solid #444c59;
+                border-radius: 5px;
+                color: #e8eaed;
+                height: 18px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background: #67a4c7;
+                border-radius: 4px;
             }
             """
         )

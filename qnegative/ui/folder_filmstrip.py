@@ -20,11 +20,13 @@ from qnegative.core.file_sequence import RAW_EXTENSIONS
 
 class ThumbnailItem(QFrame):
     selected = Signal(object)
+    wheelMoved = Signal(int)
 
     def __init__(self, path: Path, index: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.path = path
         self.index = index
+        self._processed = False
         self.setObjectName("thumbnailItem")
         self.setProperty("active", False)
         self.setFixedSize(112, 104)
@@ -41,6 +43,13 @@ class ThumbnailItem(QFrame):
         self.name_label.setAlignment(Qt.AlignCenter)
         self.name_label.setFixedHeight(26)
         self.name_label.setWordWrap(True)
+
+        self.processed_badge = QLabel("Positive", self)
+        self.processed_badge.setObjectName("processedBadge")
+        self.processed_badge.setAlignment(Qt.AlignCenter)
+        self.processed_badge.setFixedSize(50, 20)
+        self.processed_badge.move(54, 8)
+        self.processed_badge.hide()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(7, 7, 7, 5)
@@ -64,10 +73,39 @@ class ThumbnailItem(QFrame):
         )
         self.image_label.setPixmap(scaled)
 
+    def set_processed_thumbnail(self, pixmap: QPixmap) -> None:
+        self.setToolTip("Positive preview generated")
+        self.set_thumbnail(pixmap)
+        self._processed = True
+        self.processed_badge.show()
+        self.processed_badge.raise_()
+
+    def has_processed_thumbnail(self) -> bool:
+        return self._processed
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton:
             self.selected.emit(self.path)
         super().mousePressEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta:
+            self.wheelMoved.emit(delta)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+
+class HorizontalWheelScrollArea(QScrollArea):
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        bar = self.horizontalScrollBar()
+        bar.setValue(bar.value() - delta)
+        event.accept()
 
 
 class FolderFilmstrip(QWidget):
@@ -94,7 +132,7 @@ class FolderFilmstrip(QWidget):
         self.next_button.setToolTip("Next")
         self.next_button.setFixedSize(34, 92)
 
-        self.scroll_area = QScrollArea()
+        self.scroll_area = HorizontalWheelScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -133,6 +171,7 @@ class FolderFilmstrip(QWidget):
         for index, path in enumerate(files, start=1):
             item = ThumbnailItem(path, index)
             item.selected.connect(self.fileSelected.emit)
+            item.wheelMoved.connect(self._scroll_by_wheel)
             item.set_active(current_path is not None and path == current_path)
             self.content_layout.insertWidget(self.content_layout.count() - 1, item)
             self._items[path] = item
@@ -150,6 +189,18 @@ class FolderFilmstrip(QWidget):
         if path in self._items:
             self.scroll_area.ensureWidgetVisible(self._items[path], 24, 0)
 
+    def _scroll_by_wheel(self, delta: int) -> None:
+        bar = self.scroll_area.horizontalScrollBar()
+        bar.setValue(bar.value() - delta)
+
+    def set_processed_thumbnail(self, path: Path | None, pixmap: QPixmap) -> None:
+        if path is None:
+            return
+        item = self._items.get(path)
+        if item is None:
+            return
+        item.set_processed_thumbnail(pixmap)
+
     def _clear_layout(self) -> None:
         while self.content_layout.count() > 1:
             item = self.content_layout.takeAt(0)
@@ -165,6 +216,8 @@ class FolderFilmstrip(QWidget):
         path = self._load_queue.pop(0)
         item = self._items.get(path)
         if item is None:
+            return
+        if item.has_processed_thumbnail():
             return
         item.set_thumbnail(load_thumbnail(path))
 
@@ -196,8 +249,8 @@ class FolderFilmstrip(QWidget):
                 border-radius: 6px;
             }
             QFrame#thumbnailItem[active="true"] {
-                border: 2px solid #67a4c7;
-                background: #2b3944;
+                border: 3px solid #f2c94c;
+                background: #344150;
             }
             QLabel#thumbnailImage {
                 background: #111418;
@@ -208,8 +261,41 @@ class FolderFilmstrip(QWidget):
                 color: #cbd3dd;
                 font-size: 10px;
             }
+            QLabel#processedBadge {
+                background: #f2c94c;
+                border: 1px solid #111418;
+                border-radius: 5px;
+                color: #111418;
+                font-size: 9px;
+                font-weight: 700;
+            }
             QScrollArea {
                 background: transparent;
+            }
+            QScrollBar:horizontal {
+                background: #15191f;
+                border: none;
+                height: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: #46515f;
+                border-radius: 5px;
+                min-width: 32px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #5c6a7c;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {
+                background: transparent;
+                border: none;
+                width: 0;
+                height: 0;
+            }
+            QScrollBar::add-page:horizontal,
+            QScrollBar::sub-page:horizontal {
+                background: #15191f;
             }
             """
         )

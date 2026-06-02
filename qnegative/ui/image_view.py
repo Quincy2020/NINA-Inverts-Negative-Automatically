@@ -15,7 +15,11 @@ class ImageView(QWidget):
     whiteBalancePointSelected = Signal(object)
     filmRectSelected = Signal(object)
     filmRectReset = Signal()
+    flipHorizontalRequested = Signal()
+    flipVerticalRequested = Signal()
+    rotateClockwiseRequested = Signal()
     viewStatusChanged = Signal(str)
+    pickerCancelled = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -28,9 +32,15 @@ class ImageView(QWidget):
         self._display_rect = QRectF()
         self._tool_mode = ToolMode.PAN
         self._placeholder = "Open a RAW or image file to begin"
+        self._transform_context_enabled = False
 
         self._drag_start: QPoint | None = None
         self._drag_current: QPoint | None = None
+        self._is_panning = False
+        self._pan_start: QPoint | None = None
+        self._pan_offset = QPointF(0.0, 0.0)
+        self._pan_offset_start = QPointF(0.0, 0.0)
+        self._zoom_factor = 1.0
         self._film_edit_op: str | None = None
         self._film_edit_start: ImagePoint | None = None
         self._film_edit_rect: ImageRect | None = None
@@ -38,6 +48,9 @@ class ImageView(QWidget):
         self._mask_point: ImagePoint | None = None
         self._wb_point: ImagePoint | None = None
         self._film_rect: ImageRect | None = None
+
+    def set_transform_context_enabled(self, enabled: bool) -> None:
+        self._transform_context_enabled = enabled
 
     def set_tool_mode(self, mode: ToolMode) -> None:
         self._tool_mode = mode
@@ -56,6 +69,7 @@ class ImageView(QWidget):
         self._source_path = Path(path)
         self._source_size = ImageSize(width=self._pixmap.width(), height=self._pixmap.height())
         self._placeholder = ""
+        self._reset_navigation()
         self.clear_selections()
         self.update()
         self.viewStatusChanged.emit(
@@ -69,11 +83,14 @@ class ImageView(QWidget):
         *,
         source_path: str | Path,
         source_size: ImageSize,
+        reset_navigation: bool = True,
     ) -> None:
         self._pixmap = pixmap
         self._source_path = Path(source_path)
         self._source_size = source_size
         self._placeholder = ""
+        if reset_navigation:
+            self._reset_navigation()
         self.clear_selections()
         self.update()
         self.viewStatusChanged.emit(
@@ -85,6 +102,7 @@ class ImageView(QWidget):
         self._source_path = Path(path)
         self._source_size = None
         self._placeholder = f"RAW preview pending: {self._source_path.name}"
+        self._reset_navigation()
         self.clear_selections()
         self.update()
         self.viewStatusChanged.emit("RAW file selected. Decode preview will be available later.")
@@ -93,6 +111,7 @@ class ImageView(QWidget):
         self._pixmap = None
         self._source_size = None
         self._placeholder = text
+        self._reset_navigation()
         self.clear_selections()
         self.update()
         self.viewStatusChanged.emit(text)
@@ -100,6 +119,8 @@ class ImageView(QWidget):
     def clear_selections(self) -> None:
         self._drag_start = None
         self._drag_current = None
+        self._is_panning = False
+        self._pan_start = None
         self._film_edit_op = None
         self._film_edit_start = None
         self._film_edit_rect = None
@@ -158,6 +179,10 @@ class ImageView(QWidget):
             return
 
         if event.button() == Qt.RightButton:
+            if self._tool_mode == ToolMode.WB_PICKER:
+                self.pickerCancelled.emit()
+                event.accept()
+                return
             self._show_context_menu(event.position().toPoint())
             return
 
@@ -198,9 +223,23 @@ class ImageView(QWidget):
             self._drag_start = event.position().toPoint()
             self._drag_current = self._drag_start
             self.update()
+            return
+
+        if self._tool_mode == ToolMode.PAN or self._transform_context_enabled:
+            self._is_panning = True
+            self._pan_start = event.position().toPoint()
+            self._pan_offset_start = QPointF(self._pan_offset)
+            self.setCursor(Qt.ClosedHandCursor)
+            return
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._pixmap is None:
+            return
+
+        if self._is_panning and self._pan_start is not None:
+            delta = event.position().toPoint() - self._pan_start
+            self._pan_offset = self._pan_offset_start + QPointF(delta)
+            self.update()
             return
 
         if self._film_edit_op is not None:
@@ -233,6 +272,12 @@ class ImageView(QWidget):
             self.update()
             return
 
+        if self._is_panning:
+            self._is_panning = False
+            self._pan_start = None
+            self.setCursor(self._cursor_for_mode(self._tool_mode))
+            return
+
         if self._drag_start is None:
             return
 
@@ -252,7 +297,39 @@ class ImageView(QWidget):
         self.update()
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
+        if self._tool_mode == ToolMode.WB_PICKER:
+            self.pickerCancelled.emit()
+            event.accept()
+            return
         self._show_context_menu(event.pos())
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if self._pixmap is None:
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+
+        old_rect = QRectF(self._display_rect)
+        if old_rect.isEmpty():
+            old_rect = self._scaled_display_rect(self._pixmap)
+        cursor = event.position()
+        if not old_rect.contains(cursor):
+            cursor = old_rect.center()
+
+        x_norm = (cursor.x() - old_rect.left()) / max(1.0, old_rect.width())
+        y_norm = (cursor.y() - old_rect.top()) / max(1.0, old_rect.height())
+        zoom_step = 1.12 if delta > 0 else 1.0 / 1.12
+        self._zoom_factor = float(max(0.25, min(8.0, self._zoom_factor * zoom_step)))
+
+        new_rect = self._scaled_display_rect(self._pixmap)
+        new_cursor = QPointF(
+            new_rect.left() + x_norm * new_rect.width(),
+            new_rect.top() + y_norm * new_rect.height(),
+        )
+        self._pan_offset += cursor - new_cursor
+        self.update()
+        event.accept()
 
     def _paint_placeholder(self, painter: QPainter) -> None:
         painter.setPen(QColor("#77808d"))
@@ -332,8 +409,10 @@ class ImageView(QWidget):
             height = available.height()
             width = height * image_ratio
 
-        x = available.left() + (available.width() - width) / 2
-        y = available.top() + (available.height() - height) / 2
+        width *= self._zoom_factor
+        height *= self._zoom_factor
+        x = available.left() + (available.width() - width) / 2 + self._pan_offset.x()
+        y = available.top() + (available.height() - height) / 2 + self._pan_offset.y()
         return QRectF(x, y, width, height)
 
     def _view_to_image_point(self, point) -> ImagePoint | None:
@@ -567,6 +646,20 @@ class ImageView(QWidget):
             self.setCursor(self._cursor_for_mode(self._tool_mode))
 
     def _show_context_menu(self, position: QPoint) -> None:
+        if self._transform_context_enabled and self._pixmap is not None:
+            menu = QMenu(self)
+            flip_h_action = menu.addAction("Flip horizontal")
+            flip_v_action = menu.addAction("Flip vertical")
+            rotate_action = menu.addAction("Rotate 90 clockwise")
+            selected = menu.exec(self.mapToGlobal(position))
+            if selected == flip_h_action:
+                self.flipHorizontalRequested.emit()
+            elif selected == flip_v_action:
+                self.flipVerticalRequested.emit()
+            elif selected == rotate_action:
+                self.rotateClockwiseRequested.emit()
+            return
+
         if self._film_rect is None:
             return
         point = self._view_to_image_point(QPointF(position))
@@ -628,3 +721,10 @@ class ImageView(QWidget):
         x = min(max(0, rect.x), max(0, self._source_size.width - rect.width))
         y = min(max(0, rect.y), max(0, self._source_size.height - rect.height))
         return ImageRect(x, y, rect.width, rect.height, rect.angle)
+
+    def _reset_navigation(self) -> None:
+        self._zoom_factor = 1.0
+        self._pan_offset = QPointF(0.0, 0.0)
+        self._pan_offset_start = QPointF(0.0, 0.0)
+        self._is_panning = False
+        self._pan_start = None

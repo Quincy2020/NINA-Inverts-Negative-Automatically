@@ -25,6 +25,15 @@ NEGPY_LOG_PERCENTILE_CLIP = 0.02
 NEGPY_AUTO_WB_STRENGTH = 0.18
 NEGPY_AUTO_WB_MAX_OFFSET = 0.04
 NEGPY_COLOR_SEPARATION_STRENGTH = 0.45
+NEGPY_AUTO_EXPOSURE_SAMPLE_LIMIT = 180_000
+NEGPY_AUTO_BLACK_PERCENTILE = 0.25
+NEGPY_AUTO_WHITE_PERCENTILE = 99.75
+NEGPY_AUTO_BLACK_PADDING = 0.060
+NEGPY_AUTO_WHITE_PADDING = 0.085
+NEGPY_AUTO_MIN_SPAN = 0.54
+NEGPY_AUTO_MID_LOW = 0.04
+NEGPY_AUTO_MID_HIGH = 0.74
+NEGPY_AUTO_VISUAL_TARGET = 0.30
 GLOBAL_BALANCE_SCALE = 55.0
 TONAL_BALANCE_SCALE = 75.0
 FILMIC_LUT_SIZE = 4096
@@ -321,6 +330,7 @@ def process_log_bounds_preview(
         strength=LOG_COLOR_SEPARATION_STRENGTH,
     )
     processed = apply_color_balance(processed, adjustments.color_balance)
+    processed = apply_highlight_shadow_adjustments(processed, adjustments)
     color_balanced = processed
     processed = apply_saturation_adjustment(processed, adjustments)
     display_rgb8 = linear_to_srgb8(processed)
@@ -352,7 +362,11 @@ def process_negpy_print_preview(
     )
     positive_control = 1.0 - normalized_log
     histogram = luminance_histogram(positive_control)
-    auto_levels = suggest_negpy_print_luminance_levels(normalized_log, adjustments)
+    auto_levels = suggest_negpy_print_luminance_levels(
+        normalized_log,
+        adjustments,
+        camera_to_srgb_matrix=base.camera_to_srgb_matrix,
+    )
 
     positive_control = apply_unit_levels(positive_control, adjustments, clip=True)
     normalized_for_print = np.clip(1.0 - positive_control, 0.0, 1.0)
@@ -377,6 +391,7 @@ def process_negpy_print_preview(
         strength=NEGPY_COLOR_SEPARATION_STRENGTH,
     )
     processed = apply_color_balance(processed, adjustments.color_balance)
+    processed = apply_highlight_shadow_adjustments(processed, adjustments)
     color_balanced = processed
     processed = apply_saturation_adjustment(processed, adjustments)
     display_rgb8 = linear_to_srgb8(processed)
@@ -498,8 +513,8 @@ def log_hd_print_response(
     slope = np.array([slope_value, slope_value, slope_value], dtype=np.float32).reshape(1, 1, 3)
     offsets = cmy_offsets.astype(np.float32, copy=False).reshape(1, 1, 3)
 
-    toe = float(np.clip(adjustments.shadows / 100.0 + (0.20 if adjustments.soft_shadows else 0.0), -1.0, 1.0))
-    shoulder = float(np.clip(-adjustments.highlights / 100.0 + (0.20 if adjustments.soft_highlights else 0.0), -1.0, 1.0))
+    toe = float(np.clip(0.20 if adjustments.soft_shadows else 0.0, -1.0, 1.0))
+    shoulder = float(np.clip(0.20 if adjustments.soft_highlights else 0.0, -1.0, 1.0))
 
     value = np.clip(normalized_log, 0.0, 1.0) + offsets
     diff = value - pivot
@@ -1000,23 +1015,27 @@ def apply_highlight_shadow_adjustments(image: np.ndarray, adjustments: Adjustmen
     adjusted = np.maximum(image.astype(np.float32, copy=True), 0.0)
     luminance = np.maximum(rgb_luminance(adjusted), 0.0)
     target_luminance = luminance.copy()
+    shadow_ratio_limit: float | None = None
 
     if adjustments.shadows != 0:
         shadow_amount = float(np.clip(adjustments.shadows / 100.0, -1.0, 1.0))
-        shadow_pivot = 0.42
-        shadow_weight = 1.0 - smoothstep(0.0, shadow_pivot, luminance)
-        shadow_norm = np.clip(target_luminance / shadow_pivot, 0.0, 1.0)
-        above_shadow = np.maximum(target_luminance - shadow_pivot, 0.0)
+        shadow_pivot = 0.44
+        shadow_norm = np.clip(luminance / shadow_pivot, 0.0, 1.0)
+        shadow_weight = 1.0 - smoothstep(0.18, 1.0, shadow_norm)
 
         if shadow_amount > 0:
-            gamma = 1.0 / (1.0 + 2.8 * shadow_amount)
-            lifted = shadow_pivot * np.power(shadow_norm, gamma) + above_shadow
-            target_luminance += (lifted - target_luminance) * shadow_amount * shadow_weight
+            gamma = 1.0 / (1.0 + 2.6 * shadow_amount)
+            lifted = shadow_pivot * np.power(shadow_norm, gamma)
+            black_anchor = smoothstep(0.0, 0.035, luminance)
+            mix = np.clip(shadow_amount * 0.95 * shadow_weight * black_anchor, 0.0, 1.0)
+            target_luminance = target_luminance * (1.0 - mix) + lifted * mix
+            shadow_ratio_limit = 1.0 + 4.5 * shadow_amount
         else:
             amount = abs(shadow_amount)
-            gamma = 1.0 + 2.6 * amount
-            crushed = shadow_pivot * np.power(shadow_norm, gamma) + above_shadow
-            target_luminance += (crushed - target_luminance) * abs(shadow_amount) * shadow_weight
+            gamma = 1.0 + 2.2 * amount
+            crushed = shadow_pivot * np.power(shadow_norm, gamma)
+            mix = np.clip(amount * 0.90 * shadow_weight, 0.0, 1.0)
+            target_luminance = target_luminance * (1.0 - mix) + crushed * mix
 
     if adjustments.highlights != 0:
         highlight_amount = float(np.clip(adjustments.highlights / 65.0, -1.0, 1.0))
@@ -1045,7 +1064,14 @@ def apply_highlight_shadow_adjustments(image: np.ndarray, adjustments: Adjustmen
             mix = highlight_weight * amount
             target_luminance = target_luminance * (1.0 - mix) + compressed * mix
 
-    ratio = target_luminance / np.maximum(luminance, 1e-5)
+    ratio = np.divide(
+        target_luminance,
+        luminance,
+        out=np.ones_like(target_luminance, dtype=np.float32),
+        where=luminance > 1e-5,
+    )
+    if shadow_ratio_limit is not None:
+        ratio = np.minimum(ratio, shadow_ratio_limit)
     return (adjusted * ratio[:, :, None]).astype(np.float32, copy=False)
 
 
@@ -1341,23 +1367,15 @@ def suggest_log_bounds_luminance_levels(image: np.ndarray) -> dict[str, int]:
 def suggest_negpy_print_luminance_levels(
     normalized_log: np.ndarray,
     adjustments: AdjustmentParams,
+    *,
+    camera_to_srgb_matrix: np.ndarray | None = None,
 ) -> dict[str, int]:
     positive_source = np.clip(1.0 - normalized_log, 0.0, 1.0)
-    visual_probe = log_hd_print_response(
-        normalized_log,
-        adjustments,
-        cmy_offsets=np.zeros(3, dtype=np.float32),
-    )
+    sampled_log = sampled_rgb_pixels(normalized_log, limit=NEGPY_AUTO_EXPOSURE_SAMPLE_LIMIT)
+    sampled_positive = np.clip(1.0 - sampled_log, 0.0, 1.0)
+    source_sample = rgb_luminance(sampled_positive.reshape(-1, 1, 3)).reshape(-1)
 
-    source_luminance = rgb_luminance(positive_source).reshape(-1)
-    visual_luminance = rgb_luminance(visual_probe).reshape(-1)
-    stride = max(1, len(source_luminance) // 800_000)
-    source_sample = source_luminance[::stride]
-    visual_sample = visual_luminance[::stride]
-
-    visual_black = float(np.percentile(visual_sample, 1.0))
-    visual_white = float(np.percentile(visual_sample, 99.2))
-    if visual_white <= visual_black + 1e-5:
+    if source_sample.size < 128:
         return suggest_luminance_levels(
             positive_source,
             black_percentile=1.2,
@@ -1369,21 +1387,32 @@ def suggest_negpy_print_luminance_levels(
             target_output_mid=0.54,
         )
 
-    black = inverse_log_hd_positive_curve_value(visual_black, adjustments)
-    white = inverse_log_hd_positive_curve_value(visual_white, adjustments)
+    black = float(np.percentile(source_sample, NEGPY_AUTO_BLACK_PERCENTILE))
+    white = float(np.percentile(source_sample, NEGPY_AUTO_WHITE_PERCENTILE))
     source_span = max(1e-5, white - black)
-    black -= 0.020 * source_span
-    white += 0.030 * source_span
+    black -= NEGPY_AUTO_BLACK_PADDING * source_span
+    white += NEGPY_AUTO_WHITE_PADDING * source_span
 
-    source_mid = float(np.percentile(source_sample, 70.0))
-    target_positive_mid = inverse_log_hd_positive_curve_value(0.18, adjustments)
-    mid = solve_mid_control_point(
-        source_mid,
+    if white - black < NEGPY_AUTO_MIN_SPAN:
+        center = (black + white) * 0.5
+        half_span = NEGPY_AUTO_MIN_SPAN * 0.5
+        black = center - half_span
+        white = center + half_span
+
+    black = float(np.clip(black, 0.0, 0.96))
+    white = float(np.clip(white, black + 0.04, 1.0))
+    source_span = max(1e-5, white - black)
+
+    mid_low = black + source_span * NEGPY_AUTO_MID_LOW
+    mid_high = black + source_span * NEGPY_AUTO_MID_HIGH
+    mid = solve_negpy_visual_midpoint(
+        sampled_log,
         black,
         white,
-        curve_mode=PrintCurveMode.LINEAR.value,
-        target_output_mid=target_positive_mid,
+        adjustments,
+        camera_to_srgb_matrix=camera_to_srgb_matrix,
     )
+    mid = float(np.clip(mid, mid_low, mid_high))
 
     black_point = round(black * 100)
     mid_point = round(mid * 100)
@@ -1398,6 +1427,98 @@ def suggest_negpy_print_luminance_levels(
         "mid_point": mid_point,
         "white_point": white_point,
     }
+
+
+def sampled_rgb_pixels(image: np.ndarray, *, limit: int) -> np.ndarray:
+    pixels = image.reshape(-1, 3)
+    if len(pixels) == 0:
+        return pixels.astype(np.float32, copy=False)
+    stride = max(1, len(pixels) // max(1, limit))
+    return pixels[::stride].astype(np.float32, copy=False)
+
+
+def solve_negpy_visual_midpoint(
+    normalized_log_sample: np.ndarray,
+    black: float,
+    white: float,
+    adjustments: AdjustmentParams,
+    *,
+    camera_to_srgb_matrix: np.ndarray | None,
+) -> float:
+    span = max(1e-5, white - black)
+    low = black + span * NEGPY_AUTO_MID_LOW
+    high = black + span * NEGPY_AUTO_MID_HIGH
+
+    for _index in range(13):
+        candidate = (low + high) * 0.5
+        brightness = negpy_visual_brightness_score(
+            normalized_log_sample,
+            black,
+            candidate,
+            white,
+            adjustments,
+            camera_to_srgb_matrix=camera_to_srgb_matrix,
+        )
+        if brightness > NEGPY_AUTO_VISUAL_TARGET:
+            low = candidate
+        else:
+            high = candidate
+
+    return (low + high) * 0.5
+
+
+def negpy_visual_brightness_score(
+    normalized_log_sample: np.ndarray,
+    black: float,
+    mid: float,
+    white: float,
+    adjustments: AdjustmentParams,
+    *,
+    camera_to_srgb_matrix: np.ndarray | None,
+) -> float:
+    span = max(1e-5, white - black)
+    mid_norm = float(np.clip((mid - black) / span, 0.01, 0.99))
+    gamma = float(np.clip(np.log(0.5) / np.log(mid_norm), 0.2, 8.0))
+
+    positive = np.clip(1.0 - normalized_log_sample, 0.0, 1.0)
+    leveled = (positive - black) / span
+    leveled = np.power(np.maximum(leveled, 0.0), gamma)
+    leveled = np.clip(leveled, 0.0, 1.0).reshape(-1, 1, 3)
+    normalized_for_print = np.clip(1.0 - leveled, 0.0, 1.0)
+
+    if adjustments.auto_wb:
+        cmy_offsets = estimate_negpy_auto_cmy_offsets(normalized_for_print)
+    else:
+        cmy_offsets = np.zeros(3, dtype=np.float32)
+
+    processed = apply_log_hd_print_curve(
+        normalized_for_print,
+        adjustments,
+        cmy_offsets=cmy_offsets,
+    )
+    processed = apply_output_color_transform(
+        processed,
+        camera_to_srgb_matrix,
+        adjustments.camera_color_strength,
+    )
+    processed = apply_log_color_separation(
+        processed,
+        strength=NEGPY_COLOR_SEPARATION_STRENGTH,
+    )
+    processed = apply_color_balance(processed, adjustments.color_balance)
+    processed = apply_highlight_shadow_adjustments(processed, adjustments)
+
+    luminance = rgb_luminance(processed).reshape(-1)
+    if luminance.size == 0:
+        return 0.0
+
+    p50 = float(np.percentile(luminance, 50.0))
+    p60 = float(np.percentile(luminance, 60.0))
+    low = float(np.percentile(luminance, 12.0))
+    high = float(np.percentile(luminance, 88.0))
+    trimmed = luminance[(luminance >= low) & (luminance <= high)]
+    trimmed_mean = float(np.mean(trimmed)) if trimmed.size else p50
+    return 0.55 * p50 + 0.25 * p60 + 0.20 * trimmed_mean
 
 
 def log_hd_positive_curve_values(values: np.ndarray, adjustments: AdjustmentParams) -> np.ndarray:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+import tifffile
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -39,9 +42,154 @@ from qnegative.core.pipeline import (
     suggest_global_balance_from_neutral,
 )
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview, make_raw_preview
+from qnegative.core.raw_loader import load_raw_rgb16
 from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.folder_filmstrip import FolderFilmstrip
 from qnegative.ui.image_view import ImageView
+
+
+class PreviewRenderSignals(QObject):
+    finished = Signal(int, object, bool)
+    failed = Signal(int, str, bool)
+
+
+class PreviewRenderTask(QRunnable):
+    def __init__(
+        self,
+        *,
+        job_id: int,
+        preview: RawPreview,
+        mask_point: ImagePoint | None,
+        film_rect: ImageRect | None,
+        adjustments: AdjustmentParams,
+        auto_levels_pending: bool,
+        show_errors: bool,
+    ) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.preview = preview
+        self.mask_point = mask_point
+        self.film_rect = film_rect
+        self.adjustments = deepcopy(adjustments)
+        self.auto_levels_pending = auto_levels_pending
+        self.show_errors = show_errors
+        self.signals = PreviewRenderSignals()
+
+    def run(self) -> None:
+        try:
+            base = build_negative_base_preview(
+                self.preview.preview_linear_rgb,
+                source_size=self.preview.source_size,
+                mask_point=self.mask_point,
+                film_rect=self.film_rect,
+                preview_camera_wb_linear_rgb=self.preview.preview_camera_wb_linear_rgb,
+                camera_to_srgb_matrix=self.preview.camera_to_srgb_matrix,
+            )
+            result = process_negative_base_preview(base, self.adjustments)
+        except Exception as exc:
+            self.signals.failed.emit(self.job_id, str(exc), self.show_errors)
+            return
+
+        self.signals.finished.emit(self.job_id, result, self.show_errors)
+
+
+class ExportSignals(QObject):
+    progress = Signal(int, str)
+    finished = Signal(str)
+    failed = Signal(str)
+
+
+class TiffExportTask(QRunnable):
+    def __init__(
+        self,
+        *,
+        source_path: Path,
+        output_path: Path,
+        mask_point: ImagePoint,
+        film_rect: ImageRect,
+        adjustments: AdjustmentParams,
+        flip_horizontal: bool,
+        flip_vertical: bool,
+        rotation_quarters: int,
+        auto_levels_pending: bool,
+    ) -> None:
+        super().__init__()
+        self.source_path = source_path
+        self.output_path = output_path
+        self.mask_point = mask_point
+        self.film_rect = film_rect
+        self.adjustments = deepcopy(adjustments)
+        self.flip_horizontal = flip_horizontal
+        self.flip_vertical = flip_vertical
+        self.rotation_quarters = rotation_quarters
+        self.auto_levels_pending = auto_levels_pending
+        self.signals = ExportSignals()
+
+    def run(self) -> None:
+        try:
+            self.signals.progress.emit(5, "Loading RAW")
+            raw_image = load_raw_rgb16(self.source_path, half_size=False)
+            self.signals.progress.emit(30, "Building base")
+            base = build_negative_base_preview(
+                raw_image.as_float32(),
+                source_size=raw_image.source_size,
+                mask_point=self.mask_point,
+                film_rect=self.film_rect,
+                preview_camera_wb_linear_rgb=raw_image.camera_wb_as_float32(),
+                camera_to_srgb_matrix=raw_image.camera_to_srgb_matrix,
+            )
+            self.signals.progress.emit(55, "Processing positive")
+            result = process_negative_base_preview(base, self.adjustments)
+            if self.auto_levels_pending:
+                adjusted = deepcopy(self.adjustments)
+                adjusted.black_point = result.auto_levels["black_point"]
+                adjusted.mid_point = result.auto_levels["mid_point"]
+                adjusted.white_point = result.auto_levels["white_point"]
+                result = process_negative_base_preview(base, adjusted)
+
+            self.signals.progress.emit(75, "Preparing TIFF")
+            linear_rgb = transform_preview_array(
+                result.processed_linear_rgb,
+                flip_horizontal=self.flip_horizontal,
+                flip_vertical=self.flip_vertical,
+                rotation_quarters=self.rotation_quarters,
+            )
+            tiff_rgb16 = linear_to_srgb16(linear_rgb)
+            self.signals.progress.emit(90, "Writing TIFF")
+            tifffile.imwrite(
+                self.output_path,
+                tiff_rgb16,
+                photometric="rgb",
+                compression="deflate",
+            )
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+            return
+
+        self.signals.finished.emit(str(self.output_path))
+
+
+def transform_preview_array(
+    image: np.ndarray,
+    *,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    rotation_quarters: int,
+) -> np.ndarray:
+    transformed = image
+    if flip_horizontal:
+        transformed = np.flip(transformed, axis=1)
+    if flip_vertical:
+        transformed = np.flip(transformed, axis=0)
+    if rotation_quarters:
+        transformed = np.rot90(transformed, k=-(rotation_quarters % 4))
+    return np.ascontiguousarray(transformed)
+
+
+def linear_to_srgb16(linear_rgb: np.ndarray) -> np.ndarray:
+    clipped = np.clip(linear_rgb, 0.0, 1.0)
+    srgb = np.power(clipped, 1.0 / 2.2)
+    return np.ascontiguousarray((srgb * 65535.0 + 0.5).astype(np.uint16))
 
 
 class MainWindow(QMainWindow):
@@ -66,9 +214,25 @@ class MainWindow(QMainWindow):
         self._negative_base_cache_key: tuple[object, ...] | None = None
         self._density_analysis_cache: DensityPreviewAnalysis | None = None
         self._density_analysis_cache_key: tuple[object, ...] | None = None
+        self._last_untransformed_negative_result: NegativePreviewResult | None = None
+        self._preview_flip_horizontal = False
+        self._preview_flip_vertical = False
+        self._preview_rotation_quarters = 0
+        self._thread_pool = QThreadPool.globalInstance()
+        self._render_job_id = 0
+        self._render_in_progress = False
+        self._render_pending = False
+        self._render_pending_show_errors = False
+        self._export_in_progress = False
 
         self.control_panel = ControlPanel()
-        self.image_view = ImageView()
+        self.origin_view = ImageView()
+        self.image_view = self.origin_view
+        self.preview_view = ImageView()
+        self.preview_view.set_transform_context_enabled(True)
+        self.preview_view.set_placeholder("Positive preview waiting")
+        self.preview_tabs = QTabWidget()
+        self.preview_tabs.setObjectName("previewTabs")
         self.filmstrip = FolderFilmstrip()
         self.preview_refresh_timer = QTimer(self)
         self.preview_refresh_timer.setSingleShot(True)
@@ -79,6 +243,7 @@ class MainWindow(QMainWindow):
         self._connect()
         self._apply_style()
         self.control_panel.set_adjustments(self.adjustments, emit=False)
+        self.set_tool_mode(ToolMode.MASK_PICKER)
 
         self.statusBar().showMessage("Ready")
 
@@ -87,7 +252,9 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_pane)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
-        right_layout.addWidget(self.image_view, 1)
+        self.preview_tabs.addTab(self.origin_view, "Origin")
+        self.preview_tabs.addTab(self.preview_view, "Preview")
+        right_layout.addWidget(self.preview_tabs, 1)
         right_layout.addWidget(self.filmstrip)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -118,6 +285,19 @@ class MainWindow(QMainWindow):
         self.density_matrix_dock.visibilityChanged.connect(density_action.setChecked)
         developer_menu.addAction(density_action)
 
+        self.camera_color_dock = QDockWidget("Camera Color", self)
+        self.camera_color_dock.setObjectName("cameraColorDock")
+        self.camera_color_dock.setWidget(self.control_panel.camera_color_panel)
+        self.camera_color_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.camera_color_dock)
+        self.camera_color_dock.hide()
+
+        camera_color_action = QAction("Camera Color", self)
+        camera_color_action.setCheckable(True)
+        camera_color_action.toggled.connect(self.camera_color_dock.setVisible)
+        self.camera_color_dock.visibilityChanged.connect(camera_color_action.setChecked)
+        developer_menu.addAction(camera_color_action)
+
     def _connect(self) -> None:
         self.control_panel.openRequested.connect(self.open_file)
         self.control_panel.exportRequested.connect(self.export_current)
@@ -126,16 +306,21 @@ class MainWindow(QMainWindow):
         self.control_panel.toolChanged.connect(self.set_tool_mode)
         self.control_panel.adjustmentsChanged.connect(self.adjustments_changed)
 
-        self.image_view.maskPointSelected.connect(self.mask_point_selected)
-        self.image_view.whiteBalancePointSelected.connect(self.white_balance_point_selected)
-        self.image_view.filmRectSelected.connect(self.film_rect_selected)
-        self.image_view.filmRectReset.connect(self.film_rect_reset)
-        self.image_view.viewStatusChanged.connect(self.statusBar().showMessage)
+        self.origin_view.maskPointSelected.connect(self.mask_point_selected)
+        self.origin_view.filmRectSelected.connect(self.film_rect_selected)
+        self.origin_view.filmRectReset.connect(self.film_rect_reset)
+        self.origin_view.viewStatusChanged.connect(self.statusBar().showMessage)
+        self.preview_view.whiteBalancePointSelected.connect(self.white_balance_point_selected)
+        self.preview_view.viewStatusChanged.connect(self.statusBar().showMessage)
+        self.preview_view.pickerCancelled.connect(self.cancel_white_balance_picker)
+        self.preview_view.flipHorizontalRequested.connect(self.flip_preview_horizontal)
+        self.preview_view.flipVerticalRequested.connect(self.flip_preview_vertical)
+        self.preview_view.rotateClockwiseRequested.connect(self.rotate_preview_clockwise)
 
         self.filmstrip.fileSelected.connect(self.select_sequence_file)
         self.filmstrip.previousRequested.connect(self.go_previous_file)
         self.filmstrip.nextRequested.connect(self.go_next_file)
-        self.preview_refresh_timer.timeout.connect(lambda: self._render_negative_preview(show_errors=False))
+        self.preview_refresh_timer.timeout.connect(lambda: self._queue_negative_render(show_errors=False))
 
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -161,6 +346,8 @@ class MainWindow(QMainWindow):
         if self.current_path is not None and self.current_path != path:
             self._save_current_state()
 
+        self._cancel_preview_render()
+
         if refresh_sequence:
             self._set_folder_sequence(path)
         else:
@@ -171,7 +358,10 @@ class MainWindow(QMainWindow):
         self.negative_preview_active = False
         self.auto_levels_pending = True
         self.white_balance_point = None
+        self._last_untransformed_negative_result = None
+        self._reset_preview_transform()
         self._invalidate_negative_base_cache()
+        self.preview_view.set_placeholder("Positive preview waiting")
         extension = path.suffix.lower()
         self.control_panel.set_file_status(path.name)
         self.filmstrip.set_current(path)
@@ -226,7 +416,21 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"RAW preview ready: {path.name}")
 
     def set_tool_mode(self, mode: ToolMode) -> None:
-        self.image_view.set_tool_mode(mode)
+        if mode == ToolMode.WB_PICKER:
+            self.preview_view.set_tool_mode(mode)
+            self.origin_view.set_tool_mode(ToolMode.PAN)
+            self.preview_tabs.setCurrentWidget(self.preview_view)
+            if not self.negative_preview_active:
+                self.statusBar().showMessage("Generate a positive preview before picking white balance")
+            return
+
+        self.origin_view.set_tool_mode(mode)
+        self.preview_view.set_tool_mode(ToolMode.PAN)
+        self.preview_tabs.setCurrentWidget(self.origin_view)
+
+    def cancel_white_balance_picker(self) -> None:
+        self.preview_view.set_tool_mode(ToolMode.PAN)
+        self.statusBar().showMessage("WB picker cancelled")
 
     def mask_point_selected(self, point: ImagePoint) -> None:
         self.mask_point = point
@@ -235,6 +439,7 @@ class MainWindow(QMainWindow):
         self._invalidate_negative_base_cache()
         self.control_panel.set_mask_status(f"Base point: x={point.x}, y={point.y}")
         self.statusBar().showMessage("Base picker point saved")
+        self._schedule_preview_if_ready()
 
     def film_rect_selected(self, rect: ImageRect) -> None:
         self.film_rect = rect
@@ -243,21 +448,25 @@ class MainWindow(QMainWindow):
         self._invalidate_negative_base_cache()
         self.control_panel.set_film_status(f"Frame: {rect.label()}")
         self.statusBar().showMessage("Frame area saved")
+        self._schedule_preview_if_ready()
 
     def film_rect_reset(self) -> None:
         self.film_rect = None
         self.white_balance_point = None
         self.auto_levels_pending = True
+        self.negative_preview_active = False
+        self._last_untransformed_negative_result = None
         self._invalidate_negative_base_cache()
         self.control_panel.set_film_status("Not selected")
+        self.preview_view.set_placeholder("Positive preview waiting")
         self.statusBar().showMessage("Frame reset")
 
     def white_balance_point_selected(self, point: ImagePoint) -> None:
         if not self.negative_preview_active or self.last_negative_result is None:
             self.white_balance_point = None
-            self.image_view.restore_selections(
-                mask_point=self.mask_point,
-                film_rect=self.film_rect,
+            self.preview_view.restore_selections(
+                mask_point=None,
+                film_rect=None,
                 white_balance_point=None,
             )
             self.statusBar().showMessage("Generate a positive preview before using the WB picker")
@@ -306,71 +515,68 @@ class MainWindow(QMainWindow):
             )
         )
         if self.negative_preview_active:
+            if self._render_in_progress:
+                self._render_pending = True
             self.preview_refresh_timer.start()
 
     def preview_inversion(self) -> None:
-        self._render_negative_preview(show_errors=True)
+        self._queue_negative_render(show_errors=True)
 
-    def _render_negative_preview(self, *, show_errors: bool) -> bool:
+    def _queue_negative_render(self, *, show_errors: bool) -> bool:
         if self.current_preview is None:
             if show_errors:
                 QMessageBox.information(self, "Invert Preview", "Open a RAW file and generate a linear preview first.")
             return False
 
-        self.statusBar().showMessage("Generating inverted preview...")
-        if show_errors:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            base = self._negative_base_for_current()
-            density_analysis = (
-                self._density_analysis_for_current(base)
-                if self.adjustments.invert_mode == InvertMode.DENSITY.value
-                else None
-            )
-            if self.auto_levels_pending and density_analysis is not None:
-                self._apply_auto_levels(density_analysis.auto_levels)
-                self.auto_levels_pending = False
+        if self._render_in_progress:
+            self._render_pending = True
+            self._render_pending_show_errors = self._render_pending_show_errors or show_errors
+            self.statusBar().showMessage("Preview render queued...")
+            return True
 
-            result = process_negative_base_preview(
-                base,
-                self.adjustments,
-                density_analysis=density_analysis,
-            )
-            pixmap = self._pixmap_from_rgb8(result.display_rgb8)
-        except PipelineError as exc:
-            if show_errors:
-                QMessageBox.information(self, "Invert Preview", str(exc))
-            self.last_negative_result = None
-            self.statusBar().showMessage("Inverted preview not ready")
-            return False
-        except Exception as exc:
-            if show_errors:
-                QMessageBox.warning(self, "Invert Preview Failed", str(exc))
-            self.last_negative_result = None
-            self.statusBar().showMessage("Inverted preview failed")
-            return False
-        finally:
-            if show_errors:
-                QApplication.restoreOverrideCursor()
+        self._render_job_id += 1
+        job_id = self._render_job_id
+        task = PreviewRenderTask(
+            job_id=job_id,
+            preview=self.current_preview,
+            mask_point=self.mask_point,
+            film_rect=self.film_rect,
+            adjustments=self.adjustments,
+            auto_levels_pending=self.auto_levels_pending,
+            show_errors=show_errors,
+        )
+        task.signals.finished.connect(self._preview_render_finished)
+        task.signals.failed.connect(self._preview_render_failed)
+        self._render_in_progress = True
+        self.statusBar().showMessage("Rendering preview...")
+        self._thread_pool.start(task)
+        return True
+
+    def _preview_render_finished(self, job_id: int, result: NegativePreviewResult, show_errors: bool) -> None:
+        if job_id != self._render_job_id:
+            return
+
+        self._render_in_progress = False
+
+        if self._render_pending:
+            pending_show_errors = self._render_pending_show_errors
+            self._render_pending = False
+            self._render_pending_show_errors = False
+            self._queue_negative_render(show_errors=pending_show_errors)
+            return
 
         if self.auto_levels_pending:
             self._apply_auto_levels(result.auto_levels)
             self.auto_levels_pending = False
-            return self._render_negative_preview(show_errors=False)
+            self._render_pending = False
+            self._render_pending_show_errors = False
+            self._queue_negative_render(show_errors=False)
+            return
 
-        self.image_view.set_preview_pixmap(
-            pixmap,
-            source_path=self.current_path or self.current_preview.path,
-            source_size=ImageSize(width=result.width, height=result.height),
-        )
-        self.image_view.restore_selections(
-            mask_point=None,
-            film_rect=None,
-            white_balance_point=self.white_balance_point,
-        )
-        self.last_negative_result = result
+        self._last_untransformed_negative_result = result
+        displayed_result, _pixmap = self._update_preview_from_result(result)
         mask_rgb = ", ".join(f"{value:.4f}" for value in result.mask_rgb)
-        wb_gains = ", ".join(f"{value:.3f}" for value in result.wb_gains)
+        wb_gains = ", ".join(f"{value:.3f}" for value in displayed_result.wb_gains)
         wb_label = (
             "WB CMY offset"
             if self.adjustments.invert_mode
@@ -378,12 +584,103 @@ class MainWindow(QMainWindow):
             else "WB gain"
         )
         self.control_panel.set_image_status(
-            f"Positive preview {result.width} x {result.height}\nMode {self.adjustments.invert_mode}\nBase RGB {mask_rgb}\n{wb_label} {wb_gains}"
+            f"Positive preview {displayed_result.width} x {displayed_result.height}\nMode {self.adjustments.invert_mode}\nBase RGB {mask_rgb}\n{wb_label} {wb_gains}"
         )
-        self.control_panel.set_histogram(result.histogram)
+        self.control_panel.set_histogram(displayed_result.histogram)
         self.negative_preview_active = True
+        if show_errors:
+            self.preview_tabs.setCurrentWidget(self.preview_view)
         self.statusBar().showMessage("Inverted preview ready")
-        return True
+
+    def _preview_render_failed(self, job_id: int, message: str, show_errors: bool) -> None:
+        if job_id != self._render_job_id:
+            return
+
+        self._render_in_progress = False
+        self.last_negative_result = None
+        self._last_untransformed_negative_result = None
+        if show_errors:
+            QMessageBox.warning(self, "Invert Preview Failed", message)
+        self.statusBar().showMessage("Inverted preview failed")
+
+        if self._render_pending:
+            pending_show_errors = self._render_pending_show_errors
+            self._render_pending = False
+            self._render_pending_show_errors = False
+            self._queue_negative_render(show_errors=pending_show_errors)
+
+    def _schedule_preview_if_ready(self) -> None:
+        if self.current_preview is None:
+            return
+        if self.mask_point is None or self.film_rect is None or not self.film_rect.is_valid():
+            return
+        self.preview_refresh_timer.start()
+
+    def _update_preview_from_result(self, result: NegativePreviewResult) -> tuple[NegativePreviewResult, QPixmap]:
+        displayed_result = self._transformed_negative_result(result)
+        pixmap = self._pixmap_from_rgb8(displayed_result.display_rgb8)
+        source_path = self.current_path or (self.current_preview.path if self.current_preview else "")
+        self.preview_view.set_preview_pixmap(
+            pixmap,
+            source_path=source_path,
+            source_size=ImageSize(width=displayed_result.width, height=displayed_result.height),
+            reset_navigation=False,
+        )
+        self.preview_view.restore_selections(
+            mask_point=None,
+            film_rect=None,
+            white_balance_point=self.white_balance_point,
+        )
+        self.origin_view.restore_selections(
+            mask_point=self.mask_point,
+            film_rect=self.film_rect,
+            white_balance_point=None,
+        )
+        self.last_negative_result = displayed_result
+        self.filmstrip.set_processed_thumbnail(self.current_path, pixmap)
+        return displayed_result, pixmap
+
+    def _transformed_negative_result(self, result: NegativePreviewResult) -> NegativePreviewResult:
+        return replace(
+            result,
+            display_rgb8=self._transform_preview_array(result.display_rgb8),
+            processed_linear_rgb=self._transform_preview_array(result.processed_linear_rgb),
+            color_balanced_linear_rgb=self._transform_preview_array(result.color_balanced_linear_rgb),
+        )
+
+    def _transform_preview_array(self, image: np.ndarray) -> np.ndarray:
+        transformed = image
+        if self._preview_flip_horizontal:
+            transformed = np.flip(transformed, axis=1)
+        if self._preview_flip_vertical:
+            transformed = np.flip(transformed, axis=0)
+        if self._preview_rotation_quarters:
+            transformed = np.rot90(transformed, k=-self._preview_rotation_quarters)
+        return np.ascontiguousarray(transformed)
+
+    def flip_preview_horizontal(self) -> None:
+        self._preview_flip_horizontal = not self._preview_flip_horizontal
+        self._refresh_preview_transform("Preview flipped horizontally")
+
+    def flip_preview_vertical(self) -> None:
+        self._preview_flip_vertical = not self._preview_flip_vertical
+        self._refresh_preview_transform("Preview flipped vertically")
+
+    def rotate_preview_clockwise(self) -> None:
+        self._preview_rotation_quarters = (self._preview_rotation_quarters + 1) % 4
+        self._refresh_preview_transform("Preview rotated 90 degrees")
+
+    def _refresh_preview_transform(self, status: str) -> None:
+        if self._last_untransformed_negative_result is None:
+            self.statusBar().showMessage("Generate a positive preview first")
+            return
+        self._update_preview_from_result(self._last_untransformed_negative_result)
+        self.statusBar().showMessage(status)
+
+    def _reset_preview_transform(self) -> None:
+        self._preview_flip_horizontal = False
+        self._preview_flip_vertical = False
+        self._preview_rotation_quarters = 0
 
     def _negative_base_for_current(self) -> NegativeBasePreview:
         if self.current_preview is None:
@@ -418,6 +715,7 @@ class MainWindow(QMainWindow):
         self._negative_base_cache_key = None
         self._invalidate_density_analysis_cache()
         self.last_negative_result = None
+        self._last_untransformed_negative_result = None
 
     def _density_analysis_for_current(self, base: NegativeBasePreview) -> DensityPreviewAnalysis:
         key: tuple[object, ...] = (
@@ -451,26 +749,97 @@ class MainWindow(QMainWindow):
         )
 
     def export_current(self) -> None:
-        QMessageBox.information(
+        if self._export_in_progress:
+            self.statusBar().showMessage("Export already in progress")
+            return
+
+        if self.current_path is None or self.current_path.suffix.lower() not in RAW_EXTENSIONS:
+            QMessageBox.information(self, "Export TIFF", "Open a RAW file before exporting.")
+            return
+        if self.mask_point is None:
+            QMessageBox.information(self, "Export TIFF", "Pick the film base before exporting.")
+            return
+        if self.film_rect is None or not self.film_rect.is_valid():
+            QMessageBox.information(self, "Export TIFF", "Select a valid frame area before exporting.")
+            return
+
+        default_path = self.current_path.with_name(f"{self.current_path.stem}_positive.tif")
+        output, _selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Export",
-            "Export is reserved for the next pipeline stage.",
+            "Export 16-bit TIFF",
+            str(default_path),
+            "TIFF Image (*.tif *.tiff)",
         )
+        if not output:
+            return
+
+        output_path = Path(output)
+        if output_path.suffix.lower() not in {".tif", ".tiff"}:
+            output_path = output_path.with_suffix(".tif")
+
+        task = TiffExportTask(
+            source_path=self.current_path,
+            output_path=output_path,
+            mask_point=self.mask_point,
+            film_rect=self.film_rect,
+            adjustments=self.adjustments,
+            flip_horizontal=self._preview_flip_horizontal,
+            flip_vertical=self._preview_flip_vertical,
+            rotation_quarters=self._preview_rotation_quarters,
+            auto_levels_pending=self.auto_levels_pending,
+        )
+        task.signals.finished.connect(self._export_finished)
+        task.signals.failed.connect(self._export_failed)
+        task.signals.progress.connect(self._export_progress_updated)
+        self._export_in_progress = True
+        self.control_panel.export_button.setEnabled(False)
+        self.control_panel.set_export_progress(True, value=0, text="Starting export")
+        self.statusBar().showMessage("Exporting 16-bit TIFF...")
+        self._thread_pool.start(task)
+
+    def _export_progress_updated(self, value: int, text: str) -> None:
+        self.control_panel.update_export_progress(value, text)
+        self.statusBar().showMessage(f"{text}...")
+
+    def _export_finished(self, output_path: str) -> None:
+        self._export_in_progress = False
+        self.control_panel.update_export_progress(100, "Export complete")
+        self.control_panel.set_export_progress(False)
+        self.control_panel.export_button.setEnabled(True)
+        self.statusBar().showMessage(f"Exported TIFF: {output_path}")
+
+    def _export_failed(self, message: str) -> None:
+        self._export_in_progress = False
+        self.control_panel.set_export_progress(False)
+        self.control_panel.export_button.setEnabled(True)
+        QMessageBox.warning(self, "Export TIFF Failed", message)
+        self.statusBar().showMessage("TIFF export failed")
 
     def reset_workspace(self) -> None:
-        self.image_view.clear_selections()
+        self._cancel_preview_render()
+        self.origin_view.clear_selections()
+        self.preview_view.set_placeholder("Positive preview waiting")
         self.preview_refresh_timer.stop()
         self.negative_preview_active = False
         self.auto_levels_pending = True
         self.mask_point = None
         self.film_rect = None
         self.white_balance_point = None
+        self._reset_preview_transform()
+        self._last_untransformed_negative_result = None
         self._invalidate_negative_base_cache()
         self.control_panel.set_mask_status("Not selected")
         self.control_panel.set_film_status("Not selected")
         self.control_panel.set_adjustments(self._default_adjustments(), emit=True)
         self.control_panel.set_histogram(None)
+        self.preview_tabs.setCurrentWidget(self.origin_view)
         self.statusBar().showMessage("Workspace reset")
+
+    def _cancel_preview_render(self) -> None:
+        self._render_job_id += 1
+        self._render_in_progress = False
+        self._render_pending = False
+        self._render_pending_show_errors = False
 
     def _apply_auto_levels(self, levels: dict[str, int]) -> None:
         self._applying_auto_levels = True
@@ -499,6 +868,9 @@ class MainWindow(QMainWindow):
             adjustments=deepcopy(self.adjustments),
             negative_preview_active=self.negative_preview_active,
             auto_levels_pending=self.auto_levels_pending,
+            preview_flip_horizontal=self._preview_flip_horizontal,
+            preview_flip_vertical=self._preview_flip_vertical,
+            preview_rotation_quarters=self._preview_rotation_quarters,
         )
 
     def _restore_state_for_path(self, path: Path) -> None:
@@ -510,9 +882,11 @@ class MainWindow(QMainWindow):
             self.adjustments = self._default_adjustments()
             self.negative_preview_active = False
             self.auto_levels_pending = True
+            self._reset_preview_transform()
             self.control_panel.set_mask_status("Not selected")
             self.control_panel.set_film_status("Not selected")
             self.control_panel.set_adjustments(self.adjustments, emit=False)
+            self.origin_view.restore_selections(mask_point=None, film_rect=None)
             return
 
         self.mask_point = state.mask_point
@@ -521,6 +895,9 @@ class MainWindow(QMainWindow):
         self.adjustments = deepcopy(state.adjustments)
         self.negative_preview_active = False
         self.auto_levels_pending = state.auto_levels_pending
+        self._preview_flip_horizontal = state.preview_flip_horizontal
+        self._preview_flip_vertical = state.preview_flip_vertical
+        self._preview_rotation_quarters = state.preview_rotation_quarters % 4
 
         self.control_panel.set_mask_status(
             f"Base point: x={self.mask_point.x}, y={self.mask_point.y}"
@@ -533,13 +910,13 @@ class MainWindow(QMainWindow):
             else "Not selected"
         )
         self.control_panel.set_adjustments(self.adjustments, emit=False)
-        self.image_view.restore_selections(
+        self.origin_view.restore_selections(
             mask_point=self.mask_point,
             film_rect=self.film_rect,
         )
 
         if state.negative_preview_active:
-            self._render_negative_preview(show_errors=False)
+            self._queue_negative_render(show_errors=False)
 
     def _default_adjustments(self) -> AdjustmentParams:
         return AdjustmentParams(invert_mode=self.default_invert_mode)
@@ -605,6 +982,20 @@ class MainWindow(QMainWindow):
             }
             QSplitter::handle:hover {
                 background: #53606f;
+            }
+            QTabWidget#previewTabs::pane {
+                border: none;
+                background: #15181d;
+            }
+            QTabBar::tab {
+                background: #20242b;
+                color: #aeb8c5;
+                padding: 8px 18px;
+                border-right: 1px solid #303640;
+            }
+            QTabBar::tab:selected {
+                background: #2c3440;
+                color: #f2f4f7;
             }
             """
         )

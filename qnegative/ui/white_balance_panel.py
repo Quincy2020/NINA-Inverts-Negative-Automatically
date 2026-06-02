@@ -146,6 +146,7 @@ class ColorSliderRow(QWidget):
 
 class WhiteBalancePanel(QWidget):
     balanceChanged = Signal()
+    pickWhiteBalanceRequested = Signal()
 
     AXIS_GRADIENTS = {
         "red_cyan": ("#00bfd1", "#e14d4d"),
@@ -163,6 +164,11 @@ class WhiteBalancePanel(QWidget):
         self.auto_wb_checkbox.setChecked(True)
         self.auto_wb_checkbox.stateChanged.connect(lambda _state: self.balanceChanged.emit())
 
+        self.pick_wb_button = QToolButton()
+        self.pick_wb_button.setText("Pick WB")
+        self.pick_wb_button.setToolTip("Pick a neutral point from the positive preview")
+        self.pick_wb_button.clicked.connect(self.pickWhiteBalanceRequested.emit)
+
         self.tabs = QTabWidget()
         self.tabs.setObjectName("whiteBalanceTabs")
         self.tabs.addTab(self._axis_widget("global"), "Global")
@@ -174,6 +180,7 @@ class WhiteBalancePanel(QWidget):
         root.setContentsMargins(0, 8, 0, 0)
         root.setSpacing(8)
         root.addWidget(self.auto_wb_checkbox)
+        root.addWidget(self.pick_wb_button)
         root.addWidget(self.tabs)
 
         self._apply_style()
