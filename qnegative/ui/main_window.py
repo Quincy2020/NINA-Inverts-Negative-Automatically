@@ -48,7 +48,7 @@ from qnegative.core.pipeline import (
     process_negative_base_preview,
     suggest_global_balance_from_neutral,
 )
-from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview, make_raw_preview
+from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview, make_raw_preview, resize_long_edge
 from qnegative.core.raw_loader import load_raw_rgb16
 from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.folder_filmstrip import FolderFilmstrip
@@ -58,6 +58,13 @@ from qnegative.ui.image_view import ImageView
 class PreviewRenderSignals(QObject):
     finished = Signal(int, object, bool)
     failed = Signal(int, str, bool)
+
+
+INTERACTIVE_PREVIEW_MAX_EDGE = 720
+FINAL_RENDER_QUALITY = "final"
+INTERACTIVE_RENDER_QUALITY = "interactive"
+FINAL_RENDER_DEBOUNCE_MS = 80
+INTERACTIVE_RENDER_DEBOUNCE_MS = 115
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,31 @@ class PreviewStageCache:
 class PreviewRenderOutput:
     result: NegativePreviewResult
     cache: PreviewStageCache
+    quality: str
+
+
+def scaled_raw_preview(preview: RawPreview, *, max_edge: int) -> RawPreview:
+    longest = max(preview.preview_size.width, preview.preview_size.height)
+    if longest <= max_edge:
+        return preview
+
+    preview_linear_rgb = resize_long_edge(preview.preview_linear_rgb, max_size=max_edge)
+    preview_camera_wb_linear_rgb = resize_long_edge(
+        preview.preview_camera_wb_linear_rgb,
+        max_size=max_edge,
+    )
+    display_rgb8 = resize_long_edge(preview.display_rgb8, max_size=max_edge)
+    height, width = preview_linear_rgb.shape[:2]
+
+    return RawPreview(
+        path=preview.path,
+        source_size=preview.source_size,
+        preview_size=ImageSize(width=width, height=height),
+        preview_linear_rgb=np.ascontiguousarray(preview_linear_rgb),
+        preview_camera_wb_linear_rgb=np.ascontiguousarray(preview_camera_wb_linear_rgb),
+        display_rgb8=np.ascontiguousarray(display_rgb8),
+        camera_to_srgb_matrix=preview.camera_to_srgb_matrix,
+    )
 
 
 def current_levels(adjustments: AdjustmentParams) -> dict[str, int]:
@@ -226,6 +258,7 @@ class PreviewRenderTask(QRunnable):
         adjustments: AdjustmentParams,
         auto_levels_pending: bool,
         show_errors: bool,
+        quality: str,
         render_cache: PreviewStageCache | None = None,
     ) -> None:
         super().__init__()
@@ -236,6 +269,7 @@ class PreviewRenderTask(QRunnable):
         self.adjustments = deepcopy(adjustments)
         self.auto_levels_pending = auto_levels_pending
         self.show_errors = show_errors
+        self.quality = quality
         self.render_cache = render_cache or PreviewStageCache()
         self.signals = PreviewRenderSignals()
 
@@ -250,6 +284,7 @@ class PreviewRenderTask(QRunnable):
                 output = PreviewRenderOutput(
                     result=result,
                     cache=PreviewStageCache(base_key=base_key, base=base),
+                    quality=self.quality,
                 )
         except Exception as exc:
             self.signals.failed.emit(self.job_id, str(exc), self.show_errors)
@@ -333,6 +368,7 @@ class PreviewRenderTask(QRunnable):
                 display_key=display_key,
                 display_result=result,
             ),
+            quality=self.quality,
         )
 
 
@@ -457,7 +493,13 @@ class MainWindow(QMainWindow):
         self._negative_base_cache_key: tuple[object, ...] | None = None
         self._density_analysis_cache: DensityPreviewAnalysis | None = None
         self._density_analysis_cache_key: tuple[object, ...] | None = None
-        self._preview_stage_cache = PreviewStageCache()
+        self._preview_stage_caches = {
+            FINAL_RENDER_QUALITY: PreviewStageCache(),
+            INTERACTIVE_RENDER_QUALITY: PreviewStageCache(),
+        }
+        self._interactive_adjustment_active = False
+        self._interactive_preview_cache_key: tuple[object, ...] | None = None
+        self._interactive_preview_cache: RawPreview | None = None
         self._last_untransformed_negative_result: NegativePreviewResult | None = None
         self._preview_flip_horizontal = False
         self._preview_flip_vertical = False
@@ -480,7 +522,7 @@ class MainWindow(QMainWindow):
         self.filmstrip = FolderFilmstrip()
         self.preview_refresh_timer = QTimer(self)
         self.preview_refresh_timer.setSingleShot(True)
-        self.preview_refresh_timer.setInterval(80)
+        self.preview_refresh_timer.setInterval(FINAL_RENDER_DEBOUNCE_MS)
 
         self._build_layout()
         self._build_developer_menu()
@@ -549,6 +591,8 @@ class MainWindow(QMainWindow):
         self.control_panel.resetRequested.connect(self.reset_workspace)
         self.control_panel.toolChanged.connect(self.set_tool_mode)
         self.control_panel.adjustmentsChanged.connect(self.adjustments_changed)
+        self.control_panel.adjustmentInteractionStarted.connect(self.adjustment_interaction_started)
+        self.control_panel.adjustmentInteractionFinished.connect(self.adjustment_interaction_finished)
 
         self.origin_view.maskPointSelected.connect(self.mask_point_selected)
         self.origin_view.filmRectSelected.connect(self.film_rect_selected)
@@ -564,7 +608,7 @@ class MainWindow(QMainWindow):
         self.filmstrip.fileSelected.connect(self.select_sequence_file)
         self.filmstrip.previousRequested.connect(self.go_previous_file)
         self.filmstrip.nextRequested.connect(self.go_next_file)
-        self.preview_refresh_timer.timeout.connect(lambda: self._queue_negative_render(show_errors=False))
+        self.preview_refresh_timer.timeout.connect(self.preview_refresh_timeout)
 
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -737,6 +781,30 @@ class MainWindow(QMainWindow):
             f"WB picker: x={point.x}, y={point.y}, sample RGB {sample_text}, gains {gain_text}"
         )
 
+    def adjustment_interaction_started(self) -> None:
+        self._interactive_adjustment_active = True
+        self.preview_refresh_timer.setInterval(INTERACTIVE_RENDER_DEBOUNCE_MS)
+
+    def adjustment_interaction_finished(self) -> None:
+        was_interactive = self._interactive_adjustment_active
+        self._interactive_adjustment_active = False
+        self.preview_refresh_timer.setInterval(FINAL_RENDER_DEBOUNCE_MS)
+        if not was_interactive or not self.negative_preview_active:
+            return
+
+        self.preview_refresh_timer.stop()
+        if self._render_in_progress:
+            self._render_pending = True
+            self._render_pending_show_errors = False
+            return
+        self._queue_negative_render(show_errors=False, interactive=False)
+
+    def preview_refresh_timeout(self) -> None:
+        self._queue_negative_render(
+            show_errors=False,
+            interactive=self._interactive_adjustment_active,
+        )
+
     def adjustments_changed(self, values: dict) -> None:
         previous = self.adjustments
         self.adjustments = AdjustmentParams(**values)
@@ -761,16 +829,25 @@ class MainWindow(QMainWindow):
         if self.negative_preview_active:
             if self._render_in_progress:
                 self._render_pending = True
+            self.preview_refresh_timer.setInterval(
+                INTERACTIVE_RENDER_DEBOUNCE_MS
+                if self._interactive_adjustment_active
+                else FINAL_RENDER_DEBOUNCE_MS
+            )
             self.preview_refresh_timer.start()
 
     def preview_inversion(self) -> None:
-        self._queue_negative_render(show_errors=True)
+        self._queue_negative_render(show_errors=True, interactive=False)
 
-    def _queue_negative_render(self, *, show_errors: bool) -> bool:
+    def _queue_negative_render(self, *, show_errors: bool, interactive: bool = False) -> bool:
         if self.current_preview is None:
             if show_errors:
                 QMessageBox.information(self, "Invert Preview", "Open a RAW file and generate a linear preview first.")
             return False
+
+        interactive = bool(interactive and not show_errors and not self.auto_levels_pending)
+        quality = INTERACTIVE_RENDER_QUALITY if interactive else FINAL_RENDER_QUALITY
+        render_preview = self._preview_for_render(interactive=interactive)
 
         if self._render_in_progress:
             self._render_pending = True
@@ -782,18 +859,23 @@ class MainWindow(QMainWindow):
         job_id = self._render_job_id
         task = PreviewRenderTask(
             job_id=job_id,
-            preview=self.current_preview,
+            preview=render_preview,
             mask_point=self.mask_point,
             film_rect=self.film_rect,
             adjustments=self.adjustments,
             auto_levels_pending=self.auto_levels_pending,
             show_errors=show_errors,
-            render_cache=self._preview_stage_cache,
+            quality=quality,
+            render_cache=self._preview_stage_caches[quality],
         )
         task.signals.finished.connect(self._preview_render_finished)
         task.signals.failed.connect(self._preview_render_failed)
         self._render_in_progress = True
-        self.statusBar().showMessage("Rendering preview...")
+        self.statusBar().showMessage(
+            "Rendering interactive preview..."
+            if interactive
+            else "Rendering preview..."
+        )
         self._thread_pool.start(task)
         return True
 
@@ -802,14 +884,17 @@ class MainWindow(QMainWindow):
             return
 
         self._render_in_progress = False
-        self._preview_stage_cache = output.cache
+        self._preview_stage_caches[output.quality] = output.cache
         result = output.result
 
         if self._render_pending:
             pending_show_errors = self._render_pending_show_errors
             self._render_pending = False
             self._render_pending_show_errors = False
-            self._queue_negative_render(show_errors=pending_show_errors)
+            self._queue_negative_render(
+                show_errors=pending_show_errors,
+                interactive=self._interactive_adjustment_active and not pending_show_errors,
+            )
             return
 
         if self.auto_levels_pending:
@@ -817,11 +902,14 @@ class MainWindow(QMainWindow):
             self.auto_levels_pending = False
             self._render_pending = False
             self._render_pending_show_errors = False
-            self._queue_negative_render(show_errors=False)
+            self._queue_negative_render(show_errors=False, interactive=False)
             return
 
         self._last_untransformed_negative_result = result
-        displayed_result, _pixmap = self._update_preview_from_result(result)
+        displayed_result, _pixmap = self._update_preview_from_result(
+            result,
+            update_filmstrip=output.quality == FINAL_RENDER_QUALITY,
+        )
         mask_rgb = ", ".join(f"{value:.4f}" for value in result.mask_rgb)
         wb_gains = ", ".join(f"{value:.3f}" for value in displayed_result.wb_gains)
         wb_label = (
@@ -837,7 +925,11 @@ class MainWindow(QMainWindow):
         self.negative_preview_active = True
         if show_errors:
             self.preview_tabs.setCurrentWidget(self.preview_view)
-        self.statusBar().showMessage("Inverted preview ready")
+        self.statusBar().showMessage(
+            "Interactive preview ready"
+            if output.quality == INTERACTIVE_RENDER_QUALITY
+            else "Inverted preview ready"
+        )
 
     def _preview_render_failed(self, job_id: int, message: str, show_errors: bool) -> None:
         if job_id != self._render_job_id:
@@ -854,7 +946,10 @@ class MainWindow(QMainWindow):
             pending_show_errors = self._render_pending_show_errors
             self._render_pending = False
             self._render_pending_show_errors = False
-            self._queue_negative_render(show_errors=pending_show_errors)
+            self._queue_negative_render(
+                show_errors=pending_show_errors,
+                interactive=self._interactive_adjustment_active and not pending_show_errors,
+            )
 
     def _schedule_preview_if_ready(self) -> None:
         if self.current_preview is None:
@@ -863,7 +958,35 @@ class MainWindow(QMainWindow):
             return
         self.preview_refresh_timer.start()
 
-    def _update_preview_from_result(self, result: NegativePreviewResult) -> tuple[NegativePreviewResult, QPixmap]:
+    def _preview_for_render(self, *, interactive: bool) -> RawPreview:
+        if self.current_preview is None:
+            raise PipelineError("Open a RAW file and generate a linear preview first.")
+        if not interactive:
+            return self.current_preview
+
+        key = (
+            self.current_preview.path,
+            id(self.current_preview.preview_linear_rgb),
+            id(self.current_preview.preview_camera_wb_linear_rgb),
+            self.current_preview.preview_size,
+            INTERACTIVE_PREVIEW_MAX_EDGE,
+        )
+        if self._interactive_preview_cache_key == key and self._interactive_preview_cache is not None:
+            return self._interactive_preview_cache
+
+        self._interactive_preview_cache = scaled_raw_preview(
+            self.current_preview,
+            max_edge=INTERACTIVE_PREVIEW_MAX_EDGE,
+        )
+        self._interactive_preview_cache_key = key
+        return self._interactive_preview_cache
+
+    def _update_preview_from_result(
+        self,
+        result: NegativePreviewResult,
+        *,
+        update_filmstrip: bool = True,
+    ) -> tuple[NegativePreviewResult, QPixmap]:
         displayed_result = self._transformed_negative_result(result)
         pixmap = self._pixmap_from_rgb8(displayed_result.display_rgb8)
         source_path = self.current_path or (self.current_preview.path if self.current_preview else "")
@@ -884,7 +1007,8 @@ class MainWindow(QMainWindow):
             white_balance_point=None,
         )
         self.last_negative_result = displayed_result
-        self.filmstrip.set_processed_thumbnail(self.current_path, pixmap)
+        if update_filmstrip:
+            self.filmstrip.set_processed_thumbnail(self.current_path, pixmap)
         return displayed_result, pixmap
 
     def _transformed_negative_result(self, result: NegativePreviewResult) -> NegativePreviewResult:
@@ -960,10 +1084,18 @@ class MainWindow(QMainWindow):
     def _invalidate_negative_base_cache(self) -> None:
         self._negative_base_cache = None
         self._negative_base_cache_key = None
-        self._preview_stage_cache = PreviewStageCache()
+        self._reset_preview_stage_caches()
         self._invalidate_density_analysis_cache()
         self.last_negative_result = None
         self._last_untransformed_negative_result = None
+
+    def _reset_preview_stage_caches(self) -> None:
+        self._preview_stage_caches = {
+            FINAL_RENDER_QUALITY: PreviewStageCache(),
+            INTERACTIVE_RENDER_QUALITY: PreviewStageCache(),
+        }
+        self._interactive_preview_cache_key = None
+        self._interactive_preview_cache = None
 
     def _density_analysis_for_current(self, base: NegativeBasePreview) -> DensityPreviewAnalysis:
         key: tuple[object, ...] = (

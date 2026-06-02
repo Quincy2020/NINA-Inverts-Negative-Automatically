@@ -33,6 +33,8 @@ class ControlPanel(QWidget):
     resetRequested = Signal()
     toolChanged = Signal(object)
     adjustmentsChanged = Signal(dict)
+    adjustmentInteractionStarted = Signal()
+    adjustmentInteractionFinished = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -287,12 +289,18 @@ class ControlPanel(QWidget):
             self.saturation_slider,
             self.camera_color_slider,
         ):
+            slider.sliderPressed.connect(self.adjustmentInteractionStarted.emit)
+            slider.sliderReleased.connect(self.adjustmentInteractionFinished.emit)
             slider.valueChanged.connect(self._emit_adjustments)
         self.density_matrix_panel.matrixChanged.connect(self._emit_adjustments)
         self.white_balance_panel.balanceChanged.connect(self._emit_adjustments)
+        self.white_balance_panel.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
+        self.white_balance_panel.interactionFinished.connect(self.adjustmentInteractionFinished.emit)
         self.white_balance_panel.pickWhiteBalanceRequested.connect(
             lambda: self.toolChanged.emit(ToolMode.WB_PICKER)
         )
+        self.histogram_levels.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
+        self.histogram_levels.interactionFinished.connect(self.adjustmentInteractionFinished.emit)
         self.histogram_levels.levelsChanged.connect(lambda _levels: self._emit_adjustments())
 
     def _make_tool_button(self, text: str, mode: ToolMode) -> QToolButton:

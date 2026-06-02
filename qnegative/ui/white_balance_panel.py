@@ -18,6 +18,8 @@ from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalancePar
 
 class ColorSliderRow(QWidget):
     valueChanged = Signal()
+    interactionStarted = Signal()
+    interactionFinished = Signal()
 
     def __init__(
         self,
@@ -70,6 +72,8 @@ class ColorSliderRow(QWidget):
 
         self.minus_button.clicked.connect(lambda: self.set_value(self.value() - 1))
         self.plus_button.clicked.connect(lambda: self.set_value(self.value() + 1))
+        self.slider.sliderPressed.connect(self.interactionStarted.emit)
+        self.slider.sliderReleased.connect(self.interactionFinished.emit)
         self.slider.valueChanged.connect(self._slider_changed)
         self.spin_box.valueChanged.connect(self._spin_changed)
 
@@ -147,6 +151,8 @@ class ColorSliderRow(QWidget):
 class WhiteBalancePanel(QWidget):
     balanceChanged = Signal()
     pickWhiteBalanceRequested = Signal()
+    interactionStarted = Signal()
+    interactionFinished = Signal()
 
     AXIS_GRADIENTS = {
         "red_cyan": ("#00bfd1", "#e14d4d"),
@@ -245,6 +251,8 @@ class WhiteBalancePanel(QWidget):
             gradient=self.AXIS_GRADIENTS[gradient_key],
         )
         row.valueChanged.connect(self.balanceChanged.emit)
+        row.interactionStarted.connect(self.interactionStarted.emit)
+        row.interactionFinished.connect(self.interactionFinished.emit)
         self._rows[key] = row
         return row
 

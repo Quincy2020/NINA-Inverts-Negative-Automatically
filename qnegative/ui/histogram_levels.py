@@ -8,6 +8,8 @@ from PySide6.QtWidgets import QWidget
 
 class HistogramLevelsWidget(QWidget):
     levelsChanged = Signal(dict)
+    interactionStarted = Signal()
+    interactionFinished = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -72,6 +74,8 @@ class HistogramLevelsWidget(QWidget):
         if event.button() != Qt.LeftButton:
             return
         self._active_handle = self._nearest_handle(event.position())
+        if self._active_handle is not None:
+            self.interactionStarted.emit()
         self._set_handle_from_position(event.position())
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -82,6 +86,8 @@ class HistogramLevelsWidget(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton:
+            if self._active_handle is not None:
+                self.interactionFinished.emit()
             self._active_handle = None
 
     def _paint_histogram(self, painter: QPainter, plot: QRectF) -> None:
