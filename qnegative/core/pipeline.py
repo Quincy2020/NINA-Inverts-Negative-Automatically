@@ -114,6 +114,36 @@ class NegativePreviewResult:
         return self.display_rgb8.shape[0]
 
 
+@dataclass(frozen=True)
+class NegpyNegativeStage:
+    normalized_log: np.ndarray
+    positive_control: np.ndarray
+    histogram: np.ndarray
+    mask_rgb: np.ndarray
+    film_rect_preview: ImageRect
+    camera_to_srgb_matrix: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class NegpyLevelsStage:
+    normalized_for_print: np.ndarray
+    histogram: np.ndarray
+    auto_levels: dict[str, int]
+    mask_rgb: np.ndarray
+    film_rect_preview: ImageRect
+    camera_to_srgb_matrix: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class NegpyColorStage:
+    color_linear_rgb: np.ndarray
+    histogram: np.ndarray
+    auto_levels: dict[str, int]
+    wb_gains: np.ndarray
+    mask_rgb: np.ndarray
+    film_rect_preview: ImageRect
+
+
 def process_negative_preview(
     preview_linear_rgb: np.ndarray,
     *,
@@ -351,6 +381,13 @@ def process_negpy_print_preview(
     base: NegativeBasePreview,
     adjustments: AdjustmentParams,
 ) -> NegativePreviewResult:
+    negative_stage = build_negpy_negative_stage(base)
+    levels_stage = build_negpy_levels_stage(negative_stage, adjustments)
+    color_stage = build_negpy_color_stage(levels_stage, adjustments)
+    return build_negpy_display_stage(color_stage, adjustments)
+
+
+def build_negpy_negative_stage(base: NegativeBasePreview) -> NegpyNegativeStage:
     source_linear = (
         base.film_camera_wb_linear_rgb
         if base.film_camera_wb_linear_rgb is not None
@@ -362,14 +399,48 @@ def process_negpy_print_preview(
     )
     positive_control = 1.0 - normalized_log
     histogram = luminance_histogram(positive_control)
-    auto_levels = suggest_negpy_print_luminance_levels(
-        normalized_log,
-        adjustments,
+
+    return NegpyNegativeStage(
+        normalized_log=normalized_log,
+        positive_control=positive_control,
+        histogram=histogram,
+        mask_rgb=base.mask_rgb,
+        film_rect_preview=base.film_rect_preview,
         camera_to_srgb_matrix=base.camera_to_srgb_matrix,
     )
 
-    positive_control = apply_unit_levels(positive_control, adjustments, clip=True)
+
+def build_negpy_levels_stage(
+    negative_stage: NegpyNegativeStage,
+    adjustments: AdjustmentParams,
+    *,
+    auto_levels: dict[str, int] | None = None,
+) -> NegpyLevelsStage:
+    if auto_levels is None:
+        auto_levels = suggest_negpy_print_luminance_levels(
+            negative_stage.normalized_log,
+            adjustments,
+            camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
+        )
+
+    positive_control = apply_unit_levels(negative_stage.positive_control, adjustments, clip=True)
     normalized_for_print = np.clip(1.0 - positive_control, 0.0, 1.0)
+
+    return NegpyLevelsStage(
+        normalized_for_print=normalized_for_print,
+        histogram=negative_stage.histogram,
+        auto_levels=auto_levels,
+        mask_rgb=negative_stage.mask_rgb,
+        film_rect_preview=negative_stage.film_rect_preview,
+        camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
+    )
+
+
+def build_negpy_color_stage(
+    levels_stage: NegpyLevelsStage,
+    adjustments: AdjustmentParams,
+) -> NegpyColorStage:
+    normalized_for_print = levels_stage.normalized_for_print
 
     if adjustments.auto_wb:
         cmy_offsets = estimate_negpy_auto_cmy_offsets(normalized_for_print)
@@ -383,7 +454,7 @@ def process_negpy_print_preview(
     )
     processed = apply_output_color_transform(
         processed,
-        base.camera_to_srgb_matrix,
+        levels_stage.camera_to_srgb_matrix,
         adjustments.camera_color_strength,
     )
     processed = apply_log_color_separation(
@@ -391,7 +462,25 @@ def process_negpy_print_preview(
         strength=NEGPY_COLOR_SEPARATION_STRENGTH,
     )
     processed = apply_color_balance(processed, adjustments.color_balance)
-    processed = apply_highlight_shadow_adjustments(processed, adjustments)
+
+    return NegpyColorStage(
+        color_linear_rgb=processed,
+        histogram=levels_stage.histogram,
+        auto_levels=levels_stage.auto_levels,
+        wb_gains=cmy_offsets.astype(np.float32, copy=False),
+        mask_rgb=levels_stage.mask_rgb,
+        film_rect_preview=levels_stage.film_rect_preview,
+    )
+
+
+def build_negpy_display_stage(
+    color_stage: NegpyColorStage,
+    adjustments: AdjustmentParams,
+) -> NegativePreviewResult:
+    processed = apply_highlight_shadow_adjustments(
+        color_stage.color_linear_rgb,
+        adjustments,
+    )
     color_balanced = processed
     processed = apply_saturation_adjustment(processed, adjustments)
     display_rgb8 = linear_to_srgb8(processed)
@@ -400,11 +489,11 @@ def process_negpy_print_preview(
         display_rgb8=display_rgb8,
         processed_linear_rgb=processed,
         color_balanced_linear_rgb=color_balanced,
-        histogram=histogram,
-        auto_levels=auto_levels,
-        wb_gains=cmy_offsets.astype(np.float32, copy=False),
-        mask_rgb=base.mask_rgb,
-        film_rect_preview=base.film_rect_preview,
+        histogram=color_stage.histogram,
+        auto_levels=color_stage.auto_levels,
+        wb_gains=color_stage.wb_gains,
+        mask_rgb=color_stage.mask_rgb,
+        film_rect_preview=color_stage.film_rect_preview,
     )
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -34,8 +34,15 @@ from qnegative.core.models import (
 from qnegative.core.pipeline import (
     DensityPreviewAnalysis,
     NegativeBasePreview,
+    NegpyColorStage,
+    NegpyLevelsStage,
+    NegpyNegativeStage,
     NegativePreviewResult,
     PipelineError,
+    build_negpy_color_stage,
+    build_negpy_display_stage,
+    build_negpy_levels_stage,
+    build_negpy_negative_stage,
     build_negative_base_preview,
     build_density_preview_analysis,
     process_negative_base_preview,
@@ -53,6 +60,161 @@ class PreviewRenderSignals(QObject):
     failed = Signal(int, str, bool)
 
 
+@dataclass(frozen=True)
+class PreviewStageCache:
+    base_key: tuple | None = None
+    base: NegativeBasePreview | None = None
+    negative_key: tuple | None = None
+    negative_stage: NegpyNegativeStage | None = None
+    levels_key: tuple | None = None
+    levels_stage: NegpyLevelsStage | None = None
+    color_key: tuple | None = None
+    color_stage: NegpyColorStage | None = None
+    display_key: tuple | None = None
+    display_result: NegativePreviewResult | None = None
+
+
+@dataclass(frozen=True)
+class PreviewRenderOutput:
+    result: NegativePreviewResult
+    cache: PreviewStageCache
+
+
+def current_levels(adjustments: AdjustmentParams) -> dict[str, int]:
+    return {
+        "black_point": adjustments.black_point,
+        "mid_point": adjustments.mid_point,
+        "white_point": adjustments.white_point,
+    }
+
+
+def image_point_key(point: ImagePoint | None) -> tuple[int, int] | None:
+    if point is None:
+        return None
+    return (point.x, point.y)
+
+
+def image_rect_key(rect: ImageRect | None) -> tuple[int, int, int, int, float] | None:
+    if rect is None:
+        return None
+    return (rect.x, rect.y, rect.width, rect.height, round(rect.angle, 4))
+
+
+def matrix_key(matrix: np.ndarray | None) -> tuple[float, ...] | None:
+    if matrix is None:
+        return None
+    values = np.asarray(matrix, dtype=np.float32).reshape(-1)
+    return tuple(round(float(value), 7) for value in values)
+
+
+def balance_axis_key(axis) -> tuple[int, int, int]:
+    return (axis.red_cyan, axis.green_magenta, axis.blue_yellow)
+
+
+def tonal_balance_key(axis) -> tuple[int, int, int, int]:
+    return (
+        axis.red_cyan,
+        axis.green_magenta,
+        axis.blue_yellow,
+        axis.tonal_range,
+    )
+
+
+def color_balance_key(adjustments: AdjustmentParams) -> tuple:
+    params = adjustments.color_balance
+    return (
+        balance_axis_key(params.global_balance),
+        tonal_balance_key(params.shadows),
+        tonal_balance_key(params.midtones),
+        tonal_balance_key(params.highlights),
+    )
+
+
+def base_stage_key(
+    preview: RawPreview,
+    mask_point: ImagePoint | None,
+    film_rect: ImageRect | None,
+) -> tuple:
+    return (
+        "base",
+        preview.path,
+        preview.source_size,
+        preview.preview_linear_rgb.shape,
+        id(preview.preview_linear_rgb),
+        id(preview.preview_camera_wb_linear_rgb),
+        matrix_key(preview.camera_to_srgb_matrix),
+        image_point_key(mask_point),
+        image_rect_key(film_rect),
+    )
+
+
+def lab_print_auto_key(adjustments: AdjustmentParams) -> tuple:
+    return (
+        adjustments.print_curve,
+        adjustments.exposure,
+        adjustments.contrast,
+        adjustments.soft_highlights,
+        adjustments.soft_shadows,
+        adjustments.auto_wb,
+        adjustments.camera_color_strength,
+        color_balance_key(adjustments),
+        adjustments.highlights,
+        adjustments.shadows,
+    )
+
+
+def lab_print_levels_key(
+    negative_key: tuple,
+    adjustments: AdjustmentParams,
+    *,
+    auto_levels_pending: bool,
+) -> tuple:
+    auto_part = lab_print_auto_key(adjustments) if auto_levels_pending else "manual"
+    return (
+        "lab_print_levels",
+        negative_key,
+        adjustments.black_point,
+        adjustments.mid_point,
+        adjustments.white_point,
+        auto_part,
+    )
+
+
+def lab_print_color_key(levels_key: tuple, adjustments: AdjustmentParams) -> tuple:
+    return (
+        "lab_print_color",
+        levels_key,
+        adjustments.print_curve,
+        adjustments.exposure,
+        adjustments.contrast,
+        adjustments.soft_highlights,
+        adjustments.soft_shadows,
+        adjustments.auto_wb,
+        adjustments.camera_color_strength,
+        color_balance_key(adjustments),
+    )
+
+
+def lab_print_display_key(color_key: tuple, adjustments: AdjustmentParams) -> tuple:
+    return (
+        "lab_print_display",
+        color_key,
+        adjustments.highlights,
+        adjustments.shadows,
+        adjustments.saturation,
+    )
+
+
+def invert_mode_label(mode: str) -> str:
+    labels = {
+        InvertMode.NEGPY_PRINT.value: "Lab Print",
+        InvertMode.DENSITY.value: "Density",
+        InvertMode.LOG_BOUNDS.value: "Log Bounds",
+        InvertMode.SIMPLE.value: "Simple",
+    }
+    return labels.get(mode, mode)
+
+
 class PreviewRenderTask(QRunnable):
     def __init__(
         self,
@@ -64,6 +226,7 @@ class PreviewRenderTask(QRunnable):
         adjustments: AdjustmentParams,
         auto_levels_pending: bool,
         show_errors: bool,
+        render_cache: PreviewStageCache | None = None,
     ) -> None:
         super().__init__()
         self.job_id = job_id
@@ -73,24 +236,104 @@ class PreviewRenderTask(QRunnable):
         self.adjustments = deepcopy(adjustments)
         self.auto_levels_pending = auto_levels_pending
         self.show_errors = show_errors
+        self.render_cache = render_cache or PreviewStageCache()
         self.signals = PreviewRenderSignals()
 
     def run(self) -> None:
         try:
-            base = build_negative_base_preview(
-                self.preview.preview_linear_rgb,
-                source_size=self.preview.source_size,
-                mask_point=self.mask_point,
-                film_rect=self.film_rect,
-                preview_camera_wb_linear_rgb=self.preview.preview_camera_wb_linear_rgb,
-                camera_to_srgb_matrix=self.preview.camera_to_srgb_matrix,
-            )
-            result = process_negative_base_preview(base, self.adjustments)
+            base_key = base_stage_key(self.preview, self.mask_point, self.film_rect)
+            base = self._base_stage(base_key)
+            if self.adjustments.invert_mode == InvertMode.NEGPY_PRINT.value:
+                output = self._lab_print_output(base_key, base)
+            else:
+                result = process_negative_base_preview(base, self.adjustments)
+                output = PreviewRenderOutput(
+                    result=result,
+                    cache=PreviewStageCache(base_key=base_key, base=base),
+                )
         except Exception as exc:
             self.signals.failed.emit(self.job_id, str(exc), self.show_errors)
             return
 
-        self.signals.finished.emit(self.job_id, result, self.show_errors)
+        self.signals.finished.emit(self.job_id, output, self.show_errors)
+
+    def _base_stage(self, base_key: tuple) -> NegativeBasePreview:
+        if self.render_cache.base_key == base_key and self.render_cache.base is not None:
+            return self.render_cache.base
+
+        return build_negative_base_preview(
+            self.preview.preview_linear_rgb,
+            source_size=self.preview.source_size,
+            mask_point=self.mask_point,
+            film_rect=self.film_rect,
+            preview_camera_wb_linear_rgb=self.preview.preview_camera_wb_linear_rgb,
+            camera_to_srgb_matrix=self.preview.camera_to_srgb_matrix,
+        )
+
+    def _lab_print_output(
+        self,
+        base_key: tuple,
+        base: NegativeBasePreview,
+    ) -> PreviewRenderOutput:
+        negative_key = ("lab_print_negative", base_key)
+        if (
+            self.render_cache.negative_key == negative_key
+            and self.render_cache.negative_stage is not None
+        ):
+            negative_stage = self.render_cache.negative_stage
+        else:
+            negative_stage = build_negpy_negative_stage(base)
+
+        levels_key = lab_print_levels_key(
+            negative_key,
+            self.adjustments,
+            auto_levels_pending=self.auto_levels_pending,
+        )
+        if (
+            self.render_cache.levels_key == levels_key
+            and self.render_cache.levels_stage is not None
+        ):
+            levels_stage = self.render_cache.levels_stage
+        else:
+            levels_stage = build_negpy_levels_stage(
+                negative_stage,
+                self.adjustments,
+                auto_levels=None if self.auto_levels_pending else current_levels(self.adjustments),
+            )
+
+        color_key = lab_print_color_key(levels_key, self.adjustments)
+        if (
+            self.render_cache.color_key == color_key
+            and self.render_cache.color_stage is not None
+        ):
+            color_stage = self.render_cache.color_stage
+        else:
+            color_stage = build_negpy_color_stage(levels_stage, self.adjustments)
+
+        display_key = lab_print_display_key(color_key, self.adjustments)
+        if (
+            self.render_cache.display_key == display_key
+            and self.render_cache.display_result is not None
+        ):
+            result = self.render_cache.display_result
+        else:
+            result = build_negpy_display_stage(color_stage, self.adjustments)
+
+        return PreviewRenderOutput(
+            result=result,
+            cache=PreviewStageCache(
+                base_key=base_key,
+                base=base,
+                negative_key=negative_key,
+                negative_stage=negative_stage,
+                levels_key=levels_key,
+                levels_stage=levels_stage,
+                color_key=color_key,
+                color_stage=color_stage,
+                display_key=display_key,
+                display_result=result,
+            ),
+        )
 
 
 class ExportSignals(QObject):
@@ -214,6 +457,7 @@ class MainWindow(QMainWindow):
         self._negative_base_cache_key: tuple[object, ...] | None = None
         self._density_analysis_cache: DensityPreviewAnalysis | None = None
         self._density_analysis_cache_key: tuple[object, ...] | None = None
+        self._preview_stage_cache = PreviewStageCache()
         self._last_untransformed_negative_result: NegativePreviewResult | None = None
         self._preview_flip_horizontal = False
         self._preview_flip_vertical = False
@@ -544,6 +788,7 @@ class MainWindow(QMainWindow):
             adjustments=self.adjustments,
             auto_levels_pending=self.auto_levels_pending,
             show_errors=show_errors,
+            render_cache=self._preview_stage_cache,
         )
         task.signals.finished.connect(self._preview_render_finished)
         task.signals.failed.connect(self._preview_render_failed)
@@ -552,11 +797,13 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(task)
         return True
 
-    def _preview_render_finished(self, job_id: int, result: NegativePreviewResult, show_errors: bool) -> None:
+    def _preview_render_finished(self, job_id: int, output: PreviewRenderOutput, show_errors: bool) -> None:
         if job_id != self._render_job_id:
             return
 
         self._render_in_progress = False
+        self._preview_stage_cache = output.cache
+        result = output.result
 
         if self._render_pending:
             pending_show_errors = self._render_pending_show_errors
@@ -584,7 +831,7 @@ class MainWindow(QMainWindow):
             else "WB gain"
         )
         self.control_panel.set_image_status(
-            f"Positive preview {displayed_result.width} x {displayed_result.height}\nMode {self.adjustments.invert_mode}\nBase RGB {mask_rgb}\n{wb_label} {wb_gains}"
+            f"Positive preview {displayed_result.width} x {displayed_result.height}\nMode {invert_mode_label(self.adjustments.invert_mode)}\nBase RGB {mask_rgb}\n{wb_label} {wb_gains}"
         )
         self.control_panel.set_histogram(displayed_result.histogram)
         self.negative_preview_active = True
@@ -713,6 +960,7 @@ class MainWindow(QMainWindow):
     def _invalidate_negative_base_cache(self) -> None:
         self._negative_base_cache = None
         self._negative_base_cache_key = None
+        self._preview_stage_cache = PreviewStageCache()
         self._invalidate_density_analysis_cache()
         self.last_negative_result = None
         self._last_untransformed_negative_result = None

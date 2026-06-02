@@ -66,7 +66,7 @@ class ControlPanel(QWidget):
         self.invert_button.setEnabled(False)
         self.reset_button = QPushButton("Reset")
         self.invert_mode_combo = QComboBox()
-        self.invert_mode_combo.addItem("NegPy Print", InvertMode.NEGPY_PRINT.value)
+        self.invert_mode_combo.addItem("Lab Print", InvertMode.NEGPY_PRINT.value)
         self.invert_mode_combo.addItem("Density", InvertMode.DENSITY.value)
         self.invert_mode_combo.addItem("Log Bounds", InvertMode.LOG_BOUNDS.value)
         self.invert_mode_combo.addItem("Simple", InvertMode.SIMPLE.value)
