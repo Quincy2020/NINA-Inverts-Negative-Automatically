@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+*.arw
+*.ARW
+*.raw
+*.dng
+*.xmp
+
+exports/
+output/
+tmp/
+
+calibration_debug/
+calibration_look/
+references/
+negative file/
+posituve file/
