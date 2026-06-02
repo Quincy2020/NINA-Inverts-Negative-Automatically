@@ -32,6 +32,7 @@ class ControlPanel(QWidget):
     invertRequested = Signal()
     resetRequested = Signal()
     toolChanged = Signal(object)
+    autoDetectRequested = Signal(str)
     adjustmentsChanged = Signal(dict)
     adjustmentInteractionStarted = Signal()
     adjustmentInteractionFinished = Signal()
@@ -68,7 +69,7 @@ class ControlPanel(QWidget):
         self.invert_button.setEnabled(False)
         self.reset_button = QPushButton("Reset")
         self.invert_mode_combo = QComboBox()
-        self.invert_mode_combo.addItem("Lab Print", InvertMode.NEGPY_PRINT.value)
+        self.invert_mode_combo.addItem("Lab Print", InvertMode.LAB_PRINT.value)
         self.invert_mode_combo.addItem("Density", InvertMode.DENSITY.value)
         self.invert_mode_combo.addItem("Log Bounds", InvertMode.LOG_BOUNDS.value)
         self.invert_mode_combo.addItem("Simple", InvertMode.SIMPLE.value)
@@ -88,6 +89,17 @@ class ControlPanel(QWidget):
         self.mask_picker_button = self._make_tool_button("Base Picker", ToolMode.MASK_PICKER)
         self.film_rect_button = self._make_tool_button("Frame Area", ToolMode.FILM_RECT)
         self.mask_picker_button.setChecked(True)
+        self.auto_format_combo = QComboBox()
+        self.auto_format_combo.addItem("Auto", "auto")
+        self.auto_format_combo.addItem("135", "135")
+        self.auto_format_combo.addItem("645", "645")
+        self.auto_format_combo.addItem("66", "66")
+        self.auto_format_combo.addItem("67", "67")
+        self.auto_format_combo.addItem("69", "69")
+        self._style_combo_popup(self.auto_format_combo)
+        self.auto_frame_base_button = QPushButton("Frame + Base")
+        self.auto_frame_button = QPushButton("Frame Only")
+        self.auto_base_button = QPushButton("Base Only")
 
         self.exposure_slider = self._make_slider(-100, 100, 0)
         self.highlights_slider = self._make_slider(-100, 100, 0)
@@ -103,6 +115,7 @@ class ControlPanel(QWidget):
         self._build_layout()
         self._connect()
         self._apply_style()
+        self.set_image_loaded(False)
 
     def _build_layout(self) -> None:
         outer = QVBoxLayout(self)
@@ -128,6 +141,7 @@ class ControlPanel(QWidget):
 
         root.addWidget(self._file_section())
         root.addWidget(self._histogram_section())
+        root.addWidget(self._auto_detect_section())
         root.addWidget(self._tools_section())
         root.addWidget(self._selection_section())
         root.addWidget(self._invert_section())
@@ -146,6 +160,21 @@ class ControlPanel(QWidget):
         layout.addWidget(self.file_label)
         layout.addWidget(self.image_label)
         layout.addWidget(self.sequence_label)
+        return group
+
+    def _auto_detect_section(self) -> QGroupBox:
+        group = self._section("Auto Detect")
+        layout = QVBoxLayout(group)
+        format_row = QHBoxLayout()
+        format_row.addWidget(QLabel("Format"))
+        format_row.addWidget(self.auto_format_combo, 1)
+        layout.addLayout(format_row)
+
+        row = QHBoxLayout()
+        row.addWidget(self.auto_frame_base_button)
+        row.addWidget(self.auto_frame_button)
+        row.addWidget(self.auto_base_button)
+        layout.addLayout(row)
         return group
 
     def _histogram_section(self) -> QGroupBox:
@@ -234,7 +263,7 @@ class ControlPanel(QWidget):
         layout.setSpacing(10)
         layout.addLayout(self._slider_row("Camera Color", self.camera_color_slider, "0", "100"))
 
-        hint = QLabel("Camera transform mix. Keep at 0 for the current NegPy print workflow.")
+        hint = QLabel("Camera transform mix. Keep at 0 for the current Lab Print workflow.")
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -277,6 +306,9 @@ class ControlPanel(QWidget):
         self.export_button.clicked.connect(self.exportRequested.emit)
         self.invert_button.clicked.connect(self.invertRequested.emit)
         self.reset_button.clicked.connect(self.resetRequested.emit)
+        self.auto_frame_base_button.clicked.connect(lambda: self.autoDetectRequested.emit("frame_base"))
+        self.auto_frame_button.clicked.connect(lambda: self.autoDetectRequested.emit("frame"))
+        self.auto_base_button.clicked.connect(lambda: self.autoDetectRequested.emit("base"))
         self.tool_group.idClicked.connect(self._emit_tool_mode)
         self.invert_mode_combo.currentIndexChanged.connect(self._emit_adjustments)
         self.print_curve_combo.currentIndexChanged.connect(self._print_curve_changed)
@@ -398,6 +430,13 @@ class ControlPanel(QWidget):
     def set_image_loaded(self, loaded: bool) -> None:
         self.invert_button.setEnabled(loaded)
         self.export_button.setEnabled(loaded and not self.export_progress.isVisible())
+        self.auto_frame_base_button.setEnabled(loaded)
+        self.auto_frame_button.setEnabled(loaded)
+        self.auto_base_button.setEnabled(loaded)
+
+    def auto_format(self) -> str:
+        data = self.auto_format_combo.currentData()
+        return str(data or "auto")
 
     def set_file_status(self, text: str) -> None:
         self.file_label.setText(text)

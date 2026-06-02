@@ -21,6 +21,13 @@ from PySide6.QtWidgets import (
 )
 
 from qnegative.core.file_sequence import IMAGE_EXTENSIONS, RAW_EXTENSIONS, list_supported_files
+from qnegative.core.auto_detect import (
+    AutoBaseResult,
+    AutoFrameResult,
+    detect_film_base,
+    detect_frame_and_base,
+    detect_film_frame,
+)
 from qnegative.core.models import (
     AdjustmentParams,
     DensityMatrixParams,
@@ -34,20 +41,20 @@ from qnegative.core.models import (
 from qnegative.core.pipeline import (
     DensityPreviewAnalysis,
     NegativeBasePreview,
-    NegpyColorStage,
-    NegpyLevelsStage,
-    NegpyNegativeStage,
+    LabPrintColorStage,
+    LabPrintLevelsStage,
+    LabPrintNegativeStage,
     NegativePreviewResult,
     PipelineError,
-    build_negpy_color_stage,
-    build_negpy_display_stage,
-    build_negpy_export_linear,
-    build_negpy_levels_stage,
-    build_negpy_negative_stage,
+    build_lab_print_color_stage,
+    build_lab_print_display_stage,
+    build_lab_print_export_linear,
+    build_lab_print_levels_stage,
+    build_lab_print_negative_stage,
     build_negative_base_preview,
     build_density_preview_analysis,
     process_negative_base_preview,
-    suggest_negpy_print_luminance_levels,
+    suggest_lab_print_luminance_levels,
     suggest_global_balance_from_neutral,
 )
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview, make_raw_preview, resize_long_edge
@@ -75,11 +82,11 @@ class PreviewStageCache:
     base_key: tuple | None = None
     base: NegativeBasePreview | None = None
     negative_key: tuple | None = None
-    negative_stage: NegpyNegativeStage | None = None
+    negative_stage: LabPrintNegativeStage | None = None
     levels_key: tuple | None = None
-    levels_stage: NegpyLevelsStage | None = None
+    levels_stage: LabPrintLevelsStage | None = None
     color_key: tuple | None = None
-    color_stage: NegpyColorStage | None = None
+    color_stage: LabPrintColorStage | None = None
     display_key: tuple | None = None
     display_result: NegativePreviewResult | None = None
 
@@ -242,7 +249,7 @@ def lab_print_display_key(color_key: tuple, adjustments: AdjustmentParams) -> tu
 
 def invert_mode_label(mode: str) -> str:
     labels = {
-        InvertMode.NEGPY_PRINT.value: "Lab Print",
+        InvertMode.LAB_PRINT.value: "Lab Print",
         InvertMode.DENSITY.value: "Density",
         InvertMode.LOG_BOUNDS.value: "Log Bounds",
         InvertMode.SIMPLE.value: "Simple",
@@ -280,7 +287,7 @@ class PreviewRenderTask(QRunnable):
         try:
             base_key = base_stage_key(self.preview, self.mask_point, self.film_rect)
             base = self._base_stage(base_key)
-            if self.adjustments.invert_mode == InvertMode.NEGPY_PRINT.value:
+            if self.adjustments.invert_mode == InvertMode.LAB_PRINT.value:
                 output = self._lab_print_output(base_key, base)
             else:
                 result = process_negative_base_preview(base, self.adjustments)
@@ -320,7 +327,7 @@ class PreviewRenderTask(QRunnable):
         ):
             negative_stage = self.render_cache.negative_stage
         else:
-            negative_stage = build_negpy_negative_stage(base)
+            negative_stage = build_lab_print_negative_stage(base)
 
         levels_key = lab_print_levels_key(
             negative_key,
@@ -333,7 +340,7 @@ class PreviewRenderTask(QRunnable):
         ):
             levels_stage = self.render_cache.levels_stage
         else:
-            levels_stage = build_negpy_levels_stage(
+            levels_stage = build_lab_print_levels_stage(
                 negative_stage,
                 self.adjustments,
                 auto_levels=None if self.auto_levels_pending else current_levels(self.adjustments),
@@ -346,7 +353,7 @@ class PreviewRenderTask(QRunnable):
         ):
             color_stage = self.render_cache.color_stage
         else:
-            color_stage = build_negpy_color_stage(levels_stage, self.adjustments)
+            color_stage = build_lab_print_color_stage(levels_stage, self.adjustments)
 
         display_key = lab_print_display_key(color_key, self.adjustments)
         if (
@@ -355,7 +362,7 @@ class PreviewRenderTask(QRunnable):
         ):
             result = self.render_cache.display_result
         else:
-            result = build_negpy_display_stage(color_stage, self.adjustments)
+            result = build_lab_print_display_stage(color_stage, self.adjustments)
 
         return PreviewRenderOutput(
             result=result,
@@ -449,7 +456,7 @@ class TiffExportTask(QRunnable):
         self.signals.finished.emit(str(self.output_path))
 
     def _process_export(self, base: NegativeBasePreview) -> np.ndarray:
-        if self.adjustments.invert_mode != InvertMode.NEGPY_PRINT.value:
+        if self.adjustments.invert_mode != InvertMode.LAB_PRINT.value:
             result = process_negative_base_preview(base, self.adjustments)
             if self.auto_levels_pending:
                 adjusted = deepcopy(self.adjustments)
@@ -459,10 +466,10 @@ class TiffExportTask(QRunnable):
                 result = process_negative_base_preview(base, adjusted)
             return result.processed_linear_rgb
 
-        negative_stage = build_negpy_negative_stage(base, include_histogram=False)
+        negative_stage = build_lab_print_negative_stage(base, include_histogram=False)
         effective = deepcopy(self.adjustments)
         if self.auto_levels_pending:
-            auto_levels = suggest_negpy_print_luminance_levels(
+            auto_levels = suggest_lab_print_luminance_levels(
                 negative_stage.normalized_log,
                 effective,
                 camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
@@ -473,13 +480,13 @@ class TiffExportTask(QRunnable):
         else:
             auto_levels = current_levels(effective)
 
-        levels_stage = build_negpy_levels_stage(
+        levels_stage = build_lab_print_levels_stage(
             negative_stage,
             effective,
             auto_levels=auto_levels,
         )
-        color_stage = build_negpy_color_stage(levels_stage, effective)
-        return build_negpy_export_linear(color_stage, effective)
+        color_stage = build_lab_print_color_stage(levels_stage, effective)
+        return build_lab_print_export_linear(color_stage, effective)
 
 
 def transform_preview_array(
@@ -506,7 +513,7 @@ def linear_to_srgb16(linear_rgb: np.ndarray) -> np.ndarray:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, *, default_invert_mode: str = InvertMode.NEGPY_PRINT.value) -> None:
+    def __init__(self, *, default_invert_mode: str = InvertMode.LAB_PRINT.value) -> None:
         super().__init__()
         self.setWindowTitle("QNegativeLab")
         self.default_invert_mode = default_invert_mode
@@ -624,6 +631,7 @@ class MainWindow(QMainWindow):
         self.control_panel.invertRequested.connect(self.preview_inversion)
         self.control_panel.resetRequested.connect(self.reset_workspace)
         self.control_panel.toolChanged.connect(self.set_tool_mode)
+        self.control_panel.autoDetectRequested.connect(self.auto_detect_current)
         self.control_panel.adjustmentsChanged.connect(self.adjustments_changed)
         self.control_panel.adjustmentInteractionStarted.connect(self.adjustment_interaction_started)
         self.control_panel.adjustmentInteractionFinished.connect(self.adjustment_interaction_finished)
@@ -815,6 +823,99 @@ class MainWindow(QMainWindow):
             f"WB picker: x={point.x}, y={point.y}, sample RGB {sample_text}, gains {gain_text}"
         )
 
+    def auto_detect_current(self, mode: str) -> None:
+        if self.current_preview is None:
+            QMessageBox.information(self, "Auto Detect", "Open a RAW file before auto detection.")
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        frame_result: AutoFrameResult | None = None
+        base_result: AutoBaseResult | None = None
+        try:
+            if mode == "frame_base":
+                result = detect_frame_and_base(
+                    self.current_preview.preview_linear_rgb,
+                    preview_size=self.current_preview.preview_size,
+                    source_size=self.current_preview.source_size,
+                    format_hint=self.control_panel.auto_format(),
+                )
+                frame_result = result.frame
+                base_result = result.base
+            elif mode == "frame":
+                frame_result = detect_film_frame(
+                    self.current_preview.preview_linear_rgb,
+                    preview_size=self.current_preview.preview_size,
+                    source_size=self.current_preview.source_size,
+                    format_hint=self.control_panel.auto_format(),
+                )
+            elif mode == "base":
+                base_result = detect_film_base(
+                    self.current_preview.preview_linear_rgb,
+                    preview_size=self.current_preview.preview_size,
+                    source_size=self.current_preview.source_size,
+                    frame_rect=self.film_rect,
+                )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        used_fallback = False
+        fallback_state = self._previous_image_state()
+        if mode in {"frame", "frame_base"} and frame_result is None and fallback_state is not None:
+            frame_result = AutoFrameResult(
+                rect=fallback_state.film_rect,
+                confidence=0.35,
+                confidence_level="fallback",
+                format_hint="previous",
+                method="previous-image",
+            ) if fallback_state.film_rect is not None else None
+            used_fallback = frame_result is not None
+        if mode in {"base", "frame_base"} and base_result is None and fallback_state is not None:
+            base_result = AutoBaseResult(
+                point=fallback_state.mask_point,
+                rgb=None,
+                confidence=0.35,
+                confidence_level="fallback",
+                source="previous-image",
+            ) if fallback_state.mask_point is not None else None
+            used_fallback = used_fallback or base_result is not None
+
+        changed = False
+        details: list[str] = []
+        if frame_result is not None and mode in {"frame", "frame_base"}:
+            self.film_rect = frame_result.rect
+            self.control_panel.set_film_status(
+                f"Frame: {frame_result.rect.label()}\nAuto {frame_result.confidence_level} "
+                f"{frame_result.confidence:.2f}, {frame_result.format_hint}, {frame_result.method}"
+            )
+            details.append(f"frame {frame_result.confidence_level} {frame_result.confidence:.2f}")
+            changed = True
+        if base_result is not None and mode in {"base", "frame_base"} and base_result.point is not None:
+            self.mask_point = base_result.point
+            self.control_panel.set_mask_status(
+                f"Base point: x={base_result.point.x}, y={base_result.point.y}\nAuto "
+                f"{base_result.confidence_level} {base_result.confidence:.2f}, {base_result.source}"
+            )
+            details.append(f"base {base_result.confidence_level} {base_result.confidence:.2f}")
+            changed = True
+
+        if not changed:
+            self.statusBar().showMessage("Auto detect failed. Please select frame/base manually.")
+            QMessageBox.information(self, "Auto Detect", "No reliable frame or base was detected. Please select manually.")
+            return
+
+        self.white_balance_point = None
+        self.auto_levels_pending = True
+        self._invalidate_negative_base_cache()
+        self.origin_view.restore_selections(
+            mask_point=self.mask_point,
+            film_rect=self.film_rect,
+            white_balance_point=None,
+        )
+        self.preview_tabs.setCurrentWidget(self.origin_view)
+        suffix = " using previous image fallback" if used_fallback else ""
+        self.statusBar().showMessage(f"Auto detect applied: {', '.join(details)}{suffix}")
+        self._schedule_preview_if_ready()
+
     def adjustment_interaction_started(self) -> None:
         self._interactive_adjustment_active = True
         self.preview_refresh_timer.setInterval(INTERACTIVE_RENDER_DEBOUNCE_MS)
@@ -949,7 +1050,7 @@ class MainWindow(QMainWindow):
         wb_label = (
             "WB CMY offset"
             if self.adjustments.invert_mode
-            in (InvertMode.LOG_BOUNDS.value, InvertMode.NEGPY_PRINT.value)
+            in (InvertMode.LOG_BOUNDS.value, InvertMode.LAB_PRINT.value)
             else "WB gain"
         )
         self.control_panel.set_image_status(
@@ -1331,6 +1432,25 @@ class MainWindow(QMainWindow):
 
         if state.negative_preview_active:
             self._queue_negative_render(show_errors=False)
+
+    def _previous_image_state(self) -> ImageProcessingState | None:
+        if not self.folder_files:
+            return None
+        candidate_paths: list[Path] = []
+        if 0 <= self.current_index < len(self.folder_files):
+            candidate_paths.extend(reversed(self.folder_files[: self.current_index]))
+            candidate_paths.extend(self.folder_files[self.current_index + 1 :])
+        candidate_paths.extend(path for path in self.image_states if path not in candidate_paths)
+
+        for path in candidate_paths:
+            if path == self.current_path:
+                continue
+            state = self.image_states.get(path)
+            if state is None:
+                continue
+            if state.film_rect is not None or state.mask_point is not None:
+                return state
+        return None
 
     def _default_adjustments(self) -> AdjustmentParams:
         return AdjustmentParams(invert_mode=self.default_invert_mode)

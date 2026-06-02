@@ -21,19 +21,20 @@ LOG_TOE_WIDTH = 2.5
 LOG_SHOULDER_WIDTH = 2.5
 LOG_COLOR_SEPARATION_STRENGTH = 0.5
 LOG_AUTO_WB_MAX_OFFSET = 0.025
-NEGPY_LOG_PERCENTILE_CLIP = 0.02
-NEGPY_AUTO_WB_STRENGTH = 0.18
-NEGPY_AUTO_WB_MAX_OFFSET = 0.04
-NEGPY_COLOR_SEPARATION_STRENGTH = 0.45
-NEGPY_AUTO_EXPOSURE_SAMPLE_LIMIT = 180_000
-NEGPY_AUTO_BLACK_PERCENTILE = 0.25
-NEGPY_AUTO_WHITE_PERCENTILE = 99.75
-NEGPY_AUTO_BLACK_PADDING = 0.060
-NEGPY_AUTO_WHITE_PADDING = 0.085
-NEGPY_AUTO_MIN_SPAN = 0.54
-NEGPY_AUTO_MID_LOW = 0.04
-NEGPY_AUTO_MID_HIGH = 0.74
-NEGPY_AUTO_VISUAL_TARGET = 0.30
+LAB_PRINT_LOG_PERCENTILE_CLIP = 0.02
+LAB_PRINT_AUTO_WB_STRENGTH = 0.18
+LAB_PRINT_AUTO_WB_MAX_OFFSET = 0.04
+LAB_PRINT_COLOR_SEPARATION_STRENGTH = 0.45
+LAB_PRINT_AUTO_EXPOSURE_SAMPLE_LIMIT = 180_000
+LAB_PRINT_AUTO_BLACK_PERCENTILE = 0.25
+LAB_PRINT_AUTO_WHITE_PERCENTILE = 99.75
+LAB_PRINT_AUTO_BLACK_PADDING = 0.060
+LAB_PRINT_AUTO_WHITE_PADDING = 0.085
+LAB_PRINT_AUTO_MIN_SPAN = 0.54
+LAB_PRINT_AUTO_MID_LOW = 0.04
+LAB_PRINT_AUTO_MID_HIGH = 0.74
+LAB_PRINT_AUTO_VISUAL_TARGET = 0.30
+LAB_PRINT_ANALYSIS_INSET = 0.05
 GLOBAL_BALANCE_SCALE = 55.0
 TONAL_BALANCE_SCALE = 75.0
 FILMIC_LUT_SIZE = 4096
@@ -115,7 +116,7 @@ class NegativePreviewResult:
 
 
 @dataclass(frozen=True)
-class NegpyNegativeStage:
+class LabPrintNegativeStage:
     normalized_log: np.ndarray
     positive_control: np.ndarray
     histogram: np.ndarray
@@ -125,7 +126,7 @@ class NegpyNegativeStage:
 
 
 @dataclass(frozen=True)
-class NegpyLevelsStage:
+class LabPrintLevelsStage:
     normalized_for_print: np.ndarray
     histogram: np.ndarray
     auto_levels: dict[str, int]
@@ -135,7 +136,7 @@ class NegpyLevelsStage:
 
 
 @dataclass(frozen=True)
-class NegpyColorStage:
+class LabPrintColorStage:
     color_linear_rgb: np.ndarray
     histogram: np.ndarray
     auto_levels: dict[str, int]
@@ -221,8 +222,8 @@ def process_negative_base_preview(
     *,
     density_analysis: DensityPreviewAnalysis | None = None,
 ) -> NegativePreviewResult:
-    if adjustments.invert_mode == InvertMode.NEGPY_PRINT.value:
-        return process_negpy_print_preview(base, adjustments)
+    if adjustments.invert_mode == InvertMode.LAB_PRINT.value:
+        return process_lab_print_preview(base, adjustments)
     if adjustments.invert_mode == InvertMode.LOG_BOUNDS.value:
         return process_log_bounds_preview(base, adjustments)
     if adjustments.invert_mode == InvertMode.DENSITY.value:
@@ -377,21 +378,21 @@ def process_log_bounds_preview(
     )
 
 
-def process_negpy_print_preview(
+def process_lab_print_preview(
     base: NegativeBasePreview,
     adjustments: AdjustmentParams,
 ) -> NegativePreviewResult:
-    negative_stage = build_negpy_negative_stage(base)
-    levels_stage = build_negpy_levels_stage(negative_stage, adjustments)
-    color_stage = build_negpy_color_stage(levels_stage, adjustments)
-    return build_negpy_display_stage(color_stage, adjustments)
+    negative_stage = build_lab_print_negative_stage(base)
+    levels_stage = build_lab_print_levels_stage(negative_stage, adjustments)
+    color_stage = build_lab_print_color_stage(levels_stage, adjustments)
+    return build_lab_print_display_stage(color_stage, adjustments)
 
 
-def build_negpy_negative_stage(
+def build_lab_print_negative_stage(
     base: NegativeBasePreview,
     *,
     include_histogram: bool = True,
-) -> NegpyNegativeStage:
+) -> LabPrintNegativeStage:
     source_linear = (
         base.film_camera_wb_linear_rgb
         if base.film_camera_wb_linear_rgb is not None
@@ -399,16 +400,17 @@ def build_negpy_negative_stage(
     )
     normalized_log = normalize_log_bounds(
         source_linear,
-        percentile_clip=NEGPY_LOG_PERCENTILE_CLIP,
+        percentile_clip=LAB_PRINT_LOG_PERCENTILE_CLIP,
     )
     positive_control = 1.0 - normalized_log
+    analysis_control = analysis_inset_crop(positive_control, LAB_PRINT_ANALYSIS_INSET)
     histogram = (
-        luminance_histogram(positive_control)
+        luminance_histogram(analysis_control)
         if include_histogram
         else np.zeros(256, dtype=np.float32)
     )
 
-    return NegpyNegativeStage(
+    return LabPrintNegativeStage(
         normalized_log=normalized_log,
         positive_control=positive_control,
         histogram=histogram,
@@ -418,15 +420,15 @@ def build_negpy_negative_stage(
     )
 
 
-def build_negpy_levels_stage(
-    negative_stage: NegpyNegativeStage,
+def build_lab_print_levels_stage(
+    negative_stage: LabPrintNegativeStage,
     adjustments: AdjustmentParams,
     *,
     auto_levels: dict[str, int] | None = None,
-) -> NegpyLevelsStage:
+) -> LabPrintLevelsStage:
     if auto_levels is None:
-        auto_levels = suggest_negpy_print_luminance_levels(
-            negative_stage.normalized_log,
+        auto_levels = suggest_lab_print_luminance_levels(
+            analysis_inset_crop(negative_stage.normalized_log, LAB_PRINT_ANALYSIS_INSET),
             adjustments,
             camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
         )
@@ -434,7 +436,7 @@ def build_negpy_levels_stage(
     positive_control = apply_unit_levels(negative_stage.positive_control, adjustments, clip=True)
     normalized_for_print = np.clip(1.0 - positive_control, 0.0, 1.0)
 
-    return NegpyLevelsStage(
+    return LabPrintLevelsStage(
         normalized_for_print=normalized_for_print,
         histogram=negative_stage.histogram,
         auto_levels=auto_levels,
@@ -444,14 +446,14 @@ def build_negpy_levels_stage(
     )
 
 
-def build_negpy_color_stage(
-    levels_stage: NegpyLevelsStage,
+def build_lab_print_color_stage(
+    levels_stage: LabPrintLevelsStage,
     adjustments: AdjustmentParams,
-) -> NegpyColorStage:
+) -> LabPrintColorStage:
     normalized_for_print = levels_stage.normalized_for_print
 
     if adjustments.auto_wb:
-        cmy_offsets = estimate_negpy_auto_cmy_offsets(normalized_for_print)
+        cmy_offsets = estimate_lab_print_auto_cmy_offsets(normalized_for_print)
     else:
         cmy_offsets = np.zeros(3, dtype=np.float32)
 
@@ -467,11 +469,11 @@ def build_negpy_color_stage(
     )
     processed = apply_log_color_separation(
         processed,
-        strength=NEGPY_COLOR_SEPARATION_STRENGTH,
+        strength=LAB_PRINT_COLOR_SEPARATION_STRENGTH,
     )
     processed = apply_color_balance(processed, adjustments.color_balance)
 
-    return NegpyColorStage(
+    return LabPrintColorStage(
         color_linear_rgb=processed,
         histogram=levels_stage.histogram,
         auto_levels=levels_stage.auto_levels,
@@ -481,8 +483,8 @@ def build_negpy_color_stage(
     )
 
 
-def build_negpy_display_stage(
-    color_stage: NegpyColorStage,
+def build_lab_print_display_stage(
+    color_stage: LabPrintColorStage,
     adjustments: AdjustmentParams,
 ) -> NegativePreviewResult:
     processed = apply_highlight_shadow_adjustments(
@@ -505,8 +507,8 @@ def build_negpy_display_stage(
     )
 
 
-def build_negpy_export_linear(
-    color_stage: NegpyColorStage,
+def build_lab_print_export_linear(
+    color_stage: LabPrintColorStage,
     adjustments: AdjustmentParams,
 ) -> np.ndarray:
     processed = apply_highlight_shadow_adjustments(
@@ -594,6 +596,19 @@ def log_analysis_crop(image: np.ndarray, buffer_ratio: float) -> np.ndarray:
     safe_buffer = float(np.clip(buffer_ratio, 0.0, 0.3))
     cut_y = int(height * safe_buffer)
     cut_x = int(width * safe_buffer)
+    if cut_y * 2 >= height or cut_x * 2 >= width:
+        return image
+    return image[cut_y : height - cut_y, cut_x : width - cut_x]
+
+
+def analysis_inset_crop(image: np.ndarray, inset: float) -> np.ndarray:
+    if inset <= 0.0 or image.ndim < 2:
+        return image
+
+    height, width = image.shape[:2]
+    safe_inset = float(np.clip(inset, 0.0, 0.30))
+    cut_y = int(round(height * safe_inset))
+    cut_x = int(round(width * safe_inset))
     if cut_y * 2 >= height or cut_x * 2 >= width:
         return image
     return image[cut_y : height - cut_y, cut_x : width - cut_x]
@@ -708,12 +723,12 @@ def estimate_log_auto_cmy_offsets(
     return np.clip(offsets, -LOG_AUTO_WB_MAX_OFFSET, LOG_AUTO_WB_MAX_OFFSET).astype(np.float32, copy=False)
 
 
-def estimate_negpy_auto_cmy_offsets(
+def estimate_lab_print_auto_cmy_offsets(
     normalized_log: np.ndarray,
     *,
-    strength: float = NEGPY_AUTO_WB_STRENGTH,
+    strength: float = LAB_PRINT_AUTO_WB_STRENGTH,
 ) -> np.ndarray:
-    sample = select_negpy_log_wb_sample(normalized_log)
+    sample = select_lab_print_log_wb_sample(normalized_log)
     if sample.size == 0:
         return np.zeros(3, dtype=np.float32)
 
@@ -727,10 +742,10 @@ def estimate_negpy_auto_cmy_offsets(
         dtype=np.float32,
     )
     offsets *= float(np.clip(strength, 0.0, 1.0))
-    return np.clip(offsets, -NEGPY_AUTO_WB_MAX_OFFSET, NEGPY_AUTO_WB_MAX_OFFSET).astype(np.float32, copy=False)
+    return np.clip(offsets, -LAB_PRINT_AUTO_WB_MAX_OFFSET, LAB_PRINT_AUTO_WB_MAX_OFFSET).astype(np.float32, copy=False)
 
 
-def select_negpy_log_wb_sample(normalized_log: np.ndarray) -> np.ndarray:
+def select_lab_print_log_wb_sample(normalized_log: np.ndarray) -> np.ndarray:
     clipped = np.clip(normalized_log, 0.0, 1.0).astype(np.float32, copy=False)
     positive = 1.0 - clipped
     luminance = rgb_luminance(positive)
@@ -1471,14 +1486,14 @@ def suggest_log_bounds_luminance_levels(image: np.ndarray) -> dict[str, int]:
     )
 
 
-def suggest_negpy_print_luminance_levels(
+def suggest_lab_print_luminance_levels(
     normalized_log: np.ndarray,
     adjustments: AdjustmentParams,
     *,
     camera_to_srgb_matrix: np.ndarray | None = None,
 ) -> dict[str, int]:
     positive_source = np.clip(1.0 - normalized_log, 0.0, 1.0)
-    sampled_log = sampled_rgb_pixels(normalized_log, limit=NEGPY_AUTO_EXPOSURE_SAMPLE_LIMIT)
+    sampled_log = sampled_rgb_pixels(normalized_log, limit=LAB_PRINT_AUTO_EXPOSURE_SAMPLE_LIMIT)
     sampled_positive = np.clip(1.0 - sampled_log, 0.0, 1.0)
     source_sample = rgb_luminance(sampled_positive.reshape(-1, 1, 3)).reshape(-1)
 
@@ -1494,15 +1509,15 @@ def suggest_negpy_print_luminance_levels(
             target_output_mid=0.54,
         )
 
-    black = float(np.percentile(source_sample, NEGPY_AUTO_BLACK_PERCENTILE))
-    white = float(np.percentile(source_sample, NEGPY_AUTO_WHITE_PERCENTILE))
+    black = float(np.percentile(source_sample, LAB_PRINT_AUTO_BLACK_PERCENTILE))
+    white = float(np.percentile(source_sample, LAB_PRINT_AUTO_WHITE_PERCENTILE))
     source_span = max(1e-5, white - black)
-    black -= NEGPY_AUTO_BLACK_PADDING * source_span
-    white += NEGPY_AUTO_WHITE_PADDING * source_span
+    black -= LAB_PRINT_AUTO_BLACK_PADDING * source_span
+    white += LAB_PRINT_AUTO_WHITE_PADDING * source_span
 
-    if white - black < NEGPY_AUTO_MIN_SPAN:
+    if white - black < LAB_PRINT_AUTO_MIN_SPAN:
         center = (black + white) * 0.5
-        half_span = NEGPY_AUTO_MIN_SPAN * 0.5
+        half_span = LAB_PRINT_AUTO_MIN_SPAN * 0.5
         black = center - half_span
         white = center + half_span
 
@@ -1510,9 +1525,9 @@ def suggest_negpy_print_luminance_levels(
     white = float(np.clip(white, black + 0.04, 1.0))
     source_span = max(1e-5, white - black)
 
-    mid_low = black + source_span * NEGPY_AUTO_MID_LOW
-    mid_high = black + source_span * NEGPY_AUTO_MID_HIGH
-    mid = solve_negpy_visual_midpoint(
+    mid_low = black + source_span * LAB_PRINT_AUTO_MID_LOW
+    mid_high = black + source_span * LAB_PRINT_AUTO_MID_HIGH
+    mid = solve_lab_print_visual_midpoint(
         sampled_log,
         black,
         white,
@@ -1544,7 +1559,7 @@ def sampled_rgb_pixels(image: np.ndarray, *, limit: int) -> np.ndarray:
     return pixels[::stride].astype(np.float32, copy=False)
 
 
-def solve_negpy_visual_midpoint(
+def solve_lab_print_visual_midpoint(
     normalized_log_sample: np.ndarray,
     black: float,
     white: float,
@@ -1553,12 +1568,12 @@ def solve_negpy_visual_midpoint(
     camera_to_srgb_matrix: np.ndarray | None,
 ) -> float:
     span = max(1e-5, white - black)
-    low = black + span * NEGPY_AUTO_MID_LOW
-    high = black + span * NEGPY_AUTO_MID_HIGH
+    low = black + span * LAB_PRINT_AUTO_MID_LOW
+    high = black + span * LAB_PRINT_AUTO_MID_HIGH
 
     for _index in range(13):
         candidate = (low + high) * 0.5
-        brightness = negpy_visual_brightness_score(
+        brightness = lab_print_visual_brightness_score(
             normalized_log_sample,
             black,
             candidate,
@@ -1566,7 +1581,7 @@ def solve_negpy_visual_midpoint(
             adjustments,
             camera_to_srgb_matrix=camera_to_srgb_matrix,
         )
-        if brightness > NEGPY_AUTO_VISUAL_TARGET:
+        if brightness > LAB_PRINT_AUTO_VISUAL_TARGET:
             low = candidate
         else:
             high = candidate
@@ -1574,7 +1589,7 @@ def solve_negpy_visual_midpoint(
     return (low + high) * 0.5
 
 
-def negpy_visual_brightness_score(
+def lab_print_visual_brightness_score(
     normalized_log_sample: np.ndarray,
     black: float,
     mid: float,
@@ -1594,7 +1609,7 @@ def negpy_visual_brightness_score(
     normalized_for_print = np.clip(1.0 - leveled, 0.0, 1.0)
 
     if adjustments.auto_wb:
-        cmy_offsets = estimate_negpy_auto_cmy_offsets(normalized_for_print)
+        cmy_offsets = estimate_lab_print_auto_cmy_offsets(normalized_for_print)
     else:
         cmy_offsets = np.zeros(3, dtype=np.float32)
 
@@ -1610,7 +1625,7 @@ def negpy_visual_brightness_score(
     )
     processed = apply_log_color_separation(
         processed,
-        strength=NEGPY_COLOR_SEPARATION_STRENGTH,
+        strength=LAB_PRINT_COLOR_SEPARATION_STRENGTH,
     )
     processed = apply_color_balance(processed, adjustments.color_balance)
     processed = apply_highlight_shadow_adjustments(processed, adjustments)

@@ -15,11 +15,11 @@ def main() -> int:
         "--invert-mode",
         choices=[
             InvertMode.DENSITY.value,
-            InvertMode.NEGPY_PRINT.value,
+            InvertMode.LAB_PRINT.value,
             InvertMode.LOG_BOUNDS.value,
             InvertMode.SIMPLE.value,
         ],
-        default=InvertMode.NEGPY_PRINT.value,
+        default=InvertMode.LAB_PRINT.value,
         help="Default inversion model for new images.",
     )
     args, qt_args = parser.parse_known_args(sys.argv[1:])

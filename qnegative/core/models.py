@@ -16,7 +16,7 @@ class InvertMode(str, Enum):
     SIMPLE = "simple"
     DENSITY = "density"
     LOG_BOUNDS = "log_bounds"
-    NEGPY_PRINT = "negpy_print"
+    LAB_PRINT = "lab_print"
 
 
 class PrintCurveMode(str, Enum):
@@ -108,7 +108,7 @@ class DensityMatrixParams:
 
 @dataclass
 class AdjustmentParams:
-    invert_mode: str = InvertMode.NEGPY_PRINT.value
+    invert_mode: str = InvertMode.LAB_PRINT.value
     print_curve: str = PrintCurveMode.STANDARD.value
     auto_wb: bool = True
     color_balance: ColorBalanceParams = field(default_factory=ColorBalanceParams)

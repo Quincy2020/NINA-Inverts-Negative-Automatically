@@ -1,0 +1,452 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+from qnegative.core.geometry import rotated_rect_corners, scale_point, scale_rect
+from qnegative.core.models import ImagePoint, ImageRect, ImageSize
+from qnegative.core.preview import resize_long_edge
+
+
+DETECT_MAX_EDGE = 1400
+FRAME_CONFIDENCE_HIGH = 0.72
+FRAME_CONFIDENCE_MEDIUM = 0.58
+BASE_CONFIDENCE_HIGH = 0.68
+BASE_CONFIDENCE_MEDIUM = 0.45
+
+FORMAT_RATIOS = {
+    "auto": (1.50, 1.33, 1.00, 7.0 / 6.0, 1.50),
+    "135": (1.50,),
+    "645": (4.0 / 3.0,),
+    "66": (1.00,),
+    "67": (7.0 / 6.0,),
+    "69": (1.50,),
+}
+
+
+@dataclass(frozen=True)
+class AutoFrameResult:
+    rect: ImageRect
+    confidence: float
+    confidence_level: str
+    format_hint: str
+    method: str
+
+
+@dataclass(frozen=True)
+class AutoBaseResult:
+    point: ImagePoint | None
+    rgb: np.ndarray | None
+    confidence: float
+    confidence_level: str
+    source: str
+
+
+@dataclass(frozen=True)
+class AutoDetectResult:
+    frame: AutoFrameResult | None
+    base: AutoBaseResult | None
+
+
+@dataclass(frozen=True)
+class _FrameCandidate:
+    rect: ImageRect
+    confidence: float
+    format_hint: str
+    method: str
+
+
+@dataclass(frozen=True)
+class _BaseCandidate:
+    point: ImagePoint
+    rgb: np.ndarray
+    score: float
+    confidence: float
+    source: str
+
+
+def detect_frame_and_base(
+    preview_linear_rgb: np.ndarray,
+    *,
+    preview_size: ImageSize,
+    source_size: ImageSize,
+    format_hint: str = "auto",
+) -> AutoDetectResult:
+    frame = detect_film_frame(
+        preview_linear_rgb,
+        preview_size=preview_size,
+        source_size=source_size,
+        format_hint=format_hint,
+    )
+    base = detect_film_base(
+        preview_linear_rgb,
+        preview_size=preview_size,
+        source_size=source_size,
+        frame_rect=frame.rect if frame is not None else None,
+    )
+    return AutoDetectResult(frame=frame, base=base)
+
+
+def detect_film_frame(
+    preview_linear_rgb: np.ndarray,
+    *,
+    preview_size: ImageSize,
+    source_size: ImageSize,
+    format_hint: str = "auto",
+) -> AutoFrameResult | None:
+    image = _prepare_detection_image(preview_linear_rgb)
+    if image.size == 0:
+        return None
+
+    scaled = resize_long_edge(image, max_size=DETECT_MAX_EDGE)
+    detect_size = ImageSize(width=scaled.shape[1], height=scaled.shape[0])
+    gray = _normalize_luminance_to_uint8(scaled)
+    edges = _edge_map(gray)
+    masks = _candidate_masks(gray, edges)
+
+    best: _FrameCandidate | None = None
+    image_area = float(gray.shape[0] * gray.shape[1])
+    for method, mask in masks:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:48]
+        for contour in contours:
+            candidate = _score_frame_contour(
+                contour,
+                edges,
+                image_area=image_area,
+                image_size=detect_size,
+                format_hint=format_hint,
+                method=method,
+            )
+            if candidate is None:
+                continue
+            if best is None or candidate.confidence > best.confidence:
+                best = candidate
+
+    if best is None or best.confidence < FRAME_CONFIDENCE_MEDIUM:
+        return None
+
+    preview_rect = scale_rect(best.rect, detect_size, preview_size)
+    source_rect = scale_rect(preview_rect, preview_size, source_size)
+    return AutoFrameResult(
+        rect=source_rect,
+        confidence=round(float(best.confidence), 3),
+        confidence_level=_confidence_level(best.confidence, FRAME_CONFIDENCE_HIGH, FRAME_CONFIDENCE_MEDIUM),
+        format_hint=best.format_hint,
+        method=best.method,
+    )
+
+
+def detect_film_base(
+    preview_linear_rgb: np.ndarray,
+    *,
+    preview_size: ImageSize,
+    source_size: ImageSize,
+    frame_rect: ImageRect | None = None,
+) -> AutoBaseResult | None:
+    image = _prepare_detection_image(preview_linear_rgb)
+    if image.size == 0:
+        return None
+
+    preview_frame = scale_rect(frame_rect, source_size, preview_size) if frame_rect is not None else None
+    candidates = _frame_base_candidates(image, preview_frame)
+    if not candidates:
+        candidates = _edge_base_candidates(image)
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item.score, reverse=True)
+    selected = candidates[: min(7, max(3, len(candidates) // 4))]
+    rgb_values = np.stack([candidate.rgb for candidate in selected], axis=0)
+    median_rgb = np.median(rgb_values, axis=0).astype(np.float32)
+    best_point = selected[0].point
+
+    consistency = float(np.mean(np.percentile(rgb_values, 90, axis=0) - np.percentile(rgb_values, 10, axis=0)))
+    base_confidence = float(
+        np.clip(
+            np.mean([candidate.confidence for candidate in selected]) * 0.72
+            + np.clip(1.0 - consistency / 0.16, 0.0, 1.0) * 0.20
+            + np.clip(len(selected) / 6.0, 0.0, 1.0) * 0.08,
+            0.0,
+            0.98,
+        )
+    )
+    if base_confidence < BASE_CONFIDENCE_MEDIUM:
+        return None
+
+    return AutoBaseResult(
+        point=scale_point(best_point, preview_size, source_size),
+        rgb=median_rgb,
+        confidence=round(base_confidence, 3),
+        confidence_level=_confidence_level(base_confidence, BASE_CONFIDENCE_HIGH, BASE_CONFIDENCE_MEDIUM),
+        source=selected[0].source,
+    )
+
+
+def _prepare_detection_image(image: np.ndarray) -> np.ndarray:
+    if image.ndim != 3 or image.shape[2] != 3:
+        return np.empty((0, 0, 3), dtype=np.float32)
+    return np.nan_to_num(image.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+
+
+def _normalize_luminance_to_uint8(image: np.ndarray) -> np.ndarray:
+    luminance = image[:, :, 0] * 0.2126 + image[:, :, 1] * 0.7152 + image[:, :, 2] * 0.0722
+    valid = luminance[np.isfinite(luminance)]
+    if valid.size == 0:
+        return np.zeros(luminance.shape, dtype=np.uint8)
+    low = float(np.percentile(valid, 1.0))
+    high = float(np.percentile(valid, 99.0))
+    if high <= low + 1e-6:
+        high = low + 1.0
+    gray = np.clip((luminance - low) / (high - low), 0.0, 1.0)
+    return np.ascontiguousarray((gray * 255.0 + 0.5).astype(np.uint8))
+
+
+def _edge_map(gray: np.ndarray) -> np.ndarray:
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 36, 150)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    return cv2.dilate(edges, kernel, iterations=1)
+
+
+def _candidate_masks(gray: np.ndarray, edges: np.ndarray) -> list[tuple[str, np.ndarray]]:
+    masks: list[tuple[str, np.ndarray]] = []
+    close_15 = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    close_31 = cv2.getStructuringElement(cv2.MORPH_RECT, (31, 31))
+    open_5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+
+    edge_mask = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_15, iterations=2)
+    masks.append(("edges", edge_mask))
+
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    _, inv = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    inv = cv2.morphologyEx(inv, cv2.MORPH_CLOSE, close_31, iterations=2)
+    inv = cv2.morphologyEx(inv, cv2.MORPH_OPEN, open_5, iterations=1)
+    masks.append(("threshold-dark", inv))
+
+    _, bright = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, close_31, iterations=2)
+    bright = cv2.morphologyEx(bright, cv2.MORPH_OPEN, open_5, iterations=1)
+    masks.append(("threshold-bright", bright))
+    return masks
+
+
+def _score_frame_contour(
+    contour: np.ndarray,
+    edges: np.ndarray,
+    *,
+    image_area: float,
+    image_size: ImageSize,
+    format_hint: str,
+    method: str,
+) -> _FrameCandidate | None:
+    rect = cv2.minAreaRect(contour)
+    (center_x, center_y), (width, height), angle = rect
+    if width <= 1 or height <= 1:
+        return None
+    if width < height:
+        width, height = height, width
+        angle += 90.0
+    angle = _normalize_rect_angle(angle)
+
+    rect_area = float(width * height)
+    area_ratio = rect_area / max(image_area, 1.0)
+    if area_ratio < 0.10 or area_ratio > 0.94:
+        return None
+    if min(width, height) < min(image_size.width, image_size.height) * 0.16:
+        return None
+
+    contour_area = float(cv2.contourArea(contour))
+    rectangularity = np.clip(contour_area / max(rect_area, 1.0), 0.0, 1.0)
+    aspect = width / max(height, 1.0)
+    aspect_score, matched_format = _aspect_score(aspect, format_hint)
+    edge_support = _edge_support(edges, cv2.boxPoints(rect))
+    center_prior = _center_prior(center_x, center_y, image_size)
+    border_clearance = _border_clearance(cv2.boxPoints(rect), image_size)
+    angle_score = 1.0 - np.clip(abs(angle) / 18.0, 0.0, 1.0) * 0.35
+    area_score = 1.0 - np.clip(abs(area_ratio - 0.48) / 0.48, 0.0, 1.0)
+
+    confidence = float(
+        np.clip(
+            area_score * 0.14
+            + rectangularity * 0.20
+            + edge_support * 0.22
+            + center_prior * 0.12
+            + aspect_score * 0.20
+            + border_clearance * 0.08
+            + angle_score * 0.04,
+            0.0,
+            1.0,
+        )
+    )
+    return _FrameCandidate(
+        rect=ImageRect(
+            x=max(0, int(round(center_x - width / 2.0))),
+            y=max(0, int(round(center_y - height / 2.0))),
+            width=max(1, int(round(width))),
+            height=max(1, int(round(height))),
+            angle=angle,
+        ),
+        confidence=confidence,
+        format_hint=matched_format,
+        method=method,
+    )
+
+
+def _normalize_rect_angle(angle: float) -> float:
+    normalized = float(angle)
+    while normalized > 45.0:
+        normalized -= 90.0
+    while normalized <= -45.0:
+        normalized += 90.0
+    return normalized
+
+
+def _aspect_score(aspect: float, format_hint: str) -> tuple[float, str]:
+    targets = FORMAT_RATIOS.get(format_hint, FORMAT_RATIOS["auto"])
+    best_score = 0.0
+    best_label = "auto"
+    labels = ["135", "645", "66", "67", "69"] if format_hint == "auto" else [format_hint]
+    for index, target in enumerate(targets):
+        target_aspect = max(0.05, float(target))
+        delta = abs(math.log(max(aspect, 0.05)) - math.log(target_aspect))
+        score = 1.0 - np.clip(delta / 0.42, 0.0, 1.0)
+        if score > best_score:
+            best_score = float(score)
+            best_label = labels[min(index, len(labels) - 1)]
+    return best_score, best_label
+
+
+def _edge_support(edges: np.ndarray, box_points: np.ndarray) -> float:
+    points = box_points.astype(np.float32)
+    hits = 0
+    total = 0
+    for index in range(4):
+        start = points[index]
+        end = points[(index + 1) % 4]
+        distance = float(np.linalg.norm(end - start))
+        steps = max(8, int(distance / 8))
+        for t in np.linspace(0.0, 1.0, steps, dtype=np.float32):
+            x = int(round(start[0] * (1.0 - t) + end[0] * t))
+            y = int(round(start[1] * (1.0 - t) + end[1] * t))
+            if 0 <= x < edges.shape[1] and 0 <= y < edges.shape[0]:
+                hits += 1 if edges[y, x] > 0 else 0
+                total += 1
+    return float(hits / total) if total else 0.0
+
+
+def _center_prior(center_x: float, center_y: float, size: ImageSize) -> float:
+    dx = abs(center_x / max(1.0, size.width) - 0.5) * 2.0
+    dy = abs(center_y / max(1.0, size.height) - 0.5) * 2.0
+    return float(1.0 - np.clip((dx + dy) / 1.35, 0.0, 1.0))
+
+
+def _border_clearance(box_points: np.ndarray, size: ImageSize) -> float:
+    x_min = float(np.min(box_points[:, 0]))
+    x_max = float(np.max(box_points[:, 0]))
+    y_min = float(np.min(box_points[:, 1]))
+    y_max = float(np.max(box_points[:, 1]))
+    margin = min(x_min, y_min, size.width - x_max, size.height - y_max)
+    required = max(8.0, min(size.width, size.height) * 0.025)
+    return float(np.clip(margin / required, 0.0, 1.0))
+
+
+def _frame_base_candidates(image: np.ndarray, frame_rect: ImageRect | None) -> list[_BaseCandidate]:
+    if frame_rect is None:
+        return []
+    corners = rotated_rect_corners(frame_rect)
+    center = np.array([frame_rect.center_x, frame_rect.center_y], dtype=np.float32)
+    min_side = max(12.0, min(frame_rect.width, frame_rect.height))
+    offset = max(8.0, min_side * 0.055)
+    radius = int(np.clip(min_side * 0.022, 4, 42))
+    fractions = (0.18, 0.34, 0.50, 0.66, 0.82)
+
+    candidates: list[_BaseCandidate] = []
+    side_names = ("top", "right", "bottom", "left")
+    for side_index, side_name in enumerate(side_names):
+        start = corners[side_index]
+        end = corners[(side_index + 1) % 4]
+        edge = end - start
+        normal = np.array([edge[1], -edge[0]], dtype=np.float32)
+        normal_len = float(np.linalg.norm(normal))
+        if normal_len < 1e-5:
+            continue
+        normal /= normal_len
+        midpoint = (start + end) * 0.5
+        if float(np.dot(midpoint + normal * offset - center, normal)) < float(np.dot(midpoint - center, normal)):
+            normal *= -1.0
+        for fraction in fractions:
+            point = start * (1.0 - fraction) + end * fraction + normal * offset
+            candidate = _sample_base_candidate(image, point, radius, side_name)
+            if candidate is not None:
+                candidates.append(candidate)
+    return candidates
+
+
+def _edge_base_candidates(image: np.ndarray) -> list[_BaseCandidate]:
+    height, width = image.shape[:2]
+    min_side = max(1, min(width, height))
+    offset = int(np.clip(min_side * 0.045, 5, min_side // 2))
+    radius = int(np.clip(min_side * 0.022, 4, 42))
+    fractions = (0.10, 0.22, 0.36, 0.50, 0.64, 0.78, 0.90)
+    candidates: list[_BaseCandidate] = []
+    for fraction in fractions:
+        x = width * fraction
+        candidates.append(candidate) if (candidate := _sample_base_candidate(image, np.array([x, offset]), radius, "edge-top")) else None
+        candidates.append(candidate) if (candidate := _sample_base_candidate(image, np.array([x, height - offset - 1]), radius, "edge-bottom")) else None
+        y = height * fraction
+        candidates.append(candidate) if (candidate := _sample_base_candidate(image, np.array([offset, y]), radius, "edge-left")) else None
+        candidates.append(candidate) if (candidate := _sample_base_candidate(image, np.array([width - offset - 1, y]), radius, "edge-right")) else None
+    return candidates
+
+
+def _sample_base_candidate(image: np.ndarray, point: np.ndarray, radius: int, source: str) -> _BaseCandidate | None:
+    x = int(round(float(point[0])))
+    y = int(round(float(point[1])))
+    if x < 0 or y < 0 or x >= image.shape[1] or y >= image.shape[0]:
+        return None
+    x0 = max(0, x - radius)
+    y0 = max(0, y - radius)
+    x1 = min(image.shape[1], x + radius + 1)
+    y1 = min(image.shape[0], y + radius + 1)
+    patch = image[y0:y1, x0:x1]
+    if patch.size == 0:
+        return None
+
+    pixels = np.clip(patch.reshape(-1, 3), 0.0, 1.0)
+    rgb = np.median(pixels, axis=0).astype(np.float32)
+    luminance = pixels @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    mean_luma = float(np.mean(luminance))
+    spread = float(np.percentile(luminance, 90) - np.percentile(luminance, 10))
+    channel_spread = float(np.mean(np.percentile(pixels, 90, axis=0) - np.percentile(pixels, 10, axis=0)))
+    clipped = float(np.mean(np.any(pixels >= 0.995, axis=1)))
+    too_dark = mean_luma < 0.025
+    saturation = float(np.mean(np.max(pixels, axis=1) - np.min(pixels, axis=1)))
+
+    stability = np.clip(1.0 - (spread + channel_spread) / 0.28, 0.0, 1.0)
+    brightness = np.clip((mean_luma - 0.02) / 0.55, 0.0, 1.0)
+    not_clipped = np.clip(1.0 - clipped * 12.0, 0.0, 1.0)
+    saturation_ok = np.clip(1.0 - saturation / 0.55, 0.0, 1.0)
+    confidence = float(np.clip(stability * 0.44 + brightness * 0.24 + not_clipped * 0.22 + saturation_ok * 0.10, 0.0, 1.0))
+    if too_dark or confidence < 0.22:
+        return None
+
+    score = confidence * 100.0 + mean_luma * 12.0 - spread * 35.0 - clipped * 30.0
+    return _BaseCandidate(
+        point=ImagePoint(x=x, y=y),
+        rgb=rgb,
+        score=float(score),
+        confidence=confidence,
+        source=source,
+    )
+
+
+def _confidence_level(confidence: float, high: float, medium: float) -> str:
+    if confidence >= high:
+        return "high"
+    if confidence >= medium:
+        return "medium"
+    return "low"

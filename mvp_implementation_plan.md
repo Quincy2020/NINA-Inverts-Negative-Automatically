@@ -323,3 +323,72 @@ highlight的滑块会导致某个点开始反向
 如果是片基什么的，那么我们需要去修复，以及不知道你有没有发现，我们的正片是没有什么品红的。。。。
 
 还有一个可以继续抠的点：导出其实只需要最终 processed_linear_rgb，不需要 8-bit display preview 和 histogram。现在为了复用 preview result 还在算这些，下一步如果要继续提速，可以做专门的 export result，但这次我先保持改动小一些。
+
+## 9. 当前实现状态
+
+截至 `28f071b Improve export path and GPU preview layer`，MVP 主流程已经基本成型。
+
+### 已实现
+
+- [x] PySide6 主窗口和左侧控制面板。
+- [x] 右侧 Origin / Preview 双页面画布。
+- [x] RAW/ARW 读取与线性预览链路。
+- [x] 普通图片/RAW 文件打开入口。
+- [x] 文件夹序列读取、底部胶片条、左右切换同文件夹图片。
+- [x] 片基点选工具。
+- [x] 可旋转底片区域框选，支持拖动、缩放边、旋转角、右键重置。
+- [x] 旋转框接入 pipeline，支持 warp 裁切。
+- [x] 每张图片单独缓存处理状态，切图后参数不会互相污染。
+- [x] 反转预览入口和自动触发预览。
+- [x] Lab Print 反转模型：RAW linear / camera-WB raw -> density/log control -> levels -> print curve -> color/WB -> display。
+- [x] 直方图黑点、白点、中性点滑块。
+- [x] 自动黑白中性点。
+- [x] 自动白平衡与手动白平衡控制。
+- [x] 白平衡吸管。
+- [x] Global / Mid / High / Shadow 白平衡分页控制。
+- [x] 曝光、对比度、高光、阴影、饱和度基础滑块。
+- [x] 高光滑块反向增亮 bug 已修复。
+- [x] 底部预览条当前图片高亮、已处理缩略图替换。
+- [x] Preview 页面缩放、拖动、右键水平翻转、垂直翻转、旋转 90 度。
+- [x] 分段 preview cache：negative / levels / color / display。
+- [x] 拖动策略：拖动中低分辨率交互预览，松手后最终预览。
+- [x] 2K OpenGL Preview Display Layer。
+- [x] 16-bit TIFF 导出。
+- [x] Export 进度条。
+- [x] Export 快路径：跳过不必要的 display transform，Lab Print 导出走分段处理，导出专用 linear result。
+
+### MVP 仍需完成或确认
+
+- [ ] 高质量 JPEG 导出。
+- [ ] Vibrance 滑块。
+- [ ] 更温和、可解释的 contrast 曲线，避免线性后期 contrast 过暴力。
+- [ ] Auto WB 继续优化：避开暗部、高光、大面积蓝黑区域，优先中间亮度低饱和候选。
+- [ ] 自动亮度/自动 levels 继续调教，尤其是黑点 buffer、视觉中灰和 print curve 后的目标亮度。
+- [ ] 色彩 preset / 胶片 look 的 MVP 级保存与载入。
+- [ ] 最终导出与预览色彩趋势再做更多样片校验。
+
+### 后续 Export 优化记录
+
+Export 已经可用，但后续仍有继续加速空间，暂时标记为未来优化项：
+
+- [ ] 做真正专用的 export result，进一步跳过所有预览专用数据结构。
+- [ ] Tiled export：先用预览/抽样确定 auto levels 和 WB，再全分辨率分块处理，降低内存峰值。
+- [ ] 减少中间数组 copy，把 log、levels、curve、WB、saturation 等步骤尽量融合。
+- [ ] 用 LUT 加速 print curve / gamma / sRGB 转换。
+- [ ] 评估 numexpr / Numba / CuPy / OpenCL 等 backend，只在收益明确后接入。
+- [ ] 批量导出时做多进程并行，单张图仍优先优化 pipeline 本身。
+
+
+Frame:
+1. preview resize 到 max edge 1200-1600
+2. luminance normalize 到 uint8
+3. Canny / threshold / morphology 三路生成候选 mask
+4. findContours + minAreaRect
+5. 按面积、矩形度、边缘支持、中心先验、aspect 评分
+6. 输出 ImageRect + confidence
+
+Base:
+1. 如果 frame 找到，在 frame 外四边条带采样
+2. 如果 frame 没找到，在图像边缘带采样
+3. 候选按低方差、不 clipping、亮度、橙色/片基色倾向评分
+4. 输出 mask_point 或 mask_rgb + confidence
