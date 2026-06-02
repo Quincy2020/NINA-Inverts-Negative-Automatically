@@ -41,17 +41,20 @@ from qnegative.core.pipeline import (
     PipelineError,
     build_negpy_color_stage,
     build_negpy_display_stage,
+    build_negpy_export_linear,
     build_negpy_levels_stage,
     build_negpy_negative_stage,
     build_negative_base_preview,
     build_density_preview_analysis,
     process_negative_base_preview,
+    suggest_negpy_print_luminance_levels,
     suggest_global_balance_from_neutral,
 )
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview, make_raw_preview, resize_long_edge
 from qnegative.core.raw_loader import load_raw_rgb16
 from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.folder_filmstrip import FolderFilmstrip
+from qnegative.ui.gl_preview_view import OpenGLPreviewView
 from qnegative.ui.image_view import ImageView
 
 
@@ -407,7 +410,12 @@ class TiffExportTask(QRunnable):
     def run(self) -> None:
         try:
             self.signals.progress.emit(5, "Loading RAW")
-            raw_image = load_raw_rgb16(self.source_path, half_size=False)
+            needs_camera_transform = self.adjustments.camera_color_strength > 0
+            raw_image = load_raw_rgb16(
+                self.source_path,
+                half_size=False,
+                include_display_transform=needs_camera_transform,
+            )
             self.signals.progress.emit(30, "Building base")
             base = build_negative_base_preview(
                 raw_image.as_float32(),
@@ -418,17 +426,11 @@ class TiffExportTask(QRunnable):
                 camera_to_srgb_matrix=raw_image.camera_to_srgb_matrix,
             )
             self.signals.progress.emit(55, "Processing positive")
-            result = process_negative_base_preview(base, self.adjustments)
-            if self.auto_levels_pending:
-                adjusted = deepcopy(self.adjustments)
-                adjusted.black_point = result.auto_levels["black_point"]
-                adjusted.mid_point = result.auto_levels["mid_point"]
-                adjusted.white_point = result.auto_levels["white_point"]
-                result = process_negative_base_preview(base, adjusted)
+            export_linear_rgb = self._process_export(base)
 
             self.signals.progress.emit(75, "Preparing TIFF")
             linear_rgb = transform_preview_array(
-                result.processed_linear_rgb,
+                export_linear_rgb,
                 flip_horizontal=self.flip_horizontal,
                 flip_vertical=self.flip_vertical,
                 rotation_quarters=self.rotation_quarters,
@@ -439,13 +441,45 @@ class TiffExportTask(QRunnable):
                 self.output_path,
                 tiff_rgb16,
                 photometric="rgb",
-                compression="deflate",
             )
         except Exception as exc:
             self.signals.failed.emit(str(exc))
             return
 
         self.signals.finished.emit(str(self.output_path))
+
+    def _process_export(self, base: NegativeBasePreview) -> np.ndarray:
+        if self.adjustments.invert_mode != InvertMode.NEGPY_PRINT.value:
+            result = process_negative_base_preview(base, self.adjustments)
+            if self.auto_levels_pending:
+                adjusted = deepcopy(self.adjustments)
+                adjusted.black_point = result.auto_levels["black_point"]
+                adjusted.mid_point = result.auto_levels["mid_point"]
+                adjusted.white_point = result.auto_levels["white_point"]
+                result = process_negative_base_preview(base, adjusted)
+            return result.processed_linear_rgb
+
+        negative_stage = build_negpy_negative_stage(base, include_histogram=False)
+        effective = deepcopy(self.adjustments)
+        if self.auto_levels_pending:
+            auto_levels = suggest_negpy_print_luminance_levels(
+                negative_stage.normalized_log,
+                effective,
+                camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
+            )
+            effective.black_point = auto_levels["black_point"]
+            effective.mid_point = auto_levels["mid_point"]
+            effective.white_point = auto_levels["white_point"]
+        else:
+            auto_levels = current_levels(effective)
+
+        levels_stage = build_negpy_levels_stage(
+            negative_stage,
+            effective,
+            auto_levels=auto_levels,
+        )
+        color_stage = build_negpy_color_stage(levels_stage, effective)
+        return build_negpy_export_linear(color_stage, effective)
 
 
 def transform_preview_array(
@@ -514,7 +548,7 @@ class MainWindow(QMainWindow):
         self.control_panel = ControlPanel()
         self.origin_view = ImageView()
         self.image_view = self.origin_view
-        self.preview_view = ImageView()
+        self.preview_view = OpenGLPreviewView()
         self.preview_view.set_transform_context_enabled(True)
         self.preview_view.set_placeholder("Positive preview waiting")
         self.preview_tabs = QTabWidget()
@@ -674,7 +708,7 @@ class MainWindow(QMainWindow):
         self.control_panel.set_histogram(None)
 
     def load_raw_preview(self, path: Path) -> None:
-        self.statusBar().showMessage("Generating RAW 1080 preview...")
+        self.statusBar().showMessage(f"Generating RAW {DEFAULT_PREVIEW_MAX_EDGE} preview...")
         self.control_panel.set_image_loaded(False)
         self.control_panel.set_image_status("Decoding RAW...")
         QApplication.setOverrideCursor(Qt.WaitCursor)

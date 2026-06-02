@@ -387,7 +387,11 @@ def process_negpy_print_preview(
     return build_negpy_display_stage(color_stage, adjustments)
 
 
-def build_negpy_negative_stage(base: NegativeBasePreview) -> NegpyNegativeStage:
+def build_negpy_negative_stage(
+    base: NegativeBasePreview,
+    *,
+    include_histogram: bool = True,
+) -> NegpyNegativeStage:
     source_linear = (
         base.film_camera_wb_linear_rgb
         if base.film_camera_wb_linear_rgb is not None
@@ -398,7 +402,11 @@ def build_negpy_negative_stage(base: NegativeBasePreview) -> NegpyNegativeStage:
         percentile_clip=NEGPY_LOG_PERCENTILE_CLIP,
     )
     positive_control = 1.0 - normalized_log
-    histogram = luminance_histogram(positive_control)
+    histogram = (
+        luminance_histogram(positive_control)
+        if include_histogram
+        else np.zeros(256, dtype=np.float32)
+    )
 
     return NegpyNegativeStage(
         normalized_log=normalized_log,
@@ -495,6 +503,18 @@ def build_negpy_display_stage(
         mask_rgb=color_stage.mask_rgb,
         film_rect_preview=color_stage.film_rect_preview,
     )
+
+
+def build_negpy_export_linear(
+    color_stage: NegpyColorStage,
+    adjustments: AdjustmentParams,
+) -> np.ndarray:
+    processed = apply_highlight_shadow_adjustments(
+        color_stage.color_linear_rgb,
+        adjustments,
+    )
+    processed = apply_saturation_adjustment(processed, adjustments)
+    return processed.astype(np.float32, copy=False)
 
 
 def sample_mask_rgb(
@@ -1145,11 +1165,9 @@ def apply_highlight_shadow_adjustments(image: np.ndarray, adjustments: Adjustmen
 
             highlight_weight = smoothstep(0.34, min(upper, 1.0), luminance)
             highlight_norm = np.maximum(target_luminance - pivot, 0.0) / span
-            curve = 2.0 + amount * 12.0
-            compressed = pivot + (1.0 - pivot) * (
-                np.log1p(highlight_norm * curve) / np.log1p(curve)
-            )
-            compressed = np.minimum(compressed, 1.0)
+            compression = 1.0 + amount * 1.25 * highlight_norm
+            compressed = pivot + span * (highlight_norm / compression)
+            compressed = np.minimum(compressed, target_luminance)
             mix = highlight_weight * amount
             target_luminance = target_luminance * (1.0 - mix) + compressed * mix
 

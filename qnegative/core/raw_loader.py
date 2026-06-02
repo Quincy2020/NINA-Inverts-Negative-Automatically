@@ -15,8 +15,8 @@ class RawRgbImage:
     source_size: ImageSize
     rgb16: np.ndarray
     camera_wb_rgb16: np.ndarray
-    display_rgb16: np.ndarray
-    camera_to_srgb_matrix: np.ndarray
+    display_rgb16: np.ndarray | None
+    camera_to_srgb_matrix: np.ndarray | None
 
     @property
     def output_size(self) -> ImageSize:
@@ -30,10 +30,17 @@ class RawRgbImage:
         return self.camera_wb_rgb16.astype(np.float32) / 65535.0
 
     def display_as_float32(self) -> np.ndarray:
+        if self.display_rgb16 is None:
+            raise ValueError("Display RGB data was not loaded for this RAW image.")
         return self.display_rgb16.astype(np.float32) / 65535.0
 
 
-def load_raw_rgb16(path: str | Path, *, half_size: bool = False) -> RawRgbImage:
+def load_raw_rgb16(
+    path: str | Path,
+    *,
+    half_size: bool = False,
+    include_display_transform: bool = True,
+) -> RawRgbImage:
     source_path = Path(path)
     with rawpy.imread(str(source_path)) as raw:
         source_size = ImageSize(width=raw.sizes.iwidth, height=raw.sizes.iheight)
@@ -55,20 +62,28 @@ def load_raw_rgb16(path: str | Path, *, half_size: bool = False) -> RawRgbImage:
             use_camera_wb=True,
             output_color=rawpy.ColorSpace.raw,
         )
-        display_rgb16 = raw.postprocess(
-            **postprocess_kwargs,
-            use_camera_wb=False,
-            output_color=rawpy.ColorSpace.sRGB,
-        )
 
-    camera_to_srgb_matrix = fit_camera_to_srgb_matrix(rgb16, display_rgb16)
+        if include_display_transform:
+            display_rgb16 = raw.postprocess(
+                **postprocess_kwargs,
+                use_camera_wb=False,
+                output_color=rawpy.ColorSpace.sRGB,
+            )
+        else:
+            display_rgb16 = None
+
+    camera_to_srgb_matrix = (
+        fit_camera_to_srgb_matrix(rgb16, display_rgb16)
+        if display_rgb16 is not None
+        else None
+    )
 
     return RawRgbImage(
         path=source_path,
         source_size=source_size,
         rgb16=np.ascontiguousarray(rgb16),
         camera_wb_rgb16=np.ascontiguousarray(camera_wb_rgb16),
-        display_rgb16=np.ascontiguousarray(display_rgb16),
+        display_rgb16=np.ascontiguousarray(display_rgb16) if display_rgb16 is not None else None,
         camera_to_srgb_matrix=camera_to_srgb_matrix,
     )
 
