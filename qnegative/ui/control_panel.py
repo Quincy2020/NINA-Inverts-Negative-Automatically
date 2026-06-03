@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from qnegative.core.models import InvertMode, LensCorrectionParams, PrintCurveMode, ToolMode
 from qnegative.core.models import AdjustmentParams
+from qnegative.resources import resource_path
 from qnegative.ui.collapsible_section import CollapsibleSection
 from qnegative.ui.density_matrix_panel import DensityMatrixPanel
 from qnegative.ui.histogram_levels import HistogramLevelsWidget
@@ -155,8 +158,15 @@ class ControlPanel(QWidget):
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(12)
 
-        title = QLabel("NINA")
+        title = QLabel()
         title.setObjectName("appTitle")
+        title.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+        banner = self._svg_pixmap("logo/Banner.svg", width=280, height=112)
+        if banner is not None:
+            title.setPixmap(banner)
+            title.setFixedHeight(118)
+        else:
+            title.setText("NINA")
         root.addWidget(title)
 
         root.addWidget(self._status_section())
@@ -336,7 +346,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.activity_progress)
         self.export_progress = QProgressBar()
         self.export_progress.setRange(0, 0)
-        self.export_progress.setFormat("Exporting TIFF...")
+        self.export_progress.setFormat("Exporting...")
         self.export_progress.setTextVisible(True)
         self.export_progress.hide()
         layout.addWidget(self.export_progress)
@@ -358,31 +368,31 @@ class ControlPanel(QWidget):
         panel.setStyleSheet(
             """
             QWidget#cameraColorPanel {
-                background: #20242b;
-                color: #e8eaed;
+                background: #202020;
+                color: #E8E1D5;
             }
             QLabel {
-                color: #e8eaed;
+                color: #E8E1D5;
             }
             QLabel#mutedLabel {
-                color: #9aa4b2;
+                color: #A69680;
                 font-size: 12px;
             }
             QLabel#sliderValue {
-                color: #cfd6df;
+                color: #D8D0C2;
                 min-width: 34px;
                 qproperty-alignment: AlignRight;
             }
             QSlider::groove:horizontal {
                 height: 4px;
-                background: #3a414c;
+                background: #443B32;
                 border-radius: 2px;
             }
             QSlider::handle:horizontal {
                 width: 14px;
                 margin: -5px 0;
                 border-radius: 7px;
-                background: #d7dde5;
+                background: #D8D0C2;
             }
             """
         )
@@ -533,15 +543,27 @@ class ControlPanel(QWidget):
         combo.view().setStyleSheet(
             """
             QAbstractItemView {
-                background: #15191f;
-                border: 1px solid #444c59;
-                color: #f2f4f7;
-                selection-background-color: #41627a;
-                selection-color: #ffffff;
+                background: #1A1A1A;
+                border: 1px solid #444444;
+                color: #F2EEE6;
+                selection-background-color: #663300;
+                selection-color: #FFB000;
                 outline: 0;
             }
             """
         )
+
+    def _svg_pixmap(self, relative_path: str, *, width: int, height: int) -> QPixmap | None:
+        path = resource_path(relative_path)
+        if not path.exists():
+            return None
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        renderer = QSvgRenderer(str(path))
+        renderer.render(painter, QRectF(0, 0, width, height))
+        painter.end()
+        return pixmap
 
     def _slider_row(self, label: str, slider: QSlider, left: str, right: str) -> QVBoxLayout:
         wrapper = QVBoxLayout()
@@ -632,7 +654,7 @@ class ControlPanel(QWidget):
     def set_levels(self, black: int, mid: int, white: int, *, emit: bool = False) -> None:
         self.histogram_levels.set_levels(black, mid, white, emit=emit)
 
-    def set_export_progress(self, active: bool, *, value: int = 0, text: str = "Exporting TIFF...") -> None:
+    def set_export_progress(self, active: bool, *, value: int = 0, text: str = "Exporting...") -> None:
         self.export_progress.setVisible(active)
         if active:
             self.export_progress.setRange(0, 100)
@@ -737,15 +759,15 @@ class ControlPanel(QWidget):
         self.setStyleSheet(
             """
             #controlPanel {
-                background: #20242b;
-                color: #e8eaed;
+                background: #202020;
+                color: #E8E1D5;
             }
             #controlScrollArea {
-                background: #20242b;
+                background: #202020;
                 border: none;
             }
             #controlPanelContent {
-                background: #20242b;
+                background: #202020;
             }
             #appTitle {
                 font-size: 22px;
@@ -753,7 +775,7 @@ class ControlPanel(QWidget):
                 padding: 4px 0 8px 0;
             }
             QGroupBox#panelSection {
-                border: 1px solid #373d47;
+                border: 1px solid #443B32;
                 border-radius: 6px;
                 margin-top: 12px;
                 padding: 12px 8px 8px 8px;
@@ -763,17 +785,17 @@ class ControlPanel(QWidget):
                 subcontrol-origin: margin;
                 left: 8px;
                 padding: 0 4px;
-                color: #cfd6df;
+                color: #D8D0C2;
             }
             QLabel {
-                color: #e8eaed;
+                color: #E8E1D5;
             }
             QLabel#mutedLabel {
-                color: #9aa4b2;
+                color: #A69680;
                 font-size: 12px;
             }
             QLabel#sliderValue {
-                color: #cfd6df;
+                color: #D8D0C2;
                 min-width: 34px;
                 qproperty-alignment: AlignRight;
             }
@@ -782,27 +804,27 @@ class ControlPanel(QWidget):
                 border: none;
             }
             QFrame#lensProfileCard {
-                background: #11151b;
-                border: 1px solid #3a4350;
+                background: #121212;
+                border: 1px solid #443B32;
                 border-radius: 5px;
             }
             QTabWidget#lensCorrectionTabs::pane {
-                border: 1px solid #3a414c;
+                border: 1px solid #443B32;
                 border-radius: 5px;
-                background: #20242b;
+                background: #202020;
                 top: -1px;
             }
             QTabWidget#lensCorrectionTabs QTabBar::tab {
-                background: #2d333d;
-                color: #cfd6df;
-                border: 1px solid #444c59;
+                background: #2A2520;
+                color: #D8D0C2;
+                border: 1px solid #4A4034;
                 padding: 6px 9px;
                 min-width: 44px;
             }
             QTabWidget#lensCorrectionTabs QTabBar::tab:selected {
-                background: #41627a;
-                color: #f2f4f7;
-                border-color: #67a4c7;
+                background: #663300;
+                color: #F2EEE6;
+                border-color: #FFB000;
             }
             QTabWidget#lensCorrectionTabs QTabBar::tab:first {
                 border-top-left-radius: 5px;
@@ -811,36 +833,36 @@ class ControlPanel(QWidget):
                 border-top-right-radius: 5px;
             }
             QPushButton, QToolButton {
-                background: #2d333d;
-                border: 1px solid #444c59;
+                background: #2A2520;
+                border: 1px solid #4A4034;
                 border-radius: 5px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 7px 9px;
             }
             QPushButton:hover, QToolButton:hover {
-                background: #38414d;
+                background: #342A1D;
             }
             QPushButton:disabled {
-                color: #69717d;
-                background: #252a31;
-                border-color: #343b45;
+                color: #817666;
+                background: #25221F;
+                border-color: #3D352D;
             }
             QToolButton:checked {
-                background: #41627a;
-                border-color: #67a4c7;
+                background: #663300;
+                border-color: #FFB000;
             }
             QComboBox {
-                background: #15191f;
-                border: 1px solid #444c59;
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
                 border-radius: 5px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 5px 8px;
             }
             QComboBox QAbstractItemView {
-                background: #15191f;
-                border: 1px solid #444c59;
-                color: #f2f4f7;
-                selection-background-color: #41627a;
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
+                color: #F2EEE6;
+                selection-background-color: #663300;
                 selection-color: #ffffff;
                 outline: 0;
             }
@@ -850,22 +872,22 @@ class ControlPanel(QWidget):
             }
             QSlider::groove:horizontal {
                 height: 4px;
-                background: #3a414c;
+                background: #443B32;
                 border-radius: 2px;
             }
             QSlider::handle:horizontal {
                 width: 14px;
                 margin: -5px 0;
                 border-radius: 7px;
-                background: #d7dde5;
+                background: #D8D0C2;
             }
             QFrame#divider {
-                color: #3a414c;
-                background: #3a414c;
+                color: #443B32;
+                background: #443B32;
                 max-height: 1px;
             }
             QCheckBox {
-                color: #e8eaed;
+                color: #E8E1D5;
                 spacing: 8px;
             }
             QCheckBox::indicator {
@@ -873,15 +895,15 @@ class ControlPanel(QWidget):
                 height: 15px;
             }
             QProgressBar {
-                background: #15191f;
-                border: 1px solid #444c59;
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
                 border-radius: 5px;
-                color: #e8eaed;
+                color: #E8E1D5;
                 height: 18px;
                 text-align: center;
             }
             QProgressBar::chunk {
-                background: #67a4c7;
+                background: #FFB000;
                 border-radius: 4px;
             }
             """

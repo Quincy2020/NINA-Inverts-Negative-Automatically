@@ -3,39 +3,44 @@ from __future__ import annotations
 import argparse
 import sys
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QProgressBar, QSplashScreen
 
 from qnegative.core.models import InvertMode
+from qnegative.resources import resource_path
 
 
 def _create_splash() -> tuple[QSplashScreen, QProgressBar]:
-    pixmap = QPixmap(440, 180)
-    pixmap.fill(QColor("#15181d"))
+    pixmap = QPixmap(600, 240)
+    pixmap.fill(QColor("#1A1A1A"))
+    title_path = resource_path("logo/NINA_TITLE.svg")
     painter = QPainter(pixmap)
-    painter.setPen(QColor("#f2f4f7"))
-    painter.drawText(28, 54, "NINA")
-    painter.setPen(QColor("#9aa4b2"))
-    painter.drawText(28, 82, "NINA Inverts Negative Automatically")
+    if title_path.exists():
+        renderer = QSvgRenderer(str(title_path))
+        renderer.render(painter, QRectF(0, 0, 600, 200))
+    else:
+        painter.setPen(QColor("#FFB000"))
+        painter.drawText(75, 120, "NINA")
     painter.end()
 
     splash = QSplashScreen(pixmap)
     splash.setWindowFlag(Qt.WindowStaysOnTopHint, True)
     bar = QProgressBar(splash)
-    bar.setGeometry(28, 124, 384, 18)
+    bar.setGeometry(75, 214, 450, 12)
     bar.setRange(0, 100)
     bar.setValue(8)
     bar.setTextVisible(False)
     bar.setStyleSheet(
         """
         QProgressBar {
-            background: #20242b;
-            border: 1px solid #343c47;
+            background: #121212;
+            border: 1px solid #444444;
             border-radius: 5px;
         }
         QProgressBar::chunk {
-            background: #4aa3ff;
+            background: #FFB000;
             border-radius: 4px;
         }
         """
@@ -61,23 +66,26 @@ def main() -> int:
     app = QApplication([sys.argv[0], *qt_args])
     app.setApplicationName("NINA")
     app.setOrganizationName("NINA")
+    logo_path = resource_path("logo/NINA_LOGO.svg")
+    if logo_path.exists():
+        app.setWindowIcon(QIcon(str(logo_path)))
 
     splash, splash_bar = _create_splash()
     splash.show()
     app.processEvents()
 
     splash_bar.setValue(35)
-    splash.showMessage("Loading UI modules...", Qt.AlignBottom | Qt.AlignHCenter, QColor("#cfd6df"))
+    splash.showMessage("Loading UI modules...", Qt.AlignBottom | Qt.AlignHCenter, QColor("#D8D0C2"))
     app.processEvents()
     from qnegative.ui.main_window import MainWindow
 
     splash_bar.setValue(70)
-    splash.showMessage("Building main window...", Qt.AlignBottom | Qt.AlignHCenter, QColor("#cfd6df"))
+    splash.showMessage("Building main window...", Qt.AlignBottom | Qt.AlignHCenter, QColor("#D8D0C2"))
     app.processEvents()
     window = MainWindow(default_invert_mode=args.invert_mode)
     window.resize(1320, 860)
     splash_bar.setValue(95)
-    splash.showMessage("Ready", Qt.AlignBottom | Qt.AlignHCenter, QColor("#cfd6df"))
+    splash.showMessage("Ready", Qt.AlignBottom | Qt.AlignHCenter, QColor("#D8D0C2"))
     app.processEvents()
     window.show()
     splash_bar.setValue(100)

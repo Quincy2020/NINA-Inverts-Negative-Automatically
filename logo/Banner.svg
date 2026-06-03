@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 350 140">
+  
+  <!-- 保留像素网格定义 -->
+  <defs>
+    <pattern id="pixelGrid" x="0" y="0" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="1" height="1" fill="rgba(0,0,0,0.3)"/>
+    </pattern>
+  </defs>
+
+  <!-- 只保留 NINA 核心字标，坐标微调以完美充满当前画布 -->
+  <g font-family="Tahoma, Arial, sans-serif" font-weight="900" font-size="120" letter-spacing="-5">
+    <!-- 底层发光阴影 -->
+    <text x="15" y="115" fill="#663300" filter="blur(2px)">NINA</text>
+    <!-- 主色：琥珀色实体 -->
+    <text x="10" y="110" fill="#FFB000">NINA</text>
+    <!-- 叠加像素网格 -->
+    <text x="10" y="110" fill="url(#pixelGrid)">NINA</text>
+  </g>
+
+</svg>

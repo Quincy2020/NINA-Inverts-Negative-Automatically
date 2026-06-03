@@ -223,10 +223,10 @@ class DensityMatrixPanel(QWidget):
         combo.view().setStyleSheet(
             """
             QAbstractItemView {
-                background: #15191f;
-                border: 1px solid #444c59;
-                color: #f2f4f7;
-                selection-background-color: #41627a;
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
+                color: #F2EEE6;
+                selection-background-color: #663300;
                 selection-color: #ffffff;
                 outline: 0;
             }
@@ -237,46 +237,46 @@ class DensityMatrixPanel(QWidget):
         self.setStyleSheet(
             """
             QWidget#densityMatrixPanel {
-                color: #e8eaed;
+                color: #E8E1D5;
             }
             QLabel {
-                color: #e8eaed;
+                color: #E8E1D5;
             }
             QLabel#mutedLabel {
-                color: #9aa4b2;
+                color: #A69680;
                 font-size: 12px;
             }
             QDoubleSpinBox {
-                background: #15191f;
-                border: 1px solid #444c59;
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
                 border-radius: 4px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 3px 5px;
             }
             QComboBox {
-                background: #15191f;
-                border: 1px solid #444c59;
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
                 border-radius: 4px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 4px 6px;
             }
             QComboBox QAbstractItemView {
-                background: #15191f;
-                border: 1px solid #444c59;
-                color: #f2f4f7;
-                selection-background-color: #41627a;
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
+                color: #F2EEE6;
+                selection-background-color: #663300;
                 selection-color: #ffffff;
                 outline: 0;
             }
             QPushButton {
-                background: #2d333d;
-                border: 1px solid #444c59;
+                background: #2A2520;
+                border: 1px solid #4A4034;
                 border-radius: 5px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 4px 8px;
             }
             QPushButton:hover {
-                background: #38414d;
+                background: #342A1D;
             }
             """
         )

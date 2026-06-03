@@ -255,63 +255,63 @@ class FolderFilmstrip(QWidget):
         self.setStyleSheet(
             """
             #folderFilmstrip {
-                background: #1b1f26;
-                border-top: 1px solid #303640;
+                background: #1A1A1A;
+                border-top: 1px solid #38312A;
             }
             QToolButton {
-                background: #2d333d;
-                border: 1px solid #444c59;
+                background: #2A2520;
+                border: 1px solid #4A4034;
                 border-radius: 5px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 font-size: 18px;
             }
             QToolButton:hover {
-                background: #38414d;
+                background: #342A1D;
             }
             QFrame#thumbnailItem {
-                background: #242a33;
-                border: 1px solid #343c47;
+                background: #24211E;
+                border: 1px solid #3D352D;
                 border-radius: 6px;
             }
             QFrame#thumbnailItem[active="true"] {
-                border: 3px solid #4aa3ff;
-                background: #26384a;
+                border: 3px solid #FFB000;
+                background: #2E2418;
             }
             QLabel#thumbnailImage {
-                background: #111418;
+                background: #121212;
                 border-radius: 4px;
-                color: #7d8794;
+                color: #8C8171;
             }
             QLabel#thumbnailName {
-                color: #cbd3dd;
+                color: #D8D0C2;
                 font-size: 10px;
             }
             QLabel#processedBadge {
                 background: #f2c94c;
-                border: 1px solid #111418;
+                border: 1px solid #121212;
                 border-radius: 5px;
-                color: #111418;
+                color: #121212;
                 font-size: 9px;
                 font-weight: 700;
             }
             QScrollArea#filmstripScrollArea,
             QScrollArea#filmstripScrollArea QWidget#qt_scrollarea_viewport,
             QWidget#filmstripContent {
-                background: #15191f;
+                background: #1A1A1A;
             }
             QScrollBar:horizontal {
-                background: #15191f;
+                background: #1A1A1A;
                 border: none;
                 height: 10px;
                 margin: 0;
             }
             QScrollBar::handle:horizontal {
-                background: #46515f;
+                background: #4A4034;
                 border-radius: 5px;
                 min-width: 32px;
             }
             QScrollBar::handle:horizontal:hover {
-                background: #5c6a7c;
+                background: #6A5A45;
             }
             QScrollBar::add-line:horizontal,
             QScrollBar::sub-line:horizontal {
@@ -322,7 +322,7 @@ class FolderFilmstrip(QWidget):
             }
             QScrollBar::add-page:horizontal,
             QScrollBar::sub-page:horizontal {
-                background: #15191f;
+                background: #1A1A1A;
             }
             """
         )

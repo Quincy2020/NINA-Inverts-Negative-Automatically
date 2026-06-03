@@ -46,15 +46,15 @@ class CollapsibleSection(QFrame):
                 background: transparent;
             }
             QToolButton#collapsibleHeader {
-                background: #2d333d;
-                border: 1px solid #444c59;
+                background: #2A2520;
+                border: 1px solid #4A4034;
                 border-radius: 5px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 7px 8px;
                 text-align: left;
             }
             QToolButton#collapsibleHeader:hover {
-                background: #38414d;
+                background: #342A1D;
             }
             """
         )

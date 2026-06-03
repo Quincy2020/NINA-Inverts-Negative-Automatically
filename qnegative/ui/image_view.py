@@ -157,14 +157,14 @@ class ImageView(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#15181d"))
+        painter.fillRect(self.rect(), QColor("#1A1A1A"))
 
         if self._pixmap is None:
             self._paint_placeholder(painter)
             return
 
         self._display_rect = self._scaled_display_rect(self._pixmap)
-        painter.fillRect(self._display_rect, QColor("#0d0f12"))
+        painter.fillRect(self._display_rect, QColor("#101010"))
         painter.drawPixmap(self._display_rect.toRect(), self._pixmap)
 
         self._paint_saved_selections(painter)
@@ -332,7 +332,7 @@ class ImageView(QWidget):
         event.accept()
 
     def _paint_placeholder(self, painter: QPainter) -> None:
-        painter.setPen(QColor("#77808d"))
+        painter.setPen(QColor("#8C8171"))
         font = QFont()
         font.setPointSize(16)
         font.setWeight(QFont.DemiBold)
@@ -341,17 +341,17 @@ class ImageView(QWidget):
 
     def _paint_saved_selections(self, painter: QPainter) -> None:
         if self._film_rect is not None:
-            self._paint_image_rect(painter, self._film_rect, QColor("#55c7a6"), "Frame")
+            self._paint_image_rect(painter, self._film_rect, QColor("#FFB000"), "Frame")
         if self._mask_point is not None:
             self._paint_image_point(painter, self._mask_point, QColor("#05070a"))
         if self._wb_point is not None:
-            self._paint_image_point(painter, self._wb_point, QColor("#58c7ff"))
+            self._paint_image_point(painter, self._wb_point, QColor("#FFB000"))
 
     def _paint_drag_selection(self, painter: QPainter) -> None:
         if self._drag_start is None or self._drag_current is None:
             return
 
-        color = QColor("#55c7a6")
+        color = QColor("#FFB000")
 
         rect = QRect(self._drag_start, self._drag_current).normalized()
         clipped = rect.intersected(self._display_rect.toRect())
@@ -380,7 +380,7 @@ class ImageView(QWidget):
             QRect(view_rect.left(), view_rect.top() - 22, 74, 20),
             QColor(color.red(), color.green(), color.blue(), 170),
         )
-        painter.setPen(QColor("#101216"))
+        painter.setPen(QColor("#121212"))
         painter.drawText(QRect(view_rect.left() + 6, view_rect.top() - 21, 68, 18), label)
 
     def _paint_image_point(self, painter: QPainter, point: ImagePoint, color: QColor) -> None:
@@ -388,7 +388,7 @@ class ImageView(QWidget):
         if view_point is None:
             return
         painter.setPen(QPen(color, 2))
-        painter.setBrush(QColor("#f2f4f7"))
+        painter.setBrush(QColor("#F2EEE6"))
         painter.drawLine(view_point.x() - 8, view_point.y(), view_point.x() + 8, view_point.y())
         painter.drawLine(view_point.x(), view_point.y() - 8, view_point.x(), view_point.y() + 8)
         painter.drawEllipse(view_point, 5, 5)
@@ -472,7 +472,7 @@ class ImageView(QWidget):
         if len(points) != 4:
             return
 
-        painter.setBrush(QColor("#15181d"))
+        painter.setBrush(QColor("#1A1A1A"))
         painter.setPen(QPen(color, 2))
 
         for point in points:

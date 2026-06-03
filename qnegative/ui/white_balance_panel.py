@@ -110,7 +110,7 @@ class ColorSliderRow(QWidget):
             QSlider::groove:horizontal {{
                 height: 7px;
                 border-radius: 3px;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {left}, stop:0.5 #4d5663, stop:1 {right});
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {left}, stop:0.5 #51483E, stop:1 {right});
             }}
             QSlider::handle:horizontal {{
                 width: 15px;
@@ -118,30 +118,30 @@ class ColorSliderRow(QWidget):
                 margin: -5px 0;
                 border-radius: 8px;
                 background: #f0f2f5;
-                border: 1px solid #8d96a3;
+                border: 1px solid #9A8B75;
             }}
             """
         )
         self.setStyleSheet(
             """
             QLabel {
-                color: #e8eaed;
+                color: #E8E1D5;
             }
             QToolButton {
-                background: #2d333d;
-                border: 1px solid #444c59;
+                background: #2A2520;
+                border: 1px solid #4A4034;
                 border-radius: 4px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 0;
             }
             QToolButton:hover {
-                background: #38414d;
+                background: #342A1D;
             }
             QSpinBox {
-                background: #15191f;
-                border: 1px solid #444c59;
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
                 border-radius: 4px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 3px 5px;
             }
             """
@@ -158,7 +158,7 @@ class WhiteBalancePanel(QWidget):
         "red_cyan": ("#00bfd1", "#e14d4d"),
         "green_magenta": ("#c246c8", "#38c56a"),
         "blue_yellow": ("#d0b72f", "#2e70d6"),
-        "range": ("#303744", "#9ba8b8"),
+        "range": ("#3A332B", "#A69680"),
     }
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -284,30 +284,30 @@ class WhiteBalancePanel(QWidget):
         self.setStyleSheet(
             """
             QWidget#whiteBalancePanel {
-                color: #e8eaed;
+                color: #E8E1D5;
             }
             QCheckBox {
-                color: #e8eaed;
+                color: #E8E1D5;
                 spacing: 8px;
                 padding: 2px 0;
             }
             QTabWidget::pane {
-                border: 1px solid #3a414c;
+                border: 1px solid #443B32;
                 border-radius: 5px;
-                background: #20242b;
+                background: #202020;
                 top: -1px;
             }
             QTabBar::tab {
-                background: #2d333d;
-                color: #cfd6df;
-                border: 1px solid #444c59;
+                background: #2A2520;
+                color: #D8D0C2;
+                border: 1px solid #4A4034;
                 padding: 6px 9px;
                 min-width: 44px;
             }
             QTabBar::tab:selected {
-                background: #41627a;
-                color: #f2f4f7;
-                border-color: #67a4c7;
+                background: #663300;
+                color: #F2EEE6;
+                border-color: #FFB000;
             }
             QTabBar::tab:first {
                 border-top-left-radius: 5px;

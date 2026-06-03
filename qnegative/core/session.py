@@ -48,6 +48,10 @@ def state_from_json_dict(payload: dict[str, Any], source_path: Path) -> ImagePro
             film_rect=_rect_from_dict(payload.get("film_rect")),
             white_balance_point=_point_from_dict(payload.get("white_balance_point")),
             adjustments=_adjustments_from_dict(payload.get("adjustments") or {}),
+            lab_print_cmy_offsets=_float_list_from_payload(
+                payload.get("lab_print_cmy_offsets"),
+                length=3,
+            ),
             negative_preview_active=bool(payload.get("negative_preview_active", False)),
             auto_levels_pending=bool(payload.get("auto_levels_pending", True)),
             preview_flip_horizontal=bool(payload.get("preview_flip_horizontal", False)),
@@ -146,6 +150,14 @@ def _rect_from_dict(payload: dict[str, Any] | None) -> ImageRect | None:
         height=int(payload["height"]),
         angle=float(payload.get("angle", 0.0)),
     )
+
+
+def _float_list_from_payload(payload: Any, *, length: int) -> list[float] | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, list) or len(payload) != length:
+        return None
+    return [float(value) for value in payload]
 
 
 def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:

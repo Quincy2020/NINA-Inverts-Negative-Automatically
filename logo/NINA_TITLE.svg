@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 200">
+  <!-- 背景：模拟早期扫描站的深灰色 -->
+  <rect width="600" height="200" fill="#1A1A1A"/>
+  
+  <!-- 复古浮雕边框 -->
+  <path d="M0 0 H600 V200 H0 Z" fill="none" stroke="#444" stroke-width="4"/>
+  <path d="M2 2 H598 V198 H2 Z" fill="none" stroke="#000" stroke-width="2"/>
+
+  <!-- 字体装饰：像素网格感 -->
+  <defs>
+    <pattern id="pixelGrid" x="0" y="0" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="1" height="1" fill="rgba(0,0,0,0.3)"/>
+    </pattern>
+  </defs>
+
+  <!-- NINA 核心字标：琥珀色 + 极简几何 -->
+  <g font-family="Tahoma, Arial, sans-serif" font-weight="900" font-size="120" letter-spacing="-5">
+    <!-- 底层发光阴影 -->
+    <text x="80" y="140" fill="#663300" filter="blur(2px)">NINA</text>
+    <!-- 主色：琥珀色 (SP3000 经典文字色) -->
+    <text x="75" y="135" fill="#FFB000">NINA</text>
+    <!-- 叠加像素网格 -->
+    <text x="75" y="135" fill="url(#pixelGrid)">NINA</text>
+  </g>
+
+  <!-- 底部工业读数 -->
+  <text x="75" y="180" font-family="monospace" font-size="14" fill="#FFB000" opacity="0.8">
+    SYSTEM READY > SCANNER_MODE: 135_NEG > BUFFER: OK
+  </text>
+  
+  <!-- 装饰：经典的红色 Record 点或状态灯 -->
+  <circle cx="540" cy="50" r="8" fill="#FF0000">
+    <animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite" />
+  </circle>
+</svg>

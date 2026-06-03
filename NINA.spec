@@ -7,6 +7,9 @@ a = Analysis(
     datas=[
         ("LICENSE", "."),
         ("README.md", "."),
+        ("logo/Banner.svg", "logo"),
+        ("logo/NINA_LOGO.svg", "logo"),
+        ("logo/NINA_TITLE.svg", "logo"),
     ],
     hiddenimports=[],
     hookspath=[],

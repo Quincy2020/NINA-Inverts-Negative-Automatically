@@ -11,19 +11,27 @@ from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QMessageBox,
     QSplitter,
     QStackedWidget,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -121,6 +129,219 @@ PREVIEW_RESULT_CACHE_LIMIT = 16
 RAW_PREVIEW_CACHE_LIMIT = 16
 
 
+@dataclass(frozen=True)
+class BatchExportSettings:
+    output_dir: Path
+    naming_mode: str
+    prefix: str
+    start_number: int
+    export_format: str = "tiff16"
+    overwrite_existing: bool = False
+
+
+class BatchExportSettingsDialog(QDialog):
+    def __init__(
+        self,
+        *,
+        default_dir: Path,
+        default_prefix: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Batch Export Settings")
+        self.setModal(True)
+        self.resize(460, 320)
+
+        self.output_dir_edit = QLineEdit(str(default_dir))
+        self.browse_button = QPushButton("Browse...")
+        self.same_name_radio = QRadioButton("Use original file name")
+        self.sequence_radio = QRadioButton("Prefix + 3-digit number")
+        self.sequence_radio.setChecked(True)
+        self.prefix_edit = QLineEdit(default_prefix)
+        self.start_spin = QSpinBox()
+        self.start_spin.setRange(0, 999999)
+        self.start_spin.setValue(1)
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("TIFF (*.tif), 16-bit RGB / 48-bit", "tiff16")
+        self.format_combo.addItem("TIFF (*.tif), 8-bit RGB / 24-bit", "tiff8")
+        self.format_combo.addItem("JPEG (*.jpg), quality 95", "jpg")
+        self.format_combo.addItem("PNG (*.png), 16-bit RGB / 48-bit", "png16")
+        self.format_combo.addItem("PNG (*.png), 8-bit RGB / 24-bit", "png8")
+        self.overwrite_check = QCheckBox("Overwrite files with the same name")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
+        location_group = QGroupBox("Location")
+        location_layout = QHBoxLayout(location_group)
+        location_layout.setSpacing(10)
+        location_layout.addWidget(self.output_dir_edit, 1)
+        location_layout.addWidget(self.browse_button)
+        root.addWidget(location_group)
+
+        name_group = QGroupBox("File Name")
+        name_layout = QVBoxLayout(name_group)
+        name_layout.setSpacing(8)
+        name_layout.addWidget(self.same_name_radio)
+        name_layout.addWidget(self.sequence_radio)
+        form = QFormLayout()
+        form.setSpacing(8)
+        form.addRow("Prefix", self.prefix_edit)
+        form.addRow("Start Number", self.start_spin)
+        name_layout.addLayout(form)
+        root.addWidget(name_group)
+
+        format_group = QGroupBox("Image Format")
+        format_layout = QFormLayout(format_group)
+        format_layout.addRow("Type", self.format_combo)
+        format_layout.addRow("Details", QLabel("TIFF/PNG: 8-bit or 16-bit RGB; JPEG: quality 95"))
+        root.addWidget(format_group)
+
+        root.addWidget(self.overwrite_check)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        root.addWidget(buttons)
+
+        self.browse_button.clicked.connect(self._browse)
+        self.same_name_radio.toggled.connect(self._refresh_name_controls)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self._refresh_name_controls()
+        self._apply_style()
+
+    def settings(self) -> BatchExportSettings:
+        output_dir = Path(self.output_dir_edit.text()).expanduser()
+        prefix = self.prefix_edit.text().strip() or "scan"
+        return BatchExportSettings(
+            output_dir=output_dir,
+            naming_mode="same_name" if self.same_name_radio.isChecked() else "sequence",
+            prefix=prefix,
+            start_number=int(self.start_spin.value()),
+            export_format=str(self.format_combo.currentData() or "tiff16"),
+            overwrite_existing=self.overwrite_check.isChecked(),
+        )
+
+    def accept(self) -> None:
+        settings = self.settings()
+        try:
+            settings.output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Batch Export Settings", f"Cannot create output folder:\n{exc}")
+            return
+        super().accept()
+
+    def _browse(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Export Folder",
+            self.output_dir_edit.text(),
+        )
+        if folder:
+            self.output_dir_edit.setText(folder)
+
+    def _refresh_name_controls(self) -> None:
+        sequence = self.sequence_radio.isChecked()
+        self.prefix_edit.setEnabled(sequence)
+        self.start_spin.setEnabled(sequence)
+
+    def _apply_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QDialog {
+                background: #202020;
+                color: #E8E1D5;
+            }
+            QGroupBox {
+                border: 1px solid #443B32;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding: 12px 10px 10px 10px;
+                color: #E8E1D5;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+                color: #D8D0C2;
+            }
+            QLabel {
+                color: #E8E1D5;
+            }
+            QLineEdit, QSpinBox, QComboBox {
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
+                border-radius: 5px;
+                color: #F2EEE6;
+                padding: 6px 8px;
+                selection-background-color: #663300;
+                selection-color: #ffffff;
+            }
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+                border-color: #FFB000;
+            }
+            QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {
+                color: #8C8171;
+                background: #24211E;
+                border-color: #3D352D;
+            }
+            QComboBox QAbstractItemView {
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
+                color: #F2EEE6;
+                selection-background-color: #663300;
+                selection-color: #ffffff;
+            }
+            QRadioButton, QCheckBox {
+                color: #E8E1D5;
+                spacing: 8px;
+            }
+            QRadioButton::indicator, QCheckBox::indicator {
+                width: 15px;
+                height: 15px;
+            }
+            QRadioButton::indicator:unchecked, QCheckBox::indicator:unchecked {
+                background: #1A1A1A;
+                border: 1px solid #4A4034;
+            }
+            QRadioButton::indicator:checked, QCheckBox::indicator:checked {
+                background: #FFB000;
+                border: 1px solid #FFB000;
+            }
+            QRadioButton::indicator {
+                border-radius: 8px;
+            }
+            QPushButton {
+                background: #2A2520;
+                border: 1px solid #4A4034;
+                border-radius: 5px;
+                color: #F2EEE6;
+                padding: 7px 14px;
+                min-width: 72px;
+            }
+            QPushButton:hover {
+                background: #342A1D;
+                border-color: #FFB000;
+            }
+            QPushButton:pressed {
+                background: #663300;
+            }
+            QDialogButtonBox QPushButton {
+                min-width: 82px;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                background: #2A2520;
+                border-left: 1px solid #4A4034;
+                width: 18px;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background: #342A1D;
+            }
+            """
+        )
+
+
 class BatchExportDialog(QDialog):
     pauseRequested = Signal()
     resumeRequested = Signal()
@@ -166,11 +387,13 @@ class BatchExportDialog(QDialog):
         self.set_running(False)
         self._apply_style()
 
-    def set_jobs(self, paths: list[Path]) -> None:
+    def set_jobs(self, paths: list[Path], output_paths: list[Path] | None = None) -> None:
         self.queue.clear()
-        for path in paths:
-            item = QListWidgetItem(path.name)
+        for index, path in enumerate(paths):
+            output_path = output_paths[index] if output_paths is not None and index < len(output_paths) else None
+            item = QListWidgetItem(self._queue_item_text(path, output_path))
             item.setData(Qt.UserRole, str(path))
+            item.setData(Qt.UserRole + 1, output_path.name if output_path is not None else "")
             self.queue.addItem(item)
         self.progress.setValue(0)
         self.progress.setFormat("Queued")
@@ -182,10 +405,11 @@ class BatchExportDialog(QDialog):
         for index in range(self.queue.count()):
             item = self.queue.item(index)
             if item.data(Qt.UserRole) == str(path):
-                item.setText(f"> {path.name}")
+                item.setText(f"> {self._queue_item_text(path, self._item_output_name(item))}")
                 self.queue.setCurrentRow(index)
             elif not item.text().startswith("Done "):
-                item.setText(Path(item.data(Qt.UserRole)).name)
+                source = Path(item.data(Qt.UserRole))
+                item.setText(self._queue_item_text(source, self._item_output_name(item)))
 
     def update_progress(self, value: int, text: str) -> None:
         self.progress.setValue(max(0, min(100, int(value))))
@@ -195,8 +419,19 @@ class BatchExportDialog(QDialog):
         for index in range(self.queue.count()):
             item = self.queue.item(index)
             if item.data(Qt.UserRole) == str(path):
-                item.setText(f"Done {path.name}")
+                item.setText(f"Done {self._queue_item_text(path, self._item_output_name(item))}")
                 break
+
+    @staticmethod
+    def _queue_item_text(source_path: Path, output_name: str | Path | None) -> str:
+        if output_name:
+            return f"{source_path.name} -> {Path(output_name).name}"
+        return source_path.name
+
+    @staticmethod
+    def _item_output_name(item: QListWidgetItem) -> str | None:
+        value = item.data(Qt.UserRole + 1)
+        return str(value) if value else None
 
     def finish(self, text: str, *, auto_close_ms: int | None = None) -> None:
         self.current_label.setText(text)
@@ -218,58 +453,58 @@ class BatchExportDialog(QDialog):
         self.setStyleSheet(
             """
             QDialog#batchExportDialog {
-                background: #20242b;
-                color: #e8eaed;
+                background: #202020;
+                color: #E8E1D5;
             }
             QLabel {
-                color: #e8eaed;
+                color: #E8E1D5;
             }
             QLabel#batchCurrentLabel {
-                background: #15191f;
-                border: 1px solid #343c47;
+                background: #1A1A1A;
+                border: 1px solid #3D352D;
                 border-radius: 5px;
                 padding: 8px;
                 font-weight: 600;
             }
             QListWidget#batchQueue {
-                background: #15191f;
-                border: 1px solid #343c47;
+                background: #1A1A1A;
+                border: 1px solid #3D352D;
                 border-radius: 5px;
-                color: #cfd6df;
+                color: #D8D0C2;
                 outline: 0;
             }
             QListWidget#batchQueue::item {
                 padding: 6px;
             }
             QListWidget#batchQueue::item:selected {
-                background: #2f5d82;
+                background: #663300;
                 color: #ffffff;
             }
             QProgressBar {
-                background: #15191f;
-                border: 1px solid #343c47;
+                background: #1A1A1A;
+                border: 1px solid #3D352D;
                 border-radius: 5px;
-                color: #e8eaed;
+                color: #E8E1D5;
                 text-align: center;
                 height: 18px;
             }
             QProgressBar::chunk {
-                background: #4aa3ff;
+                background: #FFB000;
                 border-radius: 4px;
             }
             QPushButton {
-                background: #2d333d;
-                border: 1px solid #444c59;
+                background: #2A2520;
+                border: 1px solid #4A4034;
                 border-radius: 5px;
-                color: #f2f4f7;
+                color: #F2EEE6;
                 padding: 6px 10px;
             }
             QPushButton:hover {
-                background: #38414d;
+                background: #342A1D;
             }
             QPushButton:disabled {
-                color: #747d8a;
-                background: #22272f;
+                color: #8C8171;
+                background: #24211E;
             }
             """
         )
@@ -299,6 +534,7 @@ class PreviewRenderOutput:
     mask_point: ImagePoint | None = None
     film_rect: ImageRect | None = None
     adjustments: AdjustmentParams | None = None
+    lab_print_cmy_offsets: list[float] | None = None
     applied_auto_levels: bool = False
 
 
@@ -332,6 +568,7 @@ class PreInvertOutput:
     adjustments: AdjustmentParams
     result: NegativePreviewResult
     cache_key: tuple | None
+    lab_print_cmy_offsets: list[float] | None
     confidence: float
 
 
@@ -386,6 +623,26 @@ def matrix_key(matrix: np.ndarray | None) -> tuple[float, ...] | None:
     return tuple(round(float(value), 7) for value in values)
 
 
+def cmy_offsets_key(offsets: list[float] | np.ndarray | None) -> tuple[float, ...] | None:
+    if offsets is None:
+        return None
+    values = np.asarray(offsets, dtype=np.float32).reshape(-1)
+    if values.size != 3:
+        return None
+    return tuple(round(float(value), 7) for value in values)
+
+
+def file_identity_key(path: str | Path | None) -> tuple | None:
+    if not path:
+        return None
+    profile_path = Path(path)
+    try:
+        stat = profile_path.stat()
+    except OSError:
+        return (str(profile_path), "missing")
+    return (str(profile_path), stat.st_size, stat.st_mtime_ns)
+
+
 def balance_axis_key(axis) -> tuple[int, int, int]:
     return (axis.red_cyan, axis.green_magenta, axis.blue_yellow)
 
@@ -433,9 +690,13 @@ def lens_correction_key(params: LensCorrectionParams) -> tuple:
         params.center_y,
         params.smoothness,
         params.max_gain,
-        params.flat_profile_path,
+        file_identity_key(params.flat_profile_path),
         params.flat_strength,
     )
+
+
+def lab_print_engine_key() -> str:
+    return log_print_curve_engine()
 
 
 def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
@@ -468,6 +729,7 @@ def preview_result_cache_key_for(
     mask_point: ImagePoint | None,
     film_rect: ImageRect | None,
     adjustments: AdjustmentParams,
+    lab_print_cmy_offsets: list[float] | np.ndarray | None = None,
 ) -> tuple:
     return (
         file_key,
@@ -477,6 +739,10 @@ def preview_result_cache_key_for(
         image_point_key(mask_point),
         image_rect_key(film_rect),
         adjustments_preview_cache_key(adjustments),
+        lab_print_engine_key()
+        if adjustments.invert_mode in {InvertMode.LAB_PRINT.value, InvertMode.LOG_BOUNDS.value}
+        else None,
+        cmy_offsets_key(lab_print_cmy_offsets) if adjustments.auto_wb else None,
     )
 
 
@@ -509,6 +775,7 @@ def lab_print_auto_key(adjustments: AdjustmentParams) -> tuple:
         adjustments.soft_highlights,
         adjustments.soft_shadows,
         adjustments.auto_wb,
+        lab_print_engine_key(),
         adjustments.camera_color_strength,
         color_balance_key(adjustments),
         adjustments.highlights,
@@ -534,7 +801,11 @@ def lab_print_levels_key(
     )
 
 
-def lab_print_color_key(levels_key: tuple, adjustments: AdjustmentParams) -> tuple:
+def lab_print_color_key(
+    levels_key: tuple,
+    adjustments: AdjustmentParams,
+    lab_print_cmy_offsets: list[float] | np.ndarray | None = None,
+) -> tuple:
     return (
         "lab_print_color",
         levels_key,
@@ -544,6 +815,8 @@ def lab_print_color_key(levels_key: tuple, adjustments: AdjustmentParams) -> tup
         adjustments.soft_highlights,
         adjustments.soft_shadows,
         adjustments.auto_wb,
+        cmy_offsets_key(lab_print_cmy_offsets) if adjustments.auto_wb else None,
+        lab_print_engine_key(),
         adjustments.camera_color_strength,
         color_balance_key(adjustments),
     )
@@ -653,12 +926,14 @@ class PreInvertTask(QRunnable):
             )
             color_stage = build_lab_print_color_stage(levels_stage, effective)
             result = build_lab_print_display_stage(color_stage, effective)
+            lab_print_cmy_offsets = _cmy_offsets_to_state(result.wb_gains if effective.auto_wb else None)
             cache_key = preview_result_cache_key_for(
                 file_key=self.file_key,
                 preview=preview,
                 mask_point=None,
                 film_rect=frame.rect,
                 adjustments=effective,
+                lab_print_cmy_offsets=lab_print_cmy_offsets,
             )
         except Exception as exc:
             self.signals.failed.emit(self.job_id, self.path, str(exc))
@@ -673,6 +948,7 @@ class PreInvertTask(QRunnable):
                 adjustments=effective,
                 result=result,
                 cache_key=cache_key,
+                lab_print_cmy_offsets=lab_print_cmy_offsets,
                 confidence=frame.confidence,
             ),
         )
@@ -779,6 +1055,7 @@ class PreviewRenderTask(QRunnable):
         show_errors: bool,
         quality: str,
         file_key: tuple | None = None,
+        lab_print_cmy_offsets: list[float] | None = None,
         render_cache: PreviewStageCache | None = None,
     ) -> None:
         super().__init__()
@@ -791,6 +1068,11 @@ class PreviewRenderTask(QRunnable):
         self.show_errors = show_errors
         self.quality = quality
         self.file_key = file_key
+        self.lab_print_cmy_offsets = (
+            _cmy_offsets_to_state(lab_print_cmy_offsets)
+            if adjustments.auto_wb
+            else None
+        )
         self.render_cache = render_cache or PreviewStageCache()
         self.signals = PreviewRenderSignals()
 
@@ -811,6 +1093,7 @@ class PreviewRenderTask(QRunnable):
                     mask_point=self.mask_point,
                     film_rect=self.film_rect,
                     adjustments=deepcopy(self.adjustments),
+                    lab_print_cmy_offsets=None,
                     applied_auto_levels=False,
                 )
         except Exception as exc:
@@ -882,14 +1165,25 @@ class PreviewRenderTask(QRunnable):
                 auto_levels=auto_levels,
             )
 
-        color_key = lab_print_color_key(levels_key, effective_adjustments)
+        color_key = lab_print_color_key(
+            levels_key,
+            effective_adjustments,
+            self.lab_print_cmy_offsets,
+        )
         if (
             self.render_cache.color_key == color_key
             and self.render_cache.color_stage is not None
         ):
             color_stage = self.render_cache.color_stage
         else:
-            color_stage = build_lab_print_color_stage(levels_stage, effective_adjustments)
+            color_stage = build_lab_print_color_stage(
+                levels_stage,
+                effective_adjustments,
+                cmy_offsets=self.lab_print_cmy_offsets,
+            )
+        lab_print_cmy_offsets = _cmy_offsets_to_state(
+            color_stage.wb_gains if effective_adjustments.auto_wb else None
+        )
 
         display_key = lab_print_display_key(color_key, effective_adjustments)
         if (
@@ -916,14 +1210,23 @@ class PreviewRenderTask(QRunnable):
                 display_result=result,
             ),
             quality=self.quality,
-            cache_key=self._result_cache_key(effective_adjustments),
+            cache_key=self._result_cache_key(
+                effective_adjustments,
+                lab_print_cmy_offsets=lab_print_cmy_offsets,
+            ),
             mask_point=self.mask_point,
             film_rect=self.film_rect,
             adjustments=deepcopy(effective_adjustments),
+            lab_print_cmy_offsets=lab_print_cmy_offsets,
             applied_auto_levels=applied_auto_levels,
         )
 
-    def _result_cache_key(self, adjustments: AdjustmentParams) -> tuple | None:
+    def _result_cache_key(
+        self,
+        adjustments: AdjustmentParams,
+        *,
+        lab_print_cmy_offsets: list[float] | np.ndarray | None = None,
+    ) -> tuple | None:
         if self.file_key is None:
             return None
         return preview_result_cache_key_for(
@@ -932,6 +1235,11 @@ class PreviewRenderTask(QRunnable):
             mask_point=self.mask_point,
             film_rect=self.film_rect,
             adjustments=adjustments,
+            lab_print_cmy_offsets=(
+                lab_print_cmy_offsets
+                if lab_print_cmy_offsets is not None
+                else self.lab_print_cmy_offsets
+            ),
         )
 
 
@@ -959,6 +1267,7 @@ class TiffExportTask(QRunnable):
         flip_vertical: bool,
         rotation_quarters: int,
         auto_levels_pending: bool,
+        export_format: str | None = None,
         preview_cmy_offsets: np.ndarray | None = None,
         cancel_event: Event | None = None,
     ) -> None:
@@ -972,6 +1281,7 @@ class TiffExportTask(QRunnable):
         self.flip_vertical = flip_vertical
         self.rotation_quarters = rotation_quarters
         self.auto_levels_pending = auto_levels_pending
+        self.export_format = export_format or export_format_from_path(output_path)
         self.preview_cmy_offsets = (
             np.asarray(preview_cmy_offsets, dtype=np.float32).copy()
             if preview_cmy_offsets is not None
@@ -1020,7 +1330,8 @@ class TiffExportTask(QRunnable):
             timings["Lab Print"] = perf_counter() - stage_start
             self._raise_if_cancelled()
 
-            self.signals.progress.emit(75, self._timed_progress_text("Preparing TIFF", timings))
+            format_label = export_format_label(self.export_format)
+            self.signals.progress.emit(75, self._timed_progress_text(f"Preparing {format_label}", timings))
             stage_start = perf_counter()
             linear_rgb = transform_preview_array(
                 export_linear_rgb,
@@ -1028,20 +1339,14 @@ class TiffExportTask(QRunnable):
                 flip_vertical=self.flip_vertical,
                 rotation_quarters=self.rotation_quarters,
             )
-            tiff_rgb16 = linear_to_srgb16(linear_rgb)
-            timings["Prepare TIFF"] = perf_counter() - stage_start
+            encoded_rgb = encode_export_rgb(linear_rgb, self.export_format)
+            timings[f"Prepare {format_label}"] = perf_counter() - stage_start
             self._raise_if_cancelled()
-            self.signals.progress.emit(90, self._timed_progress_text("Writing TIFF", timings))
+            self.signals.progress.emit(90, self._timed_progress_text(f"Writing {format_label}", timings))
 
             stage_start = perf_counter()
-            import tifffile
-
-            tifffile.imwrite(
-                self.output_path,
-                tiff_rgb16,
-                photometric="rgb",
-            )
-            timings["TIFF write"] = perf_counter() - stage_start
+            write_export_image(self.output_path, encoded_rgb, self.export_format)
+            timings[f"{format_label} write"] = perf_counter() - stage_start
         except ExportCancelled as exc:
             self.signals.cancelled.emit(str(exc))
             return
@@ -1127,6 +1432,89 @@ def linear_to_srgb16(linear_rgb: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray((srgb * 65535.0 + 0.5).astype(np.uint16))
 
 
+def linear_to_srgb8(linear_rgb: np.ndarray) -> np.ndarray:
+    clipped = np.clip(linear_rgb, 0.0, 1.0)
+    srgb = np.power(clipped, 1.0 / 2.2)
+    return np.ascontiguousarray((srgb * 255.0 + 0.5).astype(np.uint8))
+
+
+def export_format_from_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "jpg"
+    if suffix == ".png":
+        return "png16"
+    return "tiff16"
+
+
+def export_format_from_filter(selected_filter: str) -> str | None:
+    lower = selected_filter.lower()
+    if "jpeg" in lower or "jpg" in lower:
+        return "jpg"
+    if "png" in lower and "8-bit" in lower:
+        return "png8"
+    if "png" in lower:
+        return "png16"
+    if ("tiff" in lower or "tif" in lower) and "8-bit" in lower:
+        return "tiff8"
+    if "tiff" in lower or "tif" in lower:
+        return "tiff16"
+    return None
+
+
+def export_format_extension(export_format: str) -> str:
+    return {
+        "jpg": ".jpg",
+        "png8": ".png",
+        "png16": ".png",
+        "tiff8": ".tif",
+        "tiff16": ".tif",
+    }.get(export_format, ".tif")
+
+
+def export_format_label(export_format: str) -> str:
+    return {
+        "jpg": "JPEG",
+        "png8": "PNG 8-bit",
+        "png16": "PNG 16-bit",
+        "tiff8": "TIFF 8-bit",
+        "tiff16": "TIFF 16-bit",
+    }.get(export_format, "TIFF")
+
+
+def encode_export_rgb(linear_rgb: np.ndarray, export_format: str) -> np.ndarray:
+    if export_format in {"jpg", "png8", "tiff8"}:
+        return linear_to_srgb8(linear_rgb)
+    return linear_to_srgb16(linear_rgb)
+
+
+def write_export_image(path: Path, encoded_rgb: np.ndarray, export_format: str) -> None:
+    if export_format in {"tiff8", "tiff16"}:
+        import tifffile
+
+        tifffile.imwrite(path, encoded_rgb, photometric="rgb")
+        return
+
+    import cv2
+
+    bgr = cv2.cvtColor(encoded_rgb, cv2.COLOR_RGB2BGR)
+    if export_format == "jpg":
+        ok = cv2.imwrite(str(path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    elif export_format in {"png8", "png16"}:
+        ok = cv2.imwrite(str(path), bgr, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+    else:
+        raise ValueError(f"Unsupported export format: {export_format}")
+    if not ok:
+        raise OSError(f"Could not write {path}")
+
+
+def _cmy_offsets_to_state(offsets: np.ndarray | list[float] | None) -> list[float] | None:
+    key = cmy_offsets_key(offsets)
+    if key is None:
+        return None
+    return [float(value) for value in key]
+
+
 class MainWindow(QMainWindow):
     def __init__(self, *, default_invert_mode: str = InvertMode.LAB_PRINT.value) -> None:
         super().__init__()
@@ -1142,6 +1530,7 @@ class MainWindow(QMainWindow):
         self.mask_point: ImagePoint | None = None
         self.film_rect: ImageRect | None = None
         self.white_balance_point: ImagePoint | None = None
+        self.lab_print_cmy_offsets: list[float] | None = None
         self.adjustments = self._default_adjustments()
         self.negative_preview_active = False
         self.auto_levels_pending = True
@@ -1282,11 +1671,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_folder_action)
         file_menu.addSeparator()
 
-        export_action = QAction("Export TIFF...", self)
+        export_action = QAction("Export Image...", self)
         export_action.triggered.connect(self.export_current)
         file_menu.addAction(export_action)
 
-        export_completed_action = QAction("Export Completed TIFFs...", self)
+        export_completed_action = QAction("Export Completed Images...", self)
         export_completed_action.triggered.connect(self.export_completed)
         file_menu.addAction(export_completed_action)
 
@@ -1433,9 +1822,9 @@ class MainWindow(QMainWindow):
     def set_print_curve_engine(self, action: QAction) -> None:
         engine = str(action.data())
         set_log_print_curve_engine(engine)
+        self._cancel_preview_render()
         self._reset_preview_stage_caches()
-        if self.current_path is not None:
-            self.preview_result_cache.pop(self.current_path, None)
+        self.preview_result_cache.clear()
         label = action.text()
         self.statusBar().showMessage(f"Print curve engine: {label}")
         if self.negative_preview_active:
@@ -1706,11 +2095,16 @@ class MainWindow(QMainWindow):
                 state = ImageProcessingState(adjustments=self._default_adjustments())
             updated_adjustments = deepcopy(state.adjustments)
             updated_adjustments.lens_correction = deepcopy(source_params)
-            self.image_states[path] = replace(state, adjustments=updated_adjustments)
+            self.image_states[path] = replace(
+                state,
+                adjustments=updated_adjustments,
+                lab_print_cmy_offsets=None,
+            )
             self.preview_result_cache.pop(path, None)
 
         if self.current_path in targets:
             self.adjustments.lens_correction = deepcopy(source_params)
+            self.lab_print_cmy_offsets = None
             self.control_panel.set_adjustments(self.adjustments, emit=False)
             self._invalidate_negative_base_cache()
             if self.negative_preview_active:
@@ -1785,6 +2179,7 @@ class MainWindow(QMainWindow):
         self.negative_preview_active = False
         self.auto_levels_pending = True
         self.white_balance_point = None
+        self.lab_print_cmy_offsets = None
         self._last_untransformed_negative_result = None
         self._reset_preview_transform()
         self._invalidate_negative_base_cache()
@@ -1925,6 +2320,7 @@ class MainWindow(QMainWindow):
     def mask_point_selected(self, point: ImagePoint) -> None:
         self.mask_point = point
         self.white_balance_point = None
+        self.lab_print_cmy_offsets = None
         self.auto_levels_pending = True
         self._invalidate_negative_base_cache()
         self.control_panel.set_mask_status(f"Base point: x={point.x}, y={point.y}")
@@ -1934,6 +2330,7 @@ class MainWindow(QMainWindow):
     def film_rect_selected(self, rect: ImageRect) -> None:
         self.film_rect = rect
         self.white_balance_point = None
+        self.lab_print_cmy_offsets = None
         self.auto_levels_pending = True
         self._invalidate_negative_base_cache()
         self.control_panel.set_film_status(f"Frame: {rect.label()}")
@@ -1943,6 +2340,7 @@ class MainWindow(QMainWindow):
     def film_rect_reset(self) -> None:
         self.film_rect = None
         self.white_balance_point = None
+        self.lab_print_cmy_offsets = None
         self.auto_levels_pending = True
         self.negative_preview_active = False
         self._last_untransformed_negative_result = None
@@ -2101,6 +2499,7 @@ class MainWindow(QMainWindow):
             return
 
         self.white_balance_point = None
+        self.lab_print_cmy_offsets = None
         self.auto_levels_pending = True
         self._invalidate_negative_base_cache()
         self.origin_view.restore_selections(
@@ -2161,6 +2560,12 @@ class MainWindow(QMainWindow):
         mode_changed = previous.invert_mode != self.adjustments.invert_mode
         if mode_changed:
             self.auto_levels_pending = True
+            self.lab_print_cmy_offsets = None
+        if previous.auto_wb != self.adjustments.auto_wb:
+            self.lab_print_cmy_offsets = None
+            if self.current_path is not None:
+                self.preview_result_cache.pop(self.current_path, None)
+            self._reset_preview_stage_caches()
         if (
             not self._applying_auto_levels
             and not mode_changed
@@ -2261,6 +2666,7 @@ class MainWindow(QMainWindow):
             show_errors=show_errors,
             quality=quality,
             file_key=self._file_key_for_path(render_preview.path),
+            lab_print_cmy_offsets=self.lab_print_cmy_offsets,
             render_cache=self._preview_stage_caches[quality],
         )
         task.signals.finished.connect(self._preview_render_finished)
@@ -2317,6 +2723,8 @@ class MainWindow(QMainWindow):
             return
 
         self._last_untransformed_negative_result = result
+        if output.quality == FINAL_RENDER_QUALITY:
+            self.lab_print_cmy_offsets = output.lab_print_cmy_offsets
         displayed_result, _pixmap = self._update_preview_from_result(
             result,
             update_filmstrip=output.quality == FINAL_RENDER_QUALITY,
@@ -2362,6 +2770,7 @@ class MainWindow(QMainWindow):
             film_rect=output.film_rect if output.film_rect is not None else (existing.film_rect if existing else None),
             white_balance_point=existing.white_balance_point if existing else None,
             adjustments=deepcopy(output.adjustments) if output.adjustments is not None else (deepcopy(existing.adjustments) if existing else self._default_adjustments()),
+            lab_print_cmy_offsets=output.lab_print_cmy_offsets if output.lab_print_cmy_offsets is not None else (existing.lab_print_cmy_offsets if existing else None),
             negative_preview_active=True,
             auto_levels_pending=False,
             preview_flip_horizontal=existing.preview_flip_horizontal if existing else False,
@@ -2524,6 +2933,7 @@ class MainWindow(QMainWindow):
             mask_point=self.mask_point,
             film_rect=self.film_rect,
             adjustments=self.adjustments,
+            lab_print_cmy_offsets=self.lab_print_cmy_offsets,
         )
 
     def _store_cached_preview_result(self, result: NegativePreviewResult) -> None:
@@ -2609,6 +3019,7 @@ class MainWindow(QMainWindow):
             self.current_preview.path,
             self.current_preview.source_size,
             self.current_preview.preview_linear_rgb.shape,
+            id(self.current_preview.preview_linear_rgb),
             id(self.current_preview.preview_camera_wb_linear_rgb),
             id(self.current_preview.camera_to_srgb_matrix),
             self.mask_point,
@@ -2684,31 +3095,37 @@ class MainWindow(QMainWindow):
             return
 
         if self.current_path is None or self.current_path.suffix.lower() not in RAW_EXTENSIONS:
-            QMessageBox.information(self, "Export TIFF", "Open a RAW file before exporting.")
+            QMessageBox.information(self, "Export Image", "Open a RAW file before exporting.")
             return
         if self._film_base_required_for_current_mode() and self.mask_point is None:
-            QMessageBox.information(self, "Export TIFF", "Pick the film base before exporting.")
+            QMessageBox.information(self, "Export Image", "Pick the film base before exporting.")
             return
         if self.film_rect is None or not self.film_rect.is_valid():
-            QMessageBox.information(self, "Export TIFF", "Select a valid frame area before exporting.")
+            QMessageBox.information(self, "Export Image", "Select a valid frame area before exporting.")
             return
 
         if self._default_export_dir is not None:
             default_path = self._default_export_dir / f"{self.current_path.stem}_positive.tif"
         else:
             default_path = self.current_path.with_name(f"{self.current_path.stem}_positive.tif")
-        output, _selected_filter = QFileDialog.getSaveFileName(
+        output, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Export 16-bit TIFF",
+            "Export Image",
             str(default_path),
-            "TIFF Image (*.tif *.tiff)",
+            "TIFF 16-bit RGB (*.tif *.tiff);;TIFF 8-bit RGB (*.tif *.tiff);;JPEG Image (*.jpg *.jpeg);;PNG 16-bit RGB (*.png);;PNG 8-bit RGB (*.png)",
         )
         if not output:
             return
 
         output_path = Path(output)
-        if output_path.suffix.lower() not in {".tif", ".tiff"}:
-            output_path = output_path.with_suffix(".tif")
+        known_suffix = output_path.suffix.lower() in {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
+        export_format = (
+            export_format_from_path(output_path)
+            if known_suffix
+            else export_format_from_filter(selected_filter) or "tiff"
+        )
+        if not known_suffix:
+            output_path = output_path.with_suffix(export_format_extension(export_format))
 
         self._export_cancel_event = Event()
         task = TiffExportTask(
@@ -2721,6 +3138,7 @@ class MainWindow(QMainWindow):
             flip_vertical=self._preview_flip_vertical,
             rotation_quarters=self._preview_rotation_quarters,
             auto_levels_pending=self.auto_levels_pending,
+            export_format=export_format,
             preview_cmy_offsets=self._current_preview_cmy_offsets_for_export(),
             cancel_event=self._export_cancel_event,
         )
@@ -2732,7 +3150,7 @@ class MainWindow(QMainWindow):
         self.control_panel.export_button.setEnabled(False)
         self.control_panel.batch_export_button.setEnabled(False)
         self.control_panel.set_export_progress(True, value=0, text="Starting export")
-        self.statusBar().showMessage("Exporting 16-bit TIFF...")
+        self.statusBar().showMessage(f"Exporting {export_format_label(export_format)}...")
         self._thread_pool.start(task)
 
     def export_completed(self) -> None:
@@ -2742,20 +3160,24 @@ class MainWindow(QMainWindow):
         if self.current_path is not None:
             self._save_current_state()
 
-        output_dir_text = QFileDialog.getExistingDirectory(
-            self,
-            "Export Completed TIFFs",
-            str(self._default_export_dir or (self.current_path.parent if self.current_path else Path.cwd())),
+        default_dir = self._default_export_dir or (
+            self.current_path.parent if self.current_path else Path.cwd()
         )
-        if not output_dir_text:
+        settings_dialog = BatchExportSettingsDialog(
+            default_dir=default_dir,
+            default_prefix=self._default_batch_prefix(default_dir),
+            parent=self,
+        )
+        if settings_dialog.exec() != QDialog.Accepted:
             return
 
-        output_dir = Path(output_dir_text)
-        items = self._completed_export_items(output_dir)
+        settings = settings_dialog.settings()
+        self._default_export_dir = settings.output_dir
+        items = self._completed_export_items(settings)
         if not items:
             QMessageBox.information(
                 self,
-                "Export Completed TIFFs",
+                "Export Completed Images",
                 "No completed RAW positives were found in the current sequence.",
             )
             return
@@ -2768,22 +3190,26 @@ class MainWindow(QMainWindow):
         self._batch_export_cancel_requested = False
         self._export_in_progress = True
         self._export_cancel_event = Event()
-        self.batch_export_dialog.set_jobs([item["source_path"] for item in items])
+        self.batch_export_dialog.set_jobs(
+            [item["source_path"] for item in items],
+            [item["output_path"] for item in items],
+        )
         self.batch_export_dialog.show()
         self.batch_export_dialog.raise_()
         self.control_panel.export_button.setEnabled(False)
         self.control_panel.batch_export_button.setEnabled(False)
         self.control_panel.set_export_progress(True, value=0, text="Starting batch export")
-        self.statusBar().showMessage(f"Exporting {self._batch_export_total} completed TIFFs...")
+        self.statusBar().showMessage(f"Exporting {self._batch_export_total} completed images...")
         self._start_next_batch_export()
 
-    def _completed_export_items(self, output_dir: Path) -> list[dict]:
+    def _completed_export_items(self, settings: BatchExportSettings) -> list[dict]:
         ordered_paths = list(self.folder_files) if self.folder_files else list(self.image_states)
         for path in self.image_states:
             if path not in ordered_paths:
                 ordered_paths.append(path)
 
         items: list[dict] = []
+        sequence_index = int(settings.start_number)
         for path in ordered_paths:
             state = self.image_states.get(path)
             if state is None or not state.negative_preview_active:
@@ -2792,10 +3218,17 @@ class MainWindow(QMainWindow):
                 continue
             if state.film_rect is None or not state.film_rect.is_valid():
                 continue
+            output_path = self._batch_export_output_path(
+                path,
+                settings,
+                sequence_index=sequence_index,
+            )
+            if settings.naming_mode == "sequence":
+                sequence_index += 1
             items.append(
                 {
                     "source_path": path,
-                    "output_path": output_dir / f"{path.stem}_positive.tif",
+                    "output_path": output_path,
                     "mask_point": state.mask_point,
                     "film_rect": state.film_rect,
                     "adjustments": deepcopy(state.adjustments),
@@ -2803,14 +3236,52 @@ class MainWindow(QMainWindow):
                     "flip_vertical": state.preview_flip_vertical,
                     "rotation_quarters": state.preview_rotation_quarters,
                     "auto_levels_pending": state.auto_levels_pending,
+                    "export_format": settings.export_format,
                     "preview_cmy_offsets": self._preview_cmy_offsets_for_path(path, state),
                 }
             )
         return items
 
+    def _default_batch_prefix(self, default_dir: Path) -> str:
+        if self._roll_session_folder is not None and self._roll_session_folder.name:
+            return self._roll_session_folder.name
+        if self.current_path is not None and self.current_path.parent.name:
+            return self.current_path.parent.name
+        return default_dir.name or "scan"
+
+    def _batch_export_output_path(
+        self,
+        source_path: Path,
+        settings: BatchExportSettings,
+        *,
+        sequence_index: int,
+    ) -> Path:
+        if settings.naming_mode == "same_name":
+            filename = f"{source_path.stem}{export_format_extension(settings.export_format)}"
+        else:
+            filename = f"{settings.prefix}{sequence_index:03d}{export_format_extension(settings.export_format)}"
+        output_path = settings.output_dir / filename
+        if settings.overwrite_existing:
+            return output_path
+        return self._non_conflicting_output_path(output_path)
+
+    @staticmethod
+    def _non_conflicting_output_path(path: Path) -> Path:
+        if not path.exists():
+            return path
+        stem = path.stem
+        suffix = path.suffix
+        for index in range(1, 10000):
+            candidate = path.with_name(f"{stem}_{index:03d}{suffix}")
+            if not candidate.exists():
+                return candidate
+        return path.with_name(f"{stem}_{int(perf_counter() * 1000)}{suffix}")
+
     def _preview_cmy_offsets_for_path(self, path: Path, state: ImageProcessingState) -> np.ndarray | None:
         if state.adjustments.invert_mode != InvertMode.LAB_PRINT.value or not state.adjustments.auto_wb:
             return None
+        if state.lab_print_cmy_offsets is not None:
+            return np.asarray(state.lab_print_cmy_offsets, dtype=np.float32).copy()
         cached = self.preview_result_cache.get(path)
         if cached is None:
             return None
@@ -2840,7 +3311,7 @@ class MainWindow(QMainWindow):
             return
         if not self._batch_export_queue:
             self._finish_batch_export(
-                f"Batch exported {self._batch_export_done} TIFFs",
+                f"Batch exported {self._batch_export_done} images",
                 auto_close_ms=1200,
                 restart_preinvert=True,
             )
@@ -2865,7 +3336,7 @@ class MainWindow(QMainWindow):
             return
         self._batch_export_paused = True
         self.batch_export_dialog.set_running(True, paused=True)
-        self.statusBar().showMessage("Batch export will pause after the current TIFF")
+        self.statusBar().showMessage("Batch export will pause after the current image")
 
     def resume_batch_export(self) -> None:
         if not self._batch_export_active or not self._batch_export_paused:
@@ -2926,6 +3397,8 @@ class MainWindow(QMainWindow):
             return None
         if self.auto_levels_pending:
             return None
+        if self.lab_print_cmy_offsets is not None:
+            return np.asarray(self.lab_print_cmy_offsets, dtype=np.float32).copy()
 
         # Reuse preview CMY only when the final preview cache exactly matches
         # the current image/selection/adjustments. Otherwise export recomputes
@@ -2971,7 +3444,7 @@ class MainWindow(QMainWindow):
         self.control_panel.export_button.setEnabled(True)
         self.control_panel.batch_export_button.setEnabled(True)
         suffix = f" | {timing_text}" if timing_text else ""
-        self.statusBar().showMessage(f"Exported TIFF: {output_path}{suffix}")
+        self.statusBar().showMessage(f"Exported image: {output_path}{suffix}")
         if timing_text:
             print(f"Export timings: {timing_text}", flush=True)
         self._start_next_preinvert_jobs()
@@ -3000,8 +3473,8 @@ class MainWindow(QMainWindow):
             self.control_panel.export_button.setEnabled(True)
             self.control_panel.batch_export_button.setEnabled(True)
             self._start_next_preinvert_jobs()
-        QMessageBox.warning(self, "Export TIFF Failed", message)
-        self.statusBar().showMessage("TIFF export failed")
+        QMessageBox.warning(self, "Export Failed", message)
+        self.statusBar().showMessage("Export failed")
 
     def _export_cancelled(self, message: str) -> None:
         if self._batch_export_active:
@@ -3096,6 +3569,11 @@ class MainWindow(QMainWindow):
             film_rect=self.film_rect,
             white_balance_point=self.white_balance_point,
             adjustments=deepcopy(self.adjustments),
+            lab_print_cmy_offsets=(
+                deepcopy(self.lab_print_cmy_offsets)
+                if self.adjustments.invert_mode == InvertMode.LAB_PRINT.value and self.adjustments.auto_wb
+                else None
+            ),
             negative_preview_active=self.negative_preview_active,
             auto_levels_pending=self.auto_levels_pending,
             preview_flip_horizontal=self._preview_flip_horizontal,
@@ -3125,6 +3603,7 @@ class MainWindow(QMainWindow):
             self.mask_point = None
             self.film_rect = None
             self.white_balance_point = None
+            self.lab_print_cmy_offsets = None
             self.adjustments = deepcopy(self.adjustments)
             self.negative_preview_active = False
             self.auto_levels_pending = True
@@ -3139,6 +3618,11 @@ class MainWindow(QMainWindow):
         self.mask_point = state.mask_point
         self.film_rect = state.film_rect
         self.white_balance_point = state.white_balance_point
+        self.lab_print_cmy_offsets = (
+            deepcopy(state.lab_print_cmy_offsets)
+            if state.adjustments.invert_mode == InvertMode.LAB_PRINT.value and state.adjustments.auto_wb
+            else None
+        )
         self.adjustments = deepcopy(state.adjustments)
         self.negative_preview_active = False
         self.auto_levels_pending = state.auto_levels_pending
@@ -3276,6 +3760,7 @@ class MainWindow(QMainWindow):
             film_rect=output.frame_rect,
             white_balance_point=None,
             adjustments=deepcopy(output.adjustments),
+            lab_print_cmy_offsets=output.lab_print_cmy_offsets,
             negative_preview_active=True,
             auto_levels_pending=False,
         )
@@ -3479,51 +3964,51 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow {
-                background: #15181d;
+                background: #1A1A1A;
             }
             QMenuBar {
-                background: #111419;
-                color: #f2f4f7;
-                border-bottom: 1px solid #303640;
+                background: #121212;
+                color: #F2EEE6;
+                border-bottom: 1px solid #38312A;
                 padding: 2px 6px;
             }
             QMenuBar::item {
                 background: transparent;
                 padding: 6px 12px;
-                color: #f2f4f7;
+                color: #F2EEE6;
             }
             QMenuBar::item:selected {
-                background: #2c3440;
+                background: #302A24;
                 border-radius: 4px;
             }
             QMenu {
-                background: #181d23;
-                color: #f2f4f7;
-                border: 1px solid #343c47;
+                background: #1A1A1A;
+                color: #F2EEE6;
+                border: 1px solid #3D352D;
                 padding: 5px 0;
             }
             QMenu::item {
                 padding: 7px 28px 7px 24px;
             }
             QMenu::item:selected {
-                background: #344150;
+                background: #3A3026;
             }
             QMenu::separator {
                 height: 1px;
-                background: #343c47;
+                background: #3D352D;
                 margin: 5px 8px;
             }
             QStatusBar {
-                background: #20242b;
-                color: #cfd6df;
-                border-top: 1px solid #303640;
+                background: #202020;
+                color: #D8D0C2;
+                border-top: 1px solid #38312A;
             }
             QWidget#emptyState {
-                background: #15181d;
+                background: #1A1A1A;
             }
             QPushButton#emptyOpenButton {
-                background: #2f6f91;
-                border: 1px solid #63a8c9;
+                background: #663300;
+                border: 1px solid #FFB000;
                 border-radius: 7px;
                 color: #ffffff;
                 font-size: 16px;
@@ -3532,30 +4017,30 @@ class MainWindow(QMainWindow):
                 min-width: 220px;
             }
             QPushButton#emptyOpenButton:hover {
-                background: #397fa5;
+                background: #7A3D00;
             }
             QSplitter::handle {
-                background: #303640;
+                background: #38312A;
             }
             QSplitter::handle:horizontal {
                 width: 5px;
             }
             QSplitter::handle:hover {
-                background: #53606f;
+                background: #5C5144;
             }
             QTabWidget#previewTabs::pane {
                 border: none;
-                background: #15181d;
+                background: #1A1A1A;
             }
             QTabBar::tab {
-                background: #20242b;
-                color: #aeb8c5;
+                background: #202020;
+                color: #C7BBA8;
                 padding: 8px 18px;
-                border-right: 1px solid #303640;
+                border-right: 1px solid #38312A;
             }
             QTabBar::tab:selected {
-                background: #2c3440;
-                color: #f2f4f7;
+                background: #302A24;
+                color: #F2EEE6;
             }
             """
         )

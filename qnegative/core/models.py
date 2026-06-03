@@ -148,6 +148,7 @@ class ImageProcessingState:
     film_rect: ImageRect | None = None
     white_balance_point: ImagePoint | None = None
     adjustments: AdjustmentParams = field(default_factory=AdjustmentParams)
+    lab_print_cmy_offsets: list[float] | None = None
     negative_preview_active: bool = False
     auto_levels_pending: bool = True
     preview_flip_horizontal: bool = False

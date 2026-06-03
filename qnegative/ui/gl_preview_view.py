@@ -502,11 +502,11 @@ class OpenGLPreviewView(QOpenGLWidget):
         self._display_rect = self._scaled_display_rect()
         if self._display_rect.isEmpty():
             return
-        painter.fillRect(self._display_rect, QColor("#0d0f12"))
+        painter.fillRect(self._display_rect, QColor("#101010"))
         painter.drawImage(self._display_rect.toRect(), self._image)
 
     def _paint_placeholder(self, painter: QPainter) -> None:
-        painter.setPen(QColor("#77808d"))
+        painter.setPen(QColor("#8C8171"))
         font = QFont()
         font.setPointSize(16)
         font.setWeight(QFont.DemiBold)
@@ -515,7 +515,7 @@ class OpenGLPreviewView(QOpenGLWidget):
 
     def _paint_saved_selections(self, painter: QPainter) -> None:
         if self._wb_point is not None:
-            self._paint_image_point(painter, self._wb_point, QColor("#58c7ff"))
+            self._paint_image_point(painter, self._wb_point, QColor("#FFB000"))
 
     def _paint_status_overlay(self, painter: QPainter) -> None:
         if not self._status_overlay_text:
@@ -534,7 +534,7 @@ class OpenGLPreviewView(QOpenGLWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(10, 12, 15, 178))
         painter.drawRoundedRect(rect, 6, 6)
-        painter.setPen(QColor("#eef3f8"))
+        painter.setPen(QColor("#F2EEE6"))
         text_rect = rect.adjusted(12, 9, -12, -9)
         painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, self._status_overlay_text)
 

@@ -55,19 +55,19 @@ class HistogramLevelsWidget(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#15191f"))
+        painter.fillRect(self.rect(), QColor("#1A1A1A"))
 
         plot = self._plot_rect()
-        painter.fillRect(plot, QColor("#101318"))
-        painter.setPen(QPen(QColor("#343c47"), 1))
+        painter.fillRect(plot, QColor("#121212"))
+        painter.setPen(QPen(QColor("#3D352D"), 1))
         painter.drawRect(plot)
 
         self._paint_histogram(painter, plot)
-        self._paint_handle(painter, plot, self._black, QColor("#f2f4f7"), "B", above=False, inner=QColor("#0b0d10"))
+        self._paint_handle(painter, plot, self._black, QColor("#F2EEE6"), "B", above=False, inner=QColor("#0E0E0E"))
         self._paint_handle(painter, plot, self._mid, QColor("#d7ca55"), "N", above=True)
-        self._paint_handle(painter, plot, self._white, QColor("#e8eaed"), "W", above=False)
+        self._paint_handle(painter, plot, self._white, QColor("#E8E1D5"), "W", above=False)
 
-        painter.setPen(QColor("#9aa4b2"))
+        painter.setPen(QColor("#A69680"))
         painter.drawText(QRectF(0, self.height() - 19, self.width(), 16), Qt.AlignCenter, self._label_text())
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -94,7 +94,7 @@ class HistogramLevelsWidget(QWidget):
         values = np.log1p(np.maximum(self._histogram, 0.0))
         maximum = float(values.max())
         if maximum <= 0.0:
-            painter.setPen(QColor("#39414d"))
+            painter.setPen(QColor("#443B32"))
             painter.drawText(plot, Qt.AlignCenter, "Waiting for histogram")
             return
 
@@ -109,8 +109,8 @@ class HistogramLevelsWidget(QWidget):
         path.lineTo(plot.right(), plot.bottom())
         path.closeSubpath()
 
-        painter.fillPath(path, QColor("#5f6c7b"))
-        painter.setPen(QPen(QColor("#8290a1"), 1))
+        painter.fillPath(path, QColor("#6A5F51"))
+        painter.setPen(QPen(QColor("#9A8B75"), 1))
         painter.drawPath(path)
 
     def _paint_handle(
@@ -145,7 +145,7 @@ class HistogramLevelsWidget(QWidget):
             painter.setBrush(Qt.NoBrush)
             painter.drawPolygon(points)
 
-        painter.setPen(QColor("#f2f4f7"))
+        painter.setPen(QColor("#F2EEE6"))
         text_y = plot.top() - 22 if above else plot.bottom() + 11
         painter.drawText(QRectF(x - 18, text_y, 36, 16), Qt.AlignCenter, label)
 
