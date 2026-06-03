@@ -1,6 +1,8 @@
-# QNegativeLab
+# NINA
 
-QNegativeLab is a desktop RAW negative conversion tool focused on camera-scanned film. The current MVP is built with PySide6, rawpy, NumPy, and OpenCV.
+NINA is a desktop RAW negative conversion tool focused on camera-scanned film.
+
+NINA stands for "NINA Inverts Negative Automatically". The current MVP is built with PySide6, rawpy, NumPy, and OpenCV.
 
 ## Run
 
@@ -8,7 +10,7 @@ QNegativeLab is a desktop RAW negative conversion tool focused on camera-scanned
 python -m qnegative.app
 ```
 
-Open a RAW/image from `File > Open RAW / Image...` or open a folder from `File > Open Folder...`.
+Open a RAW/TIFF from `File > Open RAW / TIFF...` or open a folder from `File > Open Folder...`.
 
 ## Current MVP
 
@@ -22,6 +24,20 @@ Open a RAW/image from `File > Open RAW / Image...` or open a folder from `File >
 - Auto CMY white balance plus manual white balance controls.
 - Exposure, contrast, highlights, shadows, saturation, print curve, and analysis boundary controls.
 - 16-bit TIFF export.
+
+## Shortcuts
+
+Adjustment shortcuts use a coarse step of `20`. Hold `Shift` for a fine step of `5`.
+
+| Shortcut | Action |
+| --- | --- |
+| `Left` / `Right` | Move to previous / next file in the filmstrip. |
+| `Space` / `Enter` | Confirm the current image and move to the next file. |
+| `Tab` | Toggle between `Origin` and `Preview`. |
+| `Q` / `A` | Push global color balance toward yellow / blue. |
+| `W` / `S` | Push global color balance toward magenta / green. |
+| `E` / `D` | Push global color balance toward cyan / red. |
+| `R` / `F` | Increase / decrease exposure. |
 
 ## Processing Notes
 
@@ -67,4 +83,3 @@ On a measured `6138 x 4079` export, the LUT path reduced total export time from 
 - The experimental GPU color-adjustment shader is currently disabled for final color operations because the 8-bit linear texture path can quantize deep shadows. OpenGL is still used for display behavior.
 - `Density` and `Simple` inversion modes are kept as developer options.
 - Calibration datasets, generated labels, model artifacts, RAW files, positive references, and TIFF outputs should not be committed unless explicitly intended.
-
