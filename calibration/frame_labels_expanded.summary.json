@@ -1,0 +1,26 @@
+{
+  "total": 361,
+  "accepted": 347,
+  "rejected": 14,
+  "rejection_reasons": {
+    "too_few_inliers": 10,
+    "low_inlier_ratio": 1,
+    "quad_out_of_bounds": 3
+  },
+  "formats": {
+    "135": 320,
+    "645": 27
+  },
+  "mean_confidence": 0.9541760806916427,
+  "median_confidence": 0.9712,
+  "discovery": {
+    "negative_count": 671,
+    "positive_count": 703,
+    "matched_count": 444,
+    "processed_pairs": 444,
+    "negatives_without_positive": 227,
+    "positives_without_negative": 259,
+    "duplicate_negative_stems": [],
+    "duplicate_positive_stems": []
+  }
+}

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from qnegative.core.frame_ranker import detect_ranked_frame_candidates
 from qnegative.core.geometry import rotated_rect_corners, scale_point, scale_rect
 from qnegative.core.models import ImagePoint, ImageRect, ImageSize
 from qnegative.core.preview import resize_long_edge
@@ -13,7 +14,8 @@ from qnegative.core.preview import resize_long_edge
 
 DETECT_MAX_EDGE = 1400
 FRAME_CONFIDENCE_HIGH = 0.72
-FRAME_CONFIDENCE_MEDIUM = 0.58
+FRAME_CONFIDENCE_MEDIUM = 0.68
+FRAME_MAX_AREA_RATIO = 0.70
 BASE_CONFIDENCE_HIGH = 0.68
 BASE_CONFIDENCE_MEDIUM = 0.45
 
@@ -74,6 +76,7 @@ def detect_frame_and_base(
     preview_size: ImageSize,
     source_size: ImageSize,
     format_hint: str = "auto",
+    detect_base: bool = True,
 ) -> AutoDetectResult:
     frame = detect_film_frame(
         preview_linear_rgb,
@@ -81,11 +84,15 @@ def detect_frame_and_base(
         source_size=source_size,
         format_hint=format_hint,
     )
+    if not detect_base:
+        return AutoDetectResult(frame=frame, base=None)
+
+    frame_for_base = frame.rect if frame is not None and frame.confidence_level == "high" else None
     base = detect_film_base(
         preview_linear_rgb,
         preview_size=preview_size,
         source_size=source_size,
-        frame_rect=frame.rect if frame is not None else None,
+        frame_rect=frame_for_base,
     )
     return AutoDetectResult(frame=frame, base=base)
 
@@ -101,6 +108,15 @@ def detect_film_frame(
     if image.size == 0:
         return None
 
+    ranked = _ranker_frame_candidates(
+        image,
+        preview_size=preview_size,
+        source_size=source_size,
+        format_hint=format_hint,
+    )
+    if ranked is not None:
+        return ranked
+
     scaled = resize_long_edge(image, max_size=DETECT_MAX_EDGE)
     detect_size = ImageSize(width=scaled.shape[1], height=scaled.shape[0])
     gray = _normalize_luminance_to_uint8(scaled)
@@ -110,7 +126,7 @@ def detect_film_frame(
     best: _FrameCandidate | None = None
     image_area = float(gray.shape[0] * gray.shape[1])
     for method, mask in masks:
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         contours = sorted(contours, key=cv2.contourArea, reverse=True)[:48]
         for contour in contours:
             candidate = _score_frame_contour(
@@ -126,6 +142,15 @@ def detect_film_frame(
             if best is None or candidate.confidence > best.confidence:
                 best = candidate
 
+    projection_candidate = _projection_frame_candidate(
+        gray,
+        edges,
+        image_size=detect_size,
+        format_hint=format_hint,
+    )
+    if projection_candidate is not None and (best is None or projection_candidate.confidence > best.confidence):
+        best = projection_candidate
+
     if best is None or best.confidence < FRAME_CONFIDENCE_MEDIUM:
         return None
 
@@ -133,6 +158,38 @@ def detect_film_frame(
     source_rect = scale_rect(preview_rect, preview_size, source_size)
     return AutoFrameResult(
         rect=source_rect,
+        confidence=round(float(best.confidence), 3),
+        confidence_level=_confidence_level(best.confidence, FRAME_CONFIDENCE_HIGH, FRAME_CONFIDENCE_MEDIUM),
+        format_hint=best.format_hint,
+        method=best.method,
+    )
+
+
+def _ranker_frame_candidates(
+    image: np.ndarray,
+    *,
+    preview_size: ImageSize,
+    source_size: ImageSize,
+    format_hint: str,
+) -> AutoFrameResult | None:
+    try:
+        candidates = detect_ranked_frame_candidates(
+            image,
+            preview_size=preview_size,
+            source_size=source_size,
+            format_hint=format_hint,
+            top_k=1,
+        )
+    except Exception:
+        return None
+    if not candidates:
+        return None
+
+    best = candidates[0]
+    if best.confidence < FRAME_CONFIDENCE_MEDIUM:
+        return None
+    return AutoFrameResult(
+        rect=best.rect,
         confidence=round(float(best.confidence), 3),
         confidence_level=_confidence_level(best.confidence, FRAME_CONFIDENCE_HIGH, FRAME_CONFIDENCE_MEDIUM),
         format_hint=best.format_hint,
@@ -234,6 +291,134 @@ def _candidate_masks(gray: np.ndarray, edges: np.ndarray) -> list[tuple[str, np.
     return masks
 
 
+def _projection_frame_candidate(
+    gray: np.ndarray,
+    edges: np.ndarray,
+    *,
+    image_size: ImageSize,
+    format_hint: str,
+) -> _FrameCandidate | None:
+    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    col_signal = _smooth_signal(np.percentile(np.abs(grad_x), 92, axis=0), 25)
+    row_signal = _smooth_signal(np.percentile(np.abs(grad_y), 92, axis=1), 25)
+
+    left_candidates = _inner_boundaries(col_signal, from_start=True)
+    right_candidates = _inner_boundaries(col_signal, from_start=False)
+    top_candidates = _inner_boundaries(row_signal, from_start=True)
+    bottom_candidates = _inner_boundaries(row_signal, from_start=False)
+    if not left_candidates or not right_candidates or not top_candidates or not bottom_candidates:
+        return None
+
+    best: _FrameCandidate | None = None
+    min_width = int(image_size.width * 0.28)
+    min_height = int(image_size.height * 0.28)
+    for left_idx, left_strength in left_candidates:
+        for right_idx, right_strength in right_candidates:
+            width = right_idx - left_idx + 1
+            if width < min_width:
+                continue
+            for top_idx, top_strength in top_candidates:
+                for bottom_idx, bottom_strength in bottom_candidates:
+                    height = bottom_idx - top_idx + 1
+                    if height < min_height:
+                        continue
+                    if right_idx <= left_idx or bottom_idx <= top_idx:
+                        continue
+
+                    rect = ImageRect(
+                        x=int(left_idx),
+                        y=int(top_idx),
+                        width=int(width),
+                        height=int(height),
+                        angle=0.0,
+                    )
+                    area_ratio = (width * height) / max(1.0, float(image_size.width * image_size.height))
+                    if area_ratio < 0.10 or area_ratio > FRAME_MAX_AREA_RATIO:
+                        continue
+                    if min(width, height) < min(image_size.width, image_size.height) * 0.16:
+                        continue
+
+                    corners = rotated_rect_corners(rect)
+                    aspect_score, matched_format = _aspect_score(width / max(height, 1), format_hint)
+                    edge_support = _edge_support(edges, corners)
+                    border_clearance = _border_clearance(corners, image_size)
+                    if border_clearance < 0.12 and area_ratio > 0.62:
+                        continue
+                    strength_values = np.array(
+                        [left_strength, right_strength, top_strength, bottom_strength],
+                        dtype=np.float32,
+                    )
+                    strength_score = float(np.clip(np.mean(strength_values) / 38.0, 0.0, 1.0))
+                    area_score = 1.0 - np.clip(abs(area_ratio - 0.38) / 0.38, 0.0, 1.0)
+                    center_prior = _center_prior(rect.center_x, rect.center_y, image_size)
+
+                    confidence = float(
+                        np.clip(
+                            strength_score * 0.28
+                            + edge_support * 0.20
+                            + aspect_score * 0.22
+                            + border_clearance * 0.10
+                            + area_score * 0.12
+                            + center_prior * 0.08,
+                            0.0,
+                            0.98,
+                        )
+                    )
+                    if confidence < FRAME_CONFIDENCE_MEDIUM:
+                        continue
+                    candidate = _FrameCandidate(
+                        rect=rect,
+                        confidence=confidence,
+                        format_hint=matched_format,
+                        method="projection-inner",
+                    )
+                    if best is None or candidate.confidence > best.confidence:
+                        best = candidate
+
+    return best
+
+
+def _smooth_signal(signal: np.ndarray, window: int) -> np.ndarray:
+    if signal.size == 0 or window <= 1:
+        return signal.astype(np.float32)
+    kernel = np.ones(window, dtype=np.float32) / window
+    return np.convolve(signal.astype(np.float32), kernel, mode="same")
+
+
+def _inner_boundaries(signal: np.ndarray, *, from_start: bool) -> list[tuple[int, float]]:
+    length = signal.size
+    if length < 32:
+        return []
+    low = int(round(length * 0.02))
+    high = int(round(length * 0.49))
+    if not from_start:
+        start = int(round(length * 0.51))
+        stop = int(round(length * 0.98))
+    else:
+        start = low
+        stop = high
+    start = max(0, min(start, length - 1))
+    stop = max(start + 1, min(stop, length))
+    search = signal[start:stop]
+    if search.size == 0:
+        return []
+    noise_floor = float(np.percentile(signal, 74))
+    ranked = np.argsort(search)[::-1]
+    candidates: list[tuple[int, float]] = []
+    for offset in ranked[:32]:
+        idx = int(start + offset)
+        value = float(signal[idx])
+        if value < max(noise_floor * 1.4, noise_floor + 3.5):
+            break
+        if any(abs(idx - existing_idx) < 6 for existing_idx, _ in candidates):
+            continue
+        candidates.append((idx, value))
+        if len(candidates) >= 4:
+            break
+    return candidates
+
+
 def _score_frame_contour(
     contour: np.ndarray,
     edges: np.ndarray,
@@ -254,7 +439,7 @@ def _score_frame_contour(
 
     rect_area = float(width * height)
     area_ratio = rect_area / max(image_area, 1.0)
-    if area_ratio < 0.10 or area_ratio > 0.94:
+    if area_ratio < 0.10 or area_ratio > FRAME_MAX_AREA_RATIO:
         return None
     if min(width, height) < min(image_size.width, image_size.height) * 0.16:
         return None
@@ -266,8 +451,10 @@ def _score_frame_contour(
     edge_support = _edge_support(edges, cv2.boxPoints(rect))
     center_prior = _center_prior(center_x, center_y, image_size)
     border_clearance = _border_clearance(cv2.boxPoints(rect), image_size)
+    if border_clearance < 0.12 and area_ratio > 0.62:
+        return None
     angle_score = 1.0 - np.clip(abs(angle) / 18.0, 0.0, 1.0) * 0.35
-    area_score = 1.0 - np.clip(abs(area_ratio - 0.48) / 0.48, 0.0, 1.0)
+    area_score = 1.0 - np.clip(abs(area_ratio - 0.38) / 0.38, 0.0, 1.0)
 
     confidence = float(
         np.clip(

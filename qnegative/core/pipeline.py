@@ -177,8 +177,6 @@ def build_negative_base_preview(
 ) -> NegativeBasePreview:
     if preview_linear_rgb.ndim != 3 or preview_linear_rgb.shape[2] != 3:
         raise PipelineError("Preview image must be an RGB array.")
-    if mask_point is None:
-        raise PipelineError("Select the film base with the base picker first.")
     if film_rect is None or not film_rect.is_valid():
         raise PipelineError("Select a valid negative frame area first.")
 
@@ -186,12 +184,15 @@ def build_negative_base_preview(
         width=preview_linear_rgb.shape[1],
         height=preview_linear_rgb.shape[0],
     )
-    mask_rgb = sample_mask_rgb(
-        preview_linear_rgb,
-        source_size=source_size,
-        preview_size=preview_size,
-        mask_point=mask_point,
-    )
+    if mask_point is None:
+        mask_rgb = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+    else:
+        mask_rgb = sample_mask_rgb(
+            preview_linear_rgb,
+            source_size=source_size,
+            preview_size=preview_size,
+            mask_point=mask_point,
+        )
 
     film_rect_preview = scale_rect(film_rect, source_size, preview_size)
     film_rect_preview = clamp_rect_to_image(film_rect_preview, preview_size)

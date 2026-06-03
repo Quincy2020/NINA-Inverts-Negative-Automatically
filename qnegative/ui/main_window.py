@@ -394,7 +394,7 @@ class TiffExportTask(QRunnable):
         *,
         source_path: Path,
         output_path: Path,
-        mask_point: ImagePoint,
+        mask_point: ImagePoint | None,
         film_rect: ImageRect,
         adjustments: AdjustmentParams,
         flip_horizontal: bool,
@@ -838,6 +838,7 @@ class MainWindow(QMainWindow):
                     preview_size=self.current_preview.preview_size,
                     source_size=self.current_preview.source_size,
                     format_hint=self.control_panel.auto_format(),
+                    detect_base=self._film_base_required_for_current_mode(),
                 )
                 frame_result = result.frame
                 base_result = result.base
@@ -881,7 +882,11 @@ class MainWindow(QMainWindow):
 
         changed = False
         details: list[str] = []
-        if frame_result is not None and mode in {"frame", "frame_base"}:
+        if (
+            frame_result is not None
+            and mode in {"frame", "frame_base"}
+            and frame_result.confidence_level in {"high", "fallback"}
+        ):
             self.film_rect = frame_result.rect
             self.control_panel.set_film_status(
                 f"Frame: {frame_result.rect.label()}\nAuto {frame_result.confidence_level} "
@@ -889,6 +894,8 @@ class MainWindow(QMainWindow):
             )
             details.append(f"frame {frame_result.confidence_level} {frame_result.confidence:.2f}")
             changed = True
+        elif frame_result is not None and mode in {"frame", "frame_base"}:
+            details.append(f"frame candidate rejected {frame_result.confidence:.2f}")
         if base_result is not None and mode in {"base", "frame_base"} and base_result.point is not None:
             self.mask_point = base_result.point
             self.control_panel.set_mask_status(
@@ -979,6 +986,14 @@ class MainWindow(QMainWindow):
             if show_errors:
                 QMessageBox.information(self, "Invert Preview", "Open a RAW file and generate a linear preview first.")
             return False
+        if self.film_rect is None or not self.film_rect.is_valid():
+            if show_errors:
+                QMessageBox.information(self, "Invert Preview", "Select a valid frame area first.")
+            return False
+        if self._film_base_required_for_current_mode() and self.mask_point is None:
+            if show_errors:
+                QMessageBox.information(self, "Invert Preview", "Pick the film base before using this inversion mode.")
+            return False
 
         interactive = bool(interactive and not show_errors and not self.auto_levels_pending)
         quality = INTERACTIVE_RENDER_QUALITY if interactive else FINAL_RENDER_QUALITY
@@ -1045,7 +1060,11 @@ class MainWindow(QMainWindow):
             result,
             update_filmstrip=output.quality == FINAL_RENDER_QUALITY,
         )
-        mask_rgb = ", ".join(f"{value:.4f}" for value in result.mask_rgb)
+        if self.mask_point is None and self.adjustments.invert_mode == InvertMode.LAB_PRINT.value:
+            base_text = "Base fallback: none"
+        else:
+            mask_rgb = ", ".join(f"{value:.4f}" for value in result.mask_rgb)
+            base_text = f"Base RGB {mask_rgb}"
         wb_gains = ", ".join(f"{value:.3f}" for value in displayed_result.wb_gains)
         wb_label = (
             "WB CMY offset"
@@ -1054,7 +1073,7 @@ class MainWindow(QMainWindow):
             else "WB gain"
         )
         self.control_panel.set_image_status(
-            f"Positive preview {displayed_result.width} x {displayed_result.height}\nMode {invert_mode_label(self.adjustments.invert_mode)}\nBase RGB {mask_rgb}\n{wb_label} {wb_gains}"
+            f"Positive preview {displayed_result.width} x {displayed_result.height}\nMode {invert_mode_label(self.adjustments.invert_mode)}\n{base_text}\n{wb_label} {wb_gains}"
         )
         self.control_panel.set_histogram(displayed_result.histogram)
         self.negative_preview_active = True
@@ -1089,9 +1108,14 @@ class MainWindow(QMainWindow):
     def _schedule_preview_if_ready(self) -> None:
         if self.current_preview is None:
             return
-        if self.mask_point is None or self.film_rect is None or not self.film_rect.is_valid():
+        if self.film_rect is None or not self.film_rect.is_valid():
+            return
+        if self._film_base_required_for_current_mode() and self.mask_point is None:
             return
         self.preview_refresh_timer.start()
+
+    def _film_base_required_for_current_mode(self) -> bool:
+        return self.adjustments.invert_mode != InvertMode.LAB_PRINT.value
 
     def _preview_for_render(self, *, interactive: bool) -> RawPreview:
         if self.current_preview is None:
@@ -1271,7 +1295,7 @@ class MainWindow(QMainWindow):
         if self.current_path is None or self.current_path.suffix.lower() not in RAW_EXTENSIONS:
             QMessageBox.information(self, "Export TIFF", "Open a RAW file before exporting.")
             return
-        if self.mask_point is None:
+        if self._film_base_required_for_current_mode() and self.mask_point is None:
             QMessageBox.information(self, "Export TIFF", "Pick the film base before exporting.")
             return
         if self.film_rect is None or not self.film_rect.is_valid():

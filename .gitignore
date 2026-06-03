@@ -17,6 +17,7 @@ env/
 *.raw
 *.dng
 *.xmp
+*.stackdump
 
 exports/
 output/
