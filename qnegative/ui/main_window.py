@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Event
 from time import perf_counter
 
 import numpy as np
@@ -114,6 +115,10 @@ RAW_PREVIEW_CACHE_LIMIT = 16
 
 
 class BatchExportDialog(QDialog):
+    pauseRequested = Signal()
+    resumeRequested = Signal()
+    cancelRequested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("batchExportDialog")
@@ -131,6 +136,9 @@ class BatchExportDialog(QDialog):
         self.progress.setFormat("Waiting")
         self.queue = QListWidget()
         self.queue.setObjectName("batchQueue")
+        self.pause_button = QPushButton("Pause")
+        self.resume_button = QPushButton("Resume")
+        self.cancel_button = QPushButton("Cancel")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -140,6 +148,15 @@ class BatchExportDialog(QDialog):
         layout.addWidget(self.progress)
         layout.addWidget(QLabel("Queue"))
         layout.addWidget(self.queue, 1)
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.pause_button)
+        button_row.addWidget(self.resume_button)
+        button_row.addWidget(self.cancel_button)
+        layout.addLayout(button_row)
+        self.pause_button.clicked.connect(self.pauseRequested.emit)
+        self.resume_button.clicked.connect(self.resumeRequested.emit)
+        self.cancel_button.clicked.connect(self.cancelRequested.emit)
+        self.set_running(False)
         self._apply_style()
 
     def set_jobs(self, paths: list[Path]) -> None:
@@ -151,6 +168,7 @@ class BatchExportDialog(QDialog):
         self.progress.setValue(0)
         self.progress.setFormat("Queued")
         self.current_label.setText("Waiting")
+        self.set_running(True)
 
     def set_current(self, path: Path) -> None:
         self.current_label.setText(path.name)
@@ -177,8 +195,14 @@ class BatchExportDialog(QDialog):
         self.current_label.setText(text)
         self.progress.setValue(100)
         self.progress.setFormat(text)
+        self.set_running(False)
         if auto_close_ms is not None:
             QTimer.singleShot(auto_close_ms, self.hide)
+
+    def set_running(self, running: bool, *, paused: bool = False) -> None:
+        self.pause_button.setEnabled(running and not paused)
+        self.resume_button.setEnabled(running and paused)
+        self.cancel_button.setEnabled(running)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         event.ignore()
@@ -225,6 +249,20 @@ class BatchExportDialog(QDialog):
             QProgressBar::chunk {
                 background: #4aa3ff;
                 border-radius: 4px;
+            }
+            QPushButton {
+                background: #2d333d;
+                border: 1px solid #444c59;
+                border-radius: 5px;
+                color: #f2f4f7;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background: #38414d;
+            }
+            QPushButton:disabled {
+                color: #747d8a;
+                background: #22272f;
             }
             """
         )
@@ -874,6 +912,11 @@ class ExportSignals(QObject):
     progress = Signal(int, str)
     finished = Signal(str, object)
     failed = Signal(str)
+    cancelled = Signal(str)
+
+
+class ExportCancelled(Exception):
+    pass
 
 
 class TiffExportTask(QRunnable):
@@ -890,6 +933,7 @@ class TiffExportTask(QRunnable):
         rotation_quarters: int,
         auto_levels_pending: bool,
         preview_cmy_offsets: np.ndarray | None = None,
+        cancel_event: Event | None = None,
     ) -> None:
         super().__init__()
         self.source_path = source_path
@@ -906,12 +950,14 @@ class TiffExportTask(QRunnable):
             if preview_cmy_offsets is not None
             else None
         )
+        self.cancel_event = cancel_event
         self.signals = ExportSignals()
 
     def run(self) -> None:
         timings: dict[str, float] = {}
         stage_start = perf_counter()
         try:
+            self._raise_if_cancelled()
             self.signals.progress.emit(5, "Loading RAW")
             needs_camera_transform = self.adjustments.camera_color_strength > 0
             raw_image = load_raw_rgb16(
@@ -920,6 +966,7 @@ class TiffExportTask(QRunnable):
                 include_display_transform=needs_camera_transform,
             )
             timings["RAW decode"] = perf_counter() - stage_start
+            self._raise_if_cancelled()
             self.signals.progress.emit(30, self._timed_progress_text("Building base", timings))
 
             stage_start = perf_counter()
@@ -932,6 +979,7 @@ class TiffExportTask(QRunnable):
                 camera_to_srgb_matrix=raw_image.camera_to_srgb_matrix,
             )
             timings["Build base"] = perf_counter() - stage_start
+            self._raise_if_cancelled()
             positive_text = (
                 "Processing positive with preview CMY WB"
                 if self.preview_cmy_offsets is not None
@@ -942,6 +990,7 @@ class TiffExportTask(QRunnable):
             stage_start = perf_counter()
             export_linear_rgb = self._process_export(base)
             timings["Lab Print"] = perf_counter() - stage_start
+            self._raise_if_cancelled()
 
             self.signals.progress.emit(75, self._timed_progress_text("Preparing TIFF", timings))
             stage_start = perf_counter()
@@ -953,6 +1002,7 @@ class TiffExportTask(QRunnable):
             )
             tiff_rgb16 = linear_to_srgb16(linear_rgb)
             timings["Prepare TIFF"] = perf_counter() - stage_start
+            self._raise_if_cancelled()
             self.signals.progress.emit(90, self._timed_progress_text("Writing TIFF", timings))
 
             stage_start = perf_counter()
@@ -964,11 +1014,18 @@ class TiffExportTask(QRunnable):
                 photometric="rgb",
             )
             timings["TIFF write"] = perf_counter() - stage_start
+        except ExportCancelled as exc:
+            self.signals.cancelled.emit(str(exc))
+            return
         except Exception as exc:
             self.signals.failed.emit(str(exc))
             return
 
         self.signals.finished.emit(str(self.output_path), timings)
+
+    def _raise_if_cancelled(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise ExportCancelled("Export cancelled")
 
     @staticmethod
     def _timed_progress_text(current: str, timings: dict[str, float]) -> str:
@@ -1097,7 +1154,10 @@ class MainWindow(QMainWindow):
         self._batch_export_total = 0
         self._batch_export_done = 0
         self._batch_export_active = False
+        self._batch_export_paused = False
+        self._batch_export_cancel_requested = False
         self._batch_export_current_path: Path | None = None
+        self._export_cancel_event: Event | None = None
         self._default_export_dir: Path | None = None
         self._gpu_preview_enabled = True
         self._auto_invert_after_frame_change = True
@@ -1116,6 +1176,9 @@ class MainWindow(QMainWindow):
         self.preview_tabs = QTabWidget()
         self.preview_tabs.setObjectName("previewTabs")
         self.batch_export_dialog = BatchExportDialog(self)
+        self.batch_export_dialog.pauseRequested.connect(self.pause_batch_export)
+        self.batch_export_dialog.resumeRequested.connect(self.resume_batch_export)
+        self.batch_export_dialog.cancelRequested.connect(self.cancel_batch_export)
         self.empty_state = QWidget()
         self.empty_state.setObjectName("emptyState")
         self.open_empty_button = QPushButton("Open Folder")
@@ -2355,6 +2418,7 @@ class MainWindow(QMainWindow):
         if output_path.suffix.lower() not in {".tif", ".tiff"}:
             output_path = output_path.with_suffix(".tif")
 
+        self._export_cancel_event = Event()
         task = TiffExportTask(
             source_path=self.current_path,
             output_path=output_path,
@@ -2366,9 +2430,11 @@ class MainWindow(QMainWindow):
             rotation_quarters=self._preview_rotation_quarters,
             auto_levels_pending=self.auto_levels_pending,
             preview_cmy_offsets=self._current_preview_cmy_offsets_for_export(),
+            cancel_event=self._export_cancel_event,
         )
         task.signals.finished.connect(self._export_finished)
         task.signals.failed.connect(self._export_failed)
+        task.signals.cancelled.connect(self._export_cancelled)
         task.signals.progress.connect(self._export_progress_updated)
         self._export_in_progress = True
         self.control_panel.export_button.setEnabled(False)
@@ -2406,7 +2472,10 @@ class MainWindow(QMainWindow):
         self._batch_export_total = len(items)
         self._batch_export_done = 0
         self._batch_export_active = True
+        self._batch_export_paused = False
+        self._batch_export_cancel_requested = False
         self._export_in_progress = True
+        self._export_cancel_event = Event()
         self.batch_export_dialog.set_jobs([item["source_path"] for item in items])
         self.batch_export_dialog.show()
         self.batch_export_dialog.raise_()
@@ -2456,30 +2525,107 @@ class MainWindow(QMainWindow):
         return np.asarray(cached.result.wb_gains, dtype=np.float32).copy()
 
     def _start_next_batch_export(self) -> None:
-        if not self._batch_export_queue:
-            self._batch_export_active = False
-            self._export_in_progress = False
+        if self._batch_export_cancel_requested:
+            self._finish_batch_export(
+                f"Batch export cancelled after {self._batch_export_done}/{self._batch_export_total}",
+                auto_close_ms=None,
+                restart_preinvert=True,
+            )
+            return
+        if self._batch_export_paused:
             self._batch_export_current_path = None
-            self.control_panel.update_export_progress(100, "Batch export complete")
-            self.control_panel.set_export_progress(False)
-            self.control_panel.export_button.setEnabled(True)
-            self.control_panel.batch_export_button.setEnabled(True)
-            self.batch_export_dialog.finish(
+            self.batch_export_dialog.current_label.setText("Paused")
+            self.batch_export_dialog.update_progress(
+                round(self._batch_export_done / max(1, self._batch_export_total) * 100),
+                f"Paused after {self._batch_export_done}/{self._batch_export_total}",
+            )
+            self.batch_export_dialog.set_running(True, paused=True)
+            self.control_panel.update_export_progress(
+                round(self._batch_export_done / max(1, self._batch_export_total) * 100),
+                "Batch export paused",
+            )
+            self.statusBar().showMessage("Batch export paused")
+            return
+        if not self._batch_export_queue:
+            self._finish_batch_export(
                 f"Batch exported {self._batch_export_done} TIFFs",
                 auto_close_ms=1200,
+                restart_preinvert=True,
             )
-            self.statusBar().showMessage(f"Batch exported {self._batch_export_done} TIFFs")
-            self._start_next_preinvert_jobs()
             return
 
         item = self._batch_export_queue.pop(0)
         self._batch_export_current_path = item["source_path"]
         self.batch_export_dialog.set_current(self._batch_export_current_path)
+        self.batch_export_dialog.set_running(True, paused=False)
+        self._export_cancel_event = Event()
+        item = dict(item)
+        item["cancel_event"] = self._export_cancel_event
         task = TiffExportTask(**item)
         task.signals.finished.connect(self._export_finished)
         task.signals.failed.connect(self._export_failed)
+        task.signals.cancelled.connect(self._export_cancelled)
         task.signals.progress.connect(self._export_progress_updated)
         self._thread_pool.start(task)
+
+    def pause_batch_export(self) -> None:
+        if not self._batch_export_active:
+            return
+        self._batch_export_paused = True
+        self.batch_export_dialog.set_running(True, paused=True)
+        self.statusBar().showMessage("Batch export will pause after the current TIFF")
+
+    def resume_batch_export(self) -> None:
+        if not self._batch_export_active or not self._batch_export_paused:
+            return
+        self._batch_export_paused = False
+        self.batch_export_dialog.set_running(True, paused=False)
+        self.statusBar().showMessage("Batch export resumed")
+        if self._batch_export_current_path is None:
+            self._start_next_batch_export()
+
+    def cancel_batch_export(self) -> None:
+        if not self._batch_export_active and not self._export_in_progress:
+            return
+        self._batch_export_cancel_requested = True
+        self._batch_export_paused = False
+        self._batch_export_queue = []
+        if self._export_cancel_event is not None:
+            self._export_cancel_event.set()
+        self.batch_export_dialog.set_running(False)
+        self.batch_export_dialog.update_progress(
+            round(self._batch_export_done / max(1, self._batch_export_total) * 100),
+            "Cancelling...",
+        )
+        self.statusBar().showMessage("Cancelling export...")
+        if self._batch_export_current_path is None:
+            self._finish_batch_export(
+                f"Batch export cancelled after {self._batch_export_done}/{self._batch_export_total}",
+                auto_close_ms=None,
+                restart_preinvert=True,
+            )
+
+    def _finish_batch_export(
+        self,
+        text: str,
+        *,
+        auto_close_ms: int | None,
+        restart_preinvert: bool,
+    ) -> None:
+        self._batch_export_active = False
+        self._batch_export_paused = False
+        self._batch_export_cancel_requested = False
+        self._export_in_progress = False
+        self._batch_export_current_path = None
+        self._export_cancel_event = None
+        self.control_panel.update_export_progress(100, text)
+        self.control_panel.set_export_progress(False)
+        self.control_panel.export_button.setEnabled(True)
+        self.control_panel.batch_export_button.setEnabled(True)
+        self.batch_export_dialog.finish(text, auto_close_ms=auto_close_ms)
+        self.statusBar().showMessage(text)
+        if restart_preinvert:
+            self._start_next_preinvert_jobs()
 
     def _current_preview_cmy_offsets_for_export(self) -> np.ndarray | None:
         if self.current_path is None:
@@ -2525,6 +2671,7 @@ class MainWindow(QMainWindow):
             return
 
         self._export_in_progress = False
+        self._export_cancel_event = None
         timing_text = self._format_export_timings(timings)
         complete_text = f"Export complete ({timing_text})" if timing_text else "Export complete"
         self.control_panel.update_export_progress(100, complete_text)
@@ -2548,16 +2695,36 @@ class MainWindow(QMainWindow):
 
     def _export_failed(self, message: str) -> None:
         if self._batch_export_active:
-            self._batch_export_active = False
             self._batch_export_queue = []
-            self._batch_export_current_path = None
+            self._finish_batch_export(
+                f"Batch export failed after {self._batch_export_done}/{self._batch_export_total}",
+                auto_close_ms=None,
+                restart_preinvert=True,
+            )
+        else:
+            self._export_in_progress = False
+            self._export_cancel_event = None
+            self.control_panel.set_export_progress(False)
+            self.control_panel.export_button.setEnabled(True)
+            self.control_panel.batch_export_button.setEnabled(True)
+            self._start_next_preinvert_jobs()
+        QMessageBox.warning(self, "Export TIFF Failed", message)
+        self.statusBar().showMessage("TIFF export failed")
+
+    def _export_cancelled(self, message: str) -> None:
+        if self._batch_export_active:
+            self._finish_batch_export(
+                f"Batch export cancelled after {self._batch_export_done}/{self._batch_export_total}",
+                auto_close_ms=None,
+                restart_preinvert=True,
+            )
+            return
         self._export_in_progress = False
+        self._export_cancel_event = None
         self.control_panel.set_export_progress(False)
         self.control_panel.export_button.setEnabled(True)
         self.control_panel.batch_export_button.setEnabled(True)
-        self.batch_export_dialog.finish("Batch export failed")
-        QMessageBox.warning(self, "Export TIFF Failed", message)
-        self.statusBar().showMessage("TIFF export failed")
+        self.statusBar().showMessage(message or "Export cancelled")
         self._start_next_preinvert_jobs()
 
     def reset_workspace(self) -> None:
