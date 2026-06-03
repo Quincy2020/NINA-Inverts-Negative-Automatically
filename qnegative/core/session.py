@@ -13,6 +13,7 @@ from qnegative.core.models import (
     ImagePoint,
     ImageProcessingState,
     ImageRect,
+    LensCorrectionParams,
     TonalBalance,
 )
 
@@ -152,6 +153,7 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     values = {key: payload[key] for key in payload if key in allowed}
     values["color_balance"] = _color_balance_from_dict(payload.get("color_balance") or {})
     values["density_matrix"] = _density_matrix_from_dict(payload.get("density_matrix") or {})
+    values["lens_correction"] = _lens_correction_from_dict(payload.get("lens_correction") or {})
     return AdjustmentParams(**values)
 
 
@@ -185,3 +187,15 @@ def _density_matrix_from_dict(payload: dict[str, Any]) -> DensityMatrixParams:
     allowed = {item.name for item in fields(DensityMatrixParams)}
     values = {key: float(payload[key]) for key in payload if key in allowed}
     return DensityMatrixParams(**values)
+
+
+def _lens_correction_from_dict(payload: dict[str, Any]) -> LensCorrectionParams:
+    return LensCorrectionParams(
+        enabled=bool(payload.get("enabled", False)),
+        strength=int(payload.get("strength", 0)),
+        radius=int(payload.get("radius", 100)),
+        center_x=int(payload.get("center_x", 50)),
+        center_y=int(payload.get("center_y", 50)),
+        smoothness=int(payload.get("smoothness", 200)),
+        max_gain=int(payload.get("max_gain", 200)),
+    )

@@ -39,6 +39,7 @@ This build uses PyInstaller and keeps Qt/rawpy dependencies next to the executab
 - Histogram levels with black/mid/white controls.
 - Auto CMY white balance plus manual white balance controls.
 - Exposure, contrast, highlights, shadows, saturation, print curve, and analysis boundary controls.
+- Manual radial lens correction for camera-scan falloff before inversion.
 - 16-bit TIFF export.
 
 ## Roll Sessions
@@ -74,6 +75,7 @@ The default Lab Print path is:
 ```text
 RAW linear
 -> frame warp
+-> lens falloff correction
 -> normalized log signal
 -> levels / auto levels
 -> CMY auto white balance

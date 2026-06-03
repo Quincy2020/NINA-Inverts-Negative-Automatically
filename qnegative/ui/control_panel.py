@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFrame,
     QGroupBox,
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from qnegative.core.models import InvertMode, PrintCurveMode, ToolMode
+from qnegative.core.models import InvertMode, LensCorrectionParams, PrintCurveMode, ToolMode
 from qnegative.core.models import AdjustmentParams
 from qnegative.ui.collapsible_section import CollapsibleSection
 from qnegative.ui.density_matrix_panel import DensityMatrixPanel
@@ -111,6 +112,13 @@ class ControlPanel(QWidget):
         self.analysis_inset_spin.setRange(0, 20)
         self.analysis_inset_spin.setValue(5)
         self.analysis_inset_spin.setSuffix("%")
+        self.lens_enable_check = QCheckBox("Enable Lens Correction")
+        self.lens_strength_slider = self._make_slider(0, 100, 0)
+        self.lens_radius_slider = self._make_slider(20, 180, 100)
+        self.lens_center_x_slider = self._make_slider(0, 100, 50)
+        self.lens_center_y_slider = self._make_slider(0, 100, 50)
+        self.lens_smoothness_slider = self._make_slider(25, 400, 200)
+        self.lens_max_gain_slider = self._make_slider(100, 300, 200)
         self.histogram_levels = HistogramLevelsWidget()
         self.density_matrix_panel = DensityMatrixPanel()
         self.camera_color_panel = self._camera_color_developer_panel()
@@ -218,7 +226,26 @@ class ControlPanel(QWidget):
         boundary_row.addStretch(1)
         boundary_row.addWidget(self.analysis_inset_spin)
         layout.addLayout(boundary_row)
+        layout.addWidget(self._lens_correction_section())
         return group
+
+    def _lens_correction_section(self) -> CollapsibleSection:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addWidget(self.lens_enable_check)
+        layout.addLayout(self._slider_row("Strength", self.lens_strength_slider, "0", "100"))
+        layout.addLayout(self._slider_row("Radius", self.lens_radius_slider, "20", "180"))
+        layout.addLayout(self._slider_row("Center X", self.lens_center_x_slider, "0", "100"))
+        layout.addLayout(self._slider_row("Center Y", self.lens_center_y_slider, "0", "100"))
+        layout.addLayout(self._slider_row("Smoothness", self.lens_smoothness_slider, "0.25", "4.0"))
+        layout.addLayout(self._slider_row("Max Gain", self.lens_max_gain_slider, "1.0x", "3.0x"))
+        hint = QLabel("Corrects camera/lens falloff before inversion. Start with Strength 20-40.")
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        return CollapsibleSection("Lens Correction", panel, expanded=False)
 
     def _density_matrix_section(self) -> CollapsibleSection:
         return CollapsibleSection("Density Matrix", self.density_matrix_panel, expanded=False)
@@ -307,10 +334,17 @@ class ControlPanel(QWidget):
             self.contrast_slider,
             self.saturation_slider,
             self.camera_color_slider,
+            self.lens_strength_slider,
+            self.lens_radius_slider,
+            self.lens_center_x_slider,
+            self.lens_center_y_slider,
+            self.lens_smoothness_slider,
+            self.lens_max_gain_slider,
         ):
             slider.sliderPressed.connect(self.adjustmentInteractionStarted.emit)
             slider.sliderReleased.connect(self.adjustmentInteractionFinished.emit)
             slider.valueChanged.connect(self._emit_adjustments)
+        self.lens_enable_check.toggled.connect(self._emit_adjustments)
         self.analysis_inset_spin.valueChanged.connect(self._emit_adjustments)
         self.density_matrix_panel.matrixChanged.connect(self._emit_adjustments)
         self.white_balance_panel.balanceChanged.connect(self._emit_adjustments)
@@ -344,6 +378,15 @@ class ControlPanel(QWidget):
                 "contrast": self.contrast_slider.value(),
                 "saturation": self.saturation_slider.value(),
                 "camera_color_strength": self.camera_color_slider.value(),
+                "lens_correction": LensCorrectionParams(
+                    enabled=self.lens_enable_check.isChecked(),
+                    strength=self.lens_strength_slider.value(),
+                    radius=self.lens_radius_slider.value(),
+                    center_x=self.lens_center_x_slider.value(),
+                    center_y=self.lens_center_y_slider.value(),
+                    smoothness=self.lens_smoothness_slider.value(),
+                    max_gain=self.lens_max_gain_slider.value(),
+                ),
                 "analysis_inset_percent": self.analysis_inset_spin.value(),
                 "invert_mode": self._current_invert_mode(),
                 "print_curve": self.print_curve_combo.currentData(),
@@ -491,6 +534,13 @@ class ControlPanel(QWidget):
             self.contrast_slider,
             self.saturation_slider,
             self.camera_color_slider,
+            self.lens_enable_check,
+            self.lens_strength_slider,
+            self.lens_radius_slider,
+            self.lens_center_x_slider,
+            self.lens_center_y_slider,
+            self.lens_smoothness_slider,
+            self.lens_max_gain_slider,
             self.analysis_inset_spin,
             self.histogram_levels,
             self.density_matrix_panel,
@@ -507,6 +557,13 @@ class ControlPanel(QWidget):
             self.contrast_slider.setValue(adjustments.contrast)
             self.saturation_slider.setValue(adjustments.saturation)
             self.camera_color_slider.setValue(adjustments.camera_color_strength)
+            self.lens_enable_check.setChecked(adjustments.lens_correction.enabled)
+            self.lens_strength_slider.setValue(adjustments.lens_correction.strength)
+            self.lens_radius_slider.setValue(adjustments.lens_correction.radius)
+            self.lens_center_x_slider.setValue(adjustments.lens_correction.center_x)
+            self.lens_center_y_slider.setValue(adjustments.lens_correction.center_y)
+            self.lens_smoothness_slider.setValue(adjustments.lens_correction.smoothness)
+            self.lens_max_gain_slider.setValue(adjustments.lens_correction.max_gain)
             self.analysis_inset_spin.setValue(adjustments.analysis_inset_percent)
             index = self.invert_mode_combo.findData(adjustments.invert_mode)
             self._developer_invert_mode = adjustments.invert_mode if index < 0 else None

@@ -46,6 +46,7 @@ from qnegative.core.models import (
     ImageRect,
     ImageSize,
     InvertMode,
+    LensCorrectionParams,
     ToolMode,
 )
 from qnegative.core.pipeline import (
@@ -416,6 +417,18 @@ def density_matrix_params_key(matrix: DensityMatrixParams) -> tuple[float, ...]:
     )
 
 
+def lens_correction_key(params: LensCorrectionParams) -> tuple:
+    return (
+        params.enabled,
+        params.strength,
+        params.radius,
+        params.center_x,
+        params.center_y,
+        params.smoothness,
+        params.max_gain,
+    )
+
+
 def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
     return (
         adjustments.invert_mode,
@@ -423,6 +436,7 @@ def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
         adjustments.auto_wb,
         color_balance_key(adjustments),
         density_matrix_params_key(adjustments.density_matrix),
+        lens_correction_key(adjustments.lens_correction),
         adjustments.exposure,
         adjustments.highlights,
         adjustments.shadows,
@@ -461,6 +475,7 @@ def base_stage_key(
     preview: RawPreview,
     mask_point: ImagePoint | None,
     film_rect: ImageRect | None,
+    adjustments: AdjustmentParams,
 ) -> tuple:
     return (
         "base",
@@ -472,6 +487,7 @@ def base_stage_key(
         matrix_key(preview.camera_to_srgb_matrix),
         image_point_key(mask_point),
         image_rect_key(film_rect),
+        lens_correction_key(adjustments.lens_correction),
     )
 
 
@@ -604,6 +620,7 @@ class PreInvertTask(QRunnable):
                 source_size=preview.source_size,
                 mask_point=None,
                 film_rect=frame.rect,
+                lens_correction=self.adjustments.lens_correction,
                 preview_camera_wb_linear_rgb=preview.preview_camera_wb_linear_rgb,
                 camera_to_srgb_matrix=preview.camera_to_srgb_matrix,
             )
@@ -770,7 +787,7 @@ class PreviewRenderTask(QRunnable):
 
     def run(self) -> None:
         try:
-            base_key = base_stage_key(self.preview, self.mask_point, self.film_rect)
+            base_key = base_stage_key(self.preview, self.mask_point, self.film_rect, self.adjustments)
             base = self._base_stage(base_key)
             if self.adjustments.invert_mode == InvertMode.LAB_PRINT.value:
                 output = self._lab_print_output(base_key, base)
@@ -802,6 +819,7 @@ class PreviewRenderTask(QRunnable):
             source_size=self.preview.source_size,
             mask_point=self.mask_point,
             film_rect=self.film_rect,
+            lens_correction=self.adjustments.lens_correction,
             preview_camera_wb_linear_rgb=self.preview.preview_camera_wb_linear_rgb,
             camera_to_srgb_matrix=self.preview.camera_to_srgb_matrix,
         )
@@ -975,6 +993,7 @@ class TiffExportTask(QRunnable):
                 source_size=raw_image.source_size,
                 mask_point=self.mask_point,
                 film_rect=self.film_rect,
+                lens_correction=self.adjustments.lens_correction,
                 preview_camera_wb_linear_rgb=raw_image.camera_wb_as_float32(),
                 camera_to_srgb_matrix=raw_image.camera_to_srgb_matrix,
             )
@@ -2323,6 +2342,7 @@ class MainWindow(QMainWindow):
             id(self.current_preview.camera_to_srgb_matrix),
             self.mask_point,
             self.film_rect,
+            lens_correction_key(self.adjustments.lens_correction),
         )
         if self._negative_base_cache_key == key and self._negative_base_cache is not None:
             return self._negative_base_cache
@@ -2332,6 +2352,7 @@ class MainWindow(QMainWindow):
             source_size=self.current_preview.source_size,
             mask_point=self.mask_point,
             film_rect=self.film_rect,
+            lens_correction=self.adjustments.lens_correction,
             preview_camera_wb_linear_rgb=self.current_preview.preview_camera_wb_linear_rgb,
             camera_to_srgb_matrix=self.current_preview.camera_to_srgb_matrix,
         )

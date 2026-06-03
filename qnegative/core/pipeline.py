@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from qnegative.core.geometry import clamp_rect_to_image, scale_point, scale_rect, warp_rotated_rect
-from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalanceParams, DensityMatrixParams, ImagePoint, ImageRect, ImageSize, InvertMode, PrintCurveMode, TonalBalance
+from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalanceParams, DensityMatrixParams, ImagePoint, ImageRect, ImageSize, InvertMode, LensCorrectionParams, PrintCurveMode, TonalBalance
 
 
 DENSITY_REFERENCE = 2.046
@@ -170,6 +170,7 @@ def process_negative_preview(
         source_size=source_size,
         mask_point=mask_point,
         film_rect=film_rect,
+        lens_correction=adjustments.lens_correction,
         preview_camera_wb_linear_rgb=preview_camera_wb_linear_rgb,
         camera_to_srgb_matrix=camera_to_srgb_matrix,
     )
@@ -182,6 +183,7 @@ def build_negative_base_preview(
     source_size: ImageSize,
     mask_point: ImagePoint | None,
     film_rect: ImageRect | None,
+    lens_correction: LensCorrectionParams | None = None,
     preview_camera_wb_linear_rgb: np.ndarray | None = None,
     camera_to_srgb_matrix: np.ndarray | None = None,
 ) -> NegativeBasePreview:
@@ -212,6 +214,11 @@ def build_negative_base_preview(
         if preview_camera_wb_linear_rgb.shape != preview_linear_rgb.shape:
             raise PipelineError("Camera WB preview must match the neutral RAW preview size.")
         film_camera_wb_linear = warp_rotated_rect(preview_camera_wb_linear_rgb, film_rect_preview)
+    if lens_correction is not None and lens_correction.enabled and lens_correction.strength != 0:
+        gain = radial_lens_correction_gain(film_linear.shape[:2], lens_correction)
+        film_linear = apply_lens_correction_gain(film_linear, gain)
+        if film_camera_wb_linear is not None:
+            film_camera_wb_linear = apply_lens_correction_gain(film_camera_wb_linear, gain)
     transmittance = film_linear / mask_rgb.reshape(1, 1, 3)
     inverted = invert_transmittance_simple(transmittance)
     density = transmittance_to_density(transmittance)
@@ -636,6 +643,33 @@ def analysis_inset_crop(image: np.ndarray, inset: float) -> np.ndarray:
 
 def analysis_inset_from_adjustments(adjustments: AdjustmentParams) -> float:
     return float(np.clip(adjustments.analysis_inset_percent / 100.0, 0.0, 0.20))
+
+
+def radial_lens_correction_gain(
+    shape: tuple[int, int],
+    params: LensCorrectionParams,
+) -> np.ndarray:
+    height, width = shape
+    if height <= 0 or width <= 0:
+        return np.ones((height, width), dtype=np.float32)
+
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    cx = (float(params.center_x) / 100.0) * max(1, width - 1)
+    cy = (float(params.center_y) / 100.0) * max(1, height - 1)
+    radius = max(0.05, float(params.radius) / 100.0) * max(width, height) * 0.5
+    distance = np.sqrt((x - cx) ** 2 + (y - cy) ** 2) / radius
+    distance = np.clip(distance, 0.0, 1.0)
+    smoothness = max(0.25, float(params.smoothness) / 100.0)
+    falloff = np.power(distance, smoothness, dtype=np.float32)
+    strength = max(0.0, float(params.strength) / 100.0)
+    max_gain = max(1.0, float(params.max_gain) / 100.0)
+    gain = 1.0 + strength * falloff * (max_gain - 1.0)
+    return np.clip(gain, 1.0, max_gain).astype(np.float32, copy=False)
+
+
+def apply_lens_correction_gain(image: np.ndarray, gain: np.ndarray) -> np.ndarray:
+    corrected = image.astype(np.float32, copy=False) * gain[:, :, None]
+    return np.clip(corrected, 0.0, 1.0).astype(np.float32, copy=False)
 
 
 def apply_log_hd_print_curve(

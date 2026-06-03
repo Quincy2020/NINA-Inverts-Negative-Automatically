@@ -107,12 +107,24 @@ class DensityMatrixParams:
 
 
 @dataclass
+class LensCorrectionParams:
+    enabled: bool = False
+    strength: int = 0
+    radius: int = 100
+    center_x: int = 50
+    center_y: int = 50
+    smoothness: int = 200
+    max_gain: int = 200
+
+
+@dataclass
 class AdjustmentParams:
     invert_mode: str = InvertMode.LAB_PRINT.value
     print_curve: str = PrintCurveMode.STANDARD.value
     auto_wb: bool = True
     color_balance: ColorBalanceParams = field(default_factory=ColorBalanceParams)
     density_matrix: DensityMatrixParams = field(default_factory=DensityMatrixParams)
+    lens_correction: LensCorrectionParams = field(default_factory=LensCorrectionParams)
     exposure: int = 0
     highlights: int = 0
     shadows: int = 0
