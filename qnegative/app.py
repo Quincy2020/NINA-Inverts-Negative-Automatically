@@ -15,9 +15,9 @@ def _create_splash() -> tuple[QSplashScreen, QProgressBar]:
     pixmap.fill(QColor("#15181d"))
     painter = QPainter(pixmap)
     painter.setPen(QColor("#f2f4f7"))
-    painter.drawText(28, 54, "QNegativeLab")
+    painter.drawText(28, 54, "NINA")
     painter.setPen(QColor("#9aa4b2"))
-    painter.drawText(28, 82, "Loading film workspace...")
+    painter.drawText(28, 82, "NINA Inverts Negative Automatically")
     painter.end()
 
     splash = QSplashScreen(pixmap)
@@ -44,7 +44,7 @@ def _create_splash() -> tuple[QSplashScreen, QProgressBar]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="QNegativeLab")
+    parser = argparse.ArgumentParser(description="NINA - NINA Inverts Negative Automatically")
     parser.add_argument(
         "--invert-mode",
         choices=[
@@ -59,8 +59,8 @@ def main() -> int:
     args, qt_args = parser.parse_known_args(sys.argv[1:])
 
     app = QApplication([sys.argv[0], *qt_args])
-    app.setApplicationName("QNegativeLab")
-    app.setOrganizationName("QNegativeLab")
+    app.setApplicationName("NINA")
+    app.setOrganizationName("NINA")
 
     splash, splash_bar = _create_splash()
     splash.show()

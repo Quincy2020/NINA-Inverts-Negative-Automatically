@@ -44,7 +44,7 @@ class ImageSamples:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Calibrate QNegativeLab against positive reference scans.")
+    parser = argparse.ArgumentParser(description="Calibrate NINA against positive reference scans.")
     parser.add_argument("--negative-dir", required=True, type=Path)
     parser.add_argument("--positive-dir", required=True, type=Path)
     parser.add_argument("--start", default=None)

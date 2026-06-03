@@ -1044,7 +1044,7 @@ def linear_to_srgb16(linear_rgb: np.ndarray) -> np.ndarray:
 class MainWindow(QMainWindow):
     def __init__(self, *, default_invert_mode: str = InvertMode.LAB_PRINT.value) -> None:
         super().__init__()
-        self.setWindowTitle("QNegativeLab")
+        self.setWindowTitle("NINA")
         self.default_invert_mode = default_invert_mode
         self.current_path: Path | None = None
         self.current_preview: RawPreview | None = None

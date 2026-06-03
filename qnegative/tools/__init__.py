@@ -1,1 +1,1 @@
-"""Offline tools for QNegativeLab."""
+"""Offline tools for NINA."""

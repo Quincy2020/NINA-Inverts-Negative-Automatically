@@ -139,7 +139,7 @@ class ControlPanel(QWidget):
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(12)
 
-        title = QLabel("QNegativeLab")
+        title = QLabel("NINA")
         title.setObjectName("appTitle")
         root.addWidget(title)
 

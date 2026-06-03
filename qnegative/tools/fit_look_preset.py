@@ -27,7 +27,7 @@ LUMA_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fit an empirical QNegativeLab look preset from reference scans.")
+    parser = argparse.ArgumentParser(description="Fit an empirical NINA look preset from reference scans.")
     parser.add_argument("--negative-dir", required=True, type=Path)
     parser.add_argument("--positive-dir", required=True, type=Path)
     parser.add_argument("--name", required=True, help="Preset name, e.g. fujiC400.")
