@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from qnegative.core.geometry import clamp_rect_to_image, scale_point, scale_rect, warp_rotated_rect
+from qnegative.core.lens_profiles import flat_frame_gain_for_size
 from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalanceParams, DensityMatrixParams, ImagePoint, ImageRect, ImageSize, InvertMode, LensCorrectionParams, PrintCurveMode, TonalBalance
 
 
@@ -33,7 +34,7 @@ LAB_PRINT_AUTO_WHITE_PADDING = 0.085
 LAB_PRINT_AUTO_MIN_SPAN = 0.54
 LAB_PRINT_AUTO_MID_LOW = 0.04
 LAB_PRINT_AUTO_MID_HIGH = 0.74
-LAB_PRINT_AUTO_VISUAL_TARGET = 0.30
+LAB_PRINT_AUTO_VISUAL_TARGET = 0.28
 LAB_PRINT_ANALYSIS_INSET = 0.05
 GLOBAL_BALANCE_SCALE = 55.0
 TONAL_BALANCE_SCALE = 75.0
@@ -196,6 +197,22 @@ def build_negative_base_preview(
         width=preview_linear_rgb.shape[1],
         height=preview_linear_rgb.shape[0],
     )
+    if (
+        lens_correction is not None
+        and lens_correction.enabled
+        and lens_correction.mode == "flat_frame"
+        and lens_correction.flat_profile_path
+    ):
+        gain = flat_frame_gain_for_size(lens_correction.flat_profile_path, preview_size)
+        strength = float(np.clip(lens_correction.flat_strength / 100.0, 0.0, 2.0))
+        gain = 1.0 + (gain - 1.0) * strength
+        gain = np.clip(gain, 1.0, max(1.0, lens_correction.max_gain / 100.0)).astype(np.float32, copy=False)
+        preview_linear_rgb = apply_lens_correction_gain(preview_linear_rgb, gain)
+        if preview_camera_wb_linear_rgb is not None:
+            preview_camera_wb_linear_rgb = apply_lens_correction_gain(
+                preview_camera_wb_linear_rgb,
+                gain,
+            )
     if mask_point is None:
         mask_rgb = np.array([1.0, 1.0, 1.0], dtype=np.float32)
     else:
@@ -214,7 +231,12 @@ def build_negative_base_preview(
         if preview_camera_wb_linear_rgb.shape != preview_linear_rgb.shape:
             raise PipelineError("Camera WB preview must match the neutral RAW preview size.")
         film_camera_wb_linear = warp_rotated_rect(preview_camera_wb_linear_rgb, film_rect_preview)
-    if lens_correction is not None and lens_correction.enabled and lens_correction.strength != 0:
+    if (
+        lens_correction is not None
+        and lens_correction.enabled
+        and lens_correction.mode == "radial"
+        and lens_correction.strength != 0
+    ):
         gain = radial_lens_correction_gain(film_linear.shape[:2], lens_correction)
         film_linear = apply_lens_correction_gain(film_linear, gain)
         if film_camera_wb_linear is not None:

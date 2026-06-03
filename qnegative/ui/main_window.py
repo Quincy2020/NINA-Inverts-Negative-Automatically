@@ -31,6 +31,12 @@ from PySide6.QtWidgets import (
 
 from qnegative.core.file_sequence import IMAGE_EXTENSIONS, RAW_EXTENSIONS, list_supported_files
 from qnegative.core.frame_ranker import load_frame_ranker
+from qnegative.core.lens_profiles import (
+    create_flat_frame_profile,
+    default_lens_profile_dir,
+    load_lens_profile,
+    save_radial_lens_profile,
+)
 from qnegative.core.auto_detect import (
     AutoBaseResult,
     AutoFrameResult,
@@ -420,12 +426,15 @@ def density_matrix_params_key(matrix: DensityMatrixParams) -> tuple[float, ...]:
 def lens_correction_key(params: LensCorrectionParams) -> tuple:
     return (
         params.enabled,
+        params.mode,
         params.strength,
         params.radius,
         params.center_x,
         params.center_y,
         params.smoothness,
         params.max_gain,
+        params.flat_profile_path,
+        params.flat_strength,
     )
 
 
@@ -1185,6 +1194,9 @@ class MainWindow(QMainWindow):
         self._auto_preinvert_radius = 1
         self._roll_session_folder: Path | None = None
         self._roll_session_autosave = True
+        self._undo_stack: list[AdjustmentParams] = []
+        self._redo_stack: list[AdjustmentParams] = []
+        self._applying_history = False
 
         self.control_panel = ControlPanel()
         self.origin_view = ImageView()
@@ -1440,6 +1452,16 @@ class MainWindow(QMainWindow):
         self.control_panel.adjustmentsChanged.connect(self.adjustments_changed)
         self.control_panel.adjustmentInteractionStarted.connect(self.adjustment_interaction_started)
         self.control_panel.adjustmentInteractionFinished.connect(self.adjustment_interaction_finished)
+        self.control_panel.lensProfileSaveRequested.connect(self.save_lens_profile)
+        self.control_panel.lensProfileLoadRequested.connect(self.load_lens_profile)
+        self.control_panel.lensFlatProfileCreateRequested.connect(self.create_flat_lens_profile)
+        self.control_panel.lensApplyAllRequested.connect(lambda: self.apply_lens_correction("all"))
+        self.control_panel.lensApplyUnprocessedRequested.connect(
+            lambda: self.apply_lens_correction("unprocessed")
+        )
+        self.control_panel.lensApplyCompletedRequested.connect(
+            lambda: self.apply_lens_correction("completed")
+        )
         self.open_empty_button.clicked.connect(self.open_folder)
 
         self.origin_view.maskPointSelected.connect(self.mask_point_selected)
@@ -1460,8 +1482,31 @@ class MainWindow(QMainWindow):
         self.roll_session_save_timer.timeout.connect(self._save_current_state)
 
     def _build_shortcuts(self) -> None:
+        self._shortcuts: list[QShortcut] = []
+
         tab_shortcut = QShortcut(QKeySequence(Qt.Key_Tab), self)
         tab_shortcut.activated.connect(self.toggle_preview_tab)
+        self._shortcuts.append(tab_shortcut)
+
+        invert_shortcut = QShortcut(QKeySequence(Qt.Key_I), self)
+        invert_shortcut.activated.connect(self.preview_inversion)
+        self._shortcuts.append(invert_shortcut)
+
+        auto_frame_shortcut = QShortcut(QKeySequence(Qt.Key_K), self)
+        auto_frame_shortcut.activated.connect(lambda: self.auto_detect_current("frame_base"))
+        self._shortcuts.append(auto_frame_shortcut)
+
+        undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        undo_shortcut.activated.connect(self.undo_adjustments)
+        self._shortcuts.append(undo_shortcut)
+
+        redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        redo_shortcut.activated.connect(self.redo_adjustments)
+        self._shortcuts.append(redo_shortcut)
+
+        redo_shift_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        redo_shift_shortcut.activated.connect(self.redo_adjustments)
+        self._shortcuts.append(redo_shift_shortcut)
 
     def set_gpu_preview_enabled(self, enabled: bool) -> None:
         self._gpu_preview_enabled = bool(enabled)
@@ -1537,6 +1582,164 @@ class MainWindow(QMainWindow):
             return
         self._default_export_dir = Path(folder)
         self.statusBar().showMessage(f"Default export directory: {self._default_export_dir}")
+
+    def save_lens_profile(self) -> None:
+        profile_dir = default_lens_profile_dir()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        default_path = profile_dir / "radial_lens_profile.json"
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Lens Profile",
+            str(default_path),
+            "NINA Lens Profile (*.json);;All files (*.*)",
+        )
+        if not selected:
+            return
+
+        output_path = Path(selected)
+        if output_path.suffix.lower() != ".json":
+            output_path = output_path.with_suffix(".json")
+        try:
+            save_radial_lens_profile(
+                output_path,
+                output_path.stem,
+                self.adjustments.lens_correction,
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Save Lens Profile", str(exc))
+            return
+        self.statusBar().showMessage(f"Lens profile saved: {output_path.name}")
+
+    def load_lens_profile(self) -> None:
+        profile_dir = default_lens_profile_dir()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Lens Profile",
+            str(profile_dir),
+            "NINA Lens Profile (*.json);;All files (*.*)",
+        )
+        if not selected:
+            return
+
+        try:
+            params = load_lens_profile(Path(selected))
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Load Lens Profile", str(exc))
+            return
+
+        updated = deepcopy(self.adjustments)
+        updated.lens_correction = params
+        self.control_panel.set_adjustments(updated, emit=True)
+        self.statusBar().showMessage(f"Lens profile loaded: {Path(selected).name}")
+
+    def create_flat_lens_profile(self) -> None:
+        source, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Flat RAW",
+            str(Path("D:/QNegativeLab/Len_calibration_data") if Path("D:/QNegativeLab/Len_calibration_data").exists() else Path.cwd()),
+            "RAW files (*.arw *.raw *.dng *.cr2 *.cr3 *.nef *.raf *.orf *.rw2);;All files (*.*)",
+        )
+        if not source:
+            return
+
+        profile_dir = default_lens_profile_dir()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        default_path = profile_dir / f"{Path(source).stem}_flat_profile.json"
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Flat Lens Profile",
+            str(default_path),
+            "NINA Lens Profile (*.json);;All files (*.*)",
+        )
+        if not selected:
+            return
+
+        output_path = Path(selected)
+        if output_path.suffix.lower() != ".json":
+            output_path = output_path.with_suffix(".json")
+        self.control_panel.set_activity_progress(True, text="Creating flat lens profile...")
+        try:
+            params = create_flat_frame_profile(
+                Path(source),
+                output_path,
+                name=output_path.stem,
+                map_long_edge=512,
+                blur_radius=41,
+                max_gain=max(1.0, self.adjustments.lens_correction.max_gain / 100.0),
+                map_mode="linked_luminance",
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Create Flat Lens Profile", str(exc))
+            return
+        finally:
+            self.control_panel.set_activity_progress(False)
+
+        updated = deepcopy(self.adjustments)
+        updated.lens_correction = params
+        self.control_panel.set_adjustments(updated, emit=True)
+        self.statusBar().showMessage(f"Flat lens profile created: {output_path.name}")
+
+    def apply_lens_correction(self, scope: str) -> None:
+        source_params = deepcopy(self.adjustments.lens_correction)
+        if self.current_path is not None:
+            self._save_current_state()
+
+        targets = self._lens_correction_targets(scope)
+        if not targets:
+            self.statusBar().showMessage(f"No {scope} negatives to update")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Apply Lens Correction",
+            f"Apply current lens correction to {len(targets)} image(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        for path in targets:
+            state = self.image_states.get(path)
+            if state is None:
+                state = ImageProcessingState(adjustments=self._default_adjustments())
+            updated_adjustments = deepcopy(state.adjustments)
+            updated_adjustments.lens_correction = deepcopy(source_params)
+            self.image_states[path] = replace(state, adjustments=updated_adjustments)
+            self.preview_result_cache.pop(path, None)
+
+        if self.current_path in targets:
+            self.adjustments.lens_correction = deepcopy(source_params)
+            self.control_panel.set_adjustments(self.adjustments, emit=False)
+            self._invalidate_negative_base_cache()
+            if self.negative_preview_active:
+                self._schedule_preview_if_ready(force=True)
+
+        self._autosave_roll_session()
+        self.statusBar().showMessage(f"Lens correction applied to {len(targets)} image(s)")
+
+    def _lens_correction_targets(self, scope: str) -> list[Path]:
+        paths = [
+            path
+            for path in (self.folder_files or ([self.current_path] if self.current_path else []))
+            if path is not None and path.suffix.lower() in RAW_EXTENSIONS
+        ]
+        if scope == "all":
+            return paths
+        if scope == "completed":
+            return [
+                path
+                for path in paths
+                if (self.image_states.get(path) is not None and self.image_states[path].negative_preview_active)
+            ]
+        if scope == "unprocessed":
+            return [
+                path
+                for path in paths
+                if not (self.image_states.get(path) is not None and self.image_states[path].negative_preview_active)
+            ]
+        return []
 
     def _start_frame_ranker_warmup(self) -> None:
         if self._model_warmup_in_progress:
@@ -1908,8 +2111,20 @@ class MainWindow(QMainWindow):
         self.preview_tabs.setCurrentWidget(self.origin_view)
         suffix = " using previous image fallback" if used_fallback else ""
         self.statusBar().showMessage(f"Auto detect applied: {', '.join(details)}{suffix}")
-        self._schedule_preview_if_ready(force=output.auto_preview)
+        if output.auto_preview:
+            self._render_auto_detect_preview_if_ready()
+        else:
+            self._schedule_preview_if_ready()
         self._schedule_nearby_preinvert()
+
+    def _render_auto_detect_preview_if_ready(self) -> None:
+        if self.current_preview is None:
+            return
+        if self.film_rect is None or not self.film_rect.is_valid():
+            return
+        if self._film_base_required_for_current_mode() and self.mask_point is None:
+            return
+        self._queue_negative_render(show_errors=False, interactive=False)
 
     def adjustment_interaction_started(self) -> None:
         self._interactive_adjustment_active = True
@@ -1938,6 +2153,11 @@ class MainWindow(QMainWindow):
     def adjustments_changed(self, values: dict) -> None:
         previous = self.adjustments
         self.adjustments = AdjustmentParams(**values)
+        if not self._applying_history and previous != self.adjustments:
+            self._undo_stack.append(deepcopy(previous))
+            if len(self._undo_stack) > 80:
+                self._undo_stack.pop(0)
+            self._redo_stack.clear()
         mode_changed = previous.invert_mode != self.adjustments.invert_mode
         if mode_changed:
             self.auto_levels_pending = True
@@ -1956,6 +2176,7 @@ class MainWindow(QMainWindow):
                 **values
             )
         )
+        self._update_preview_status_overlay()
         if self._apply_gpu_display_adjustment(previous):
             self._schedule_roll_session_save()
             return
@@ -1969,6 +2190,30 @@ class MainWindow(QMainWindow):
             )
             self.preview_refresh_timer.start()
         self._schedule_roll_session_save()
+
+    def undo_adjustments(self) -> None:
+        if not self._undo_stack:
+            self.statusBar().showMessage("Nothing to undo")
+            return
+        previous = self._undo_stack.pop()
+        self._redo_stack.append(deepcopy(self.adjustments))
+        self._apply_adjustments_from_history(previous, "Undo")
+
+    def redo_adjustments(self) -> None:
+        if not self._redo_stack:
+            self.statusBar().showMessage("Nothing to redo")
+            return
+        next_adjustments = self._redo_stack.pop()
+        self._undo_stack.append(deepcopy(self.adjustments))
+        self._apply_adjustments_from_history(next_adjustments, "Redo")
+
+    def _apply_adjustments_from_history(self, adjustments: AdjustmentParams, label: str) -> None:
+        self._applying_history = True
+        try:
+            self.control_panel.set_adjustments(deepcopy(adjustments), emit=True)
+        finally:
+            self._applying_history = False
+        self.statusBar().showMessage(label)
 
     def _apply_gpu_display_adjustment(self, previous: AdjustmentParams) -> bool:
         del previous
@@ -2035,6 +2280,18 @@ class MainWindow(QMainWindow):
             return
 
         self._render_in_progress = False
+        if output.path != self.current_path:
+            self._store_stale_preview_result(output)
+            if self._render_pending:
+                pending_show_errors = self._render_pending_show_errors
+                self._render_pending = False
+                self._render_pending_show_errors = False
+                self._queue_negative_render(
+                    show_errors=pending_show_errors,
+                    interactive=self._interactive_adjustment_active and not pending_show_errors,
+                )
+            return
+
         self._preview_stage_caches[output.quality] = output.cache
         result = output.result
 
@@ -2328,6 +2585,20 @@ class MainWindow(QMainWindow):
             f"Mode {invert_mode_label(self.adjustments.invert_mode)}\n"
             f"{base_text}\n"
             f"{wb_label} {wb_gains}"
+        )
+        self._update_preview_status_overlay()
+
+    def _update_preview_status_overlay(self) -> None:
+        axis = self.adjustments.color_balance.global_balance
+        self.preview_view.set_status_overlay(
+            "WB  R/C {red:+d}  G/M {green:+d}  B/Y {blue:+d}\n"
+            "Exp {exposure:+d}   Gray {mid}".format(
+                red=axis.red_cyan,
+                green=axis.green_magenta,
+                blue=axis.blue_yellow,
+                exposure=self.adjustments.exposure,
+                mid=self.adjustments.mid_point,
+            )
         )
 
     def _negative_base_for_current(self) -> NegativeBasePreview:
@@ -2813,6 +3084,7 @@ class MainWindow(QMainWindow):
             updated.mid_point = levels["mid_point"]
             updated.white_point = levels["white_point"]
             self.adjustments = updated
+            self._update_preview_status_overlay()
         finally:
             self._applying_auto_levels = False
 
@@ -2853,13 +3125,14 @@ class MainWindow(QMainWindow):
             self.mask_point = None
             self.film_rect = None
             self.white_balance_point = None
-            self.adjustments = self._default_adjustments()
+            self.adjustments = deepcopy(self.adjustments)
             self.negative_preview_active = False
             self.auto_levels_pending = True
             self._reset_preview_transform()
             self.control_panel.set_mask_status("Not selected")
             self.control_panel.set_film_status("Not selected")
             self.control_panel.set_adjustments(self.adjustments, emit=False)
+            self._update_preview_status_overlay()
             self.origin_view.restore_selections(mask_point=None, film_rect=None)
             return False
 
@@ -2884,6 +3157,7 @@ class MainWindow(QMainWindow):
             else "Not selected"
         )
         self.control_panel.set_adjustments(self.adjustments, emit=False)
+        self._update_preview_status_overlay()
         self.origin_view.restore_selections(
             mask_point=self.mask_point,
             film_rect=self.film_rect,
@@ -2955,7 +3229,7 @@ class MainWindow(QMainWindow):
                 max_size=DEFAULT_PREVIEW_MAX_EDGE,
                 format_hint=self.control_panel.auto_format(),
                 file_key=self._file_key_for_path(path),
-                adjustments=self._default_adjustments(),
+                adjustments=self.adjustments,
                 prior_frame_rect=self._preinvert_prior_frame_rect(),
             )
             task.signals.finished.connect(self._preinvert_finished)
@@ -3057,6 +3331,16 @@ class MainWindow(QMainWindow):
         self.load_path(self.folder_files[next_index], refresh_sequence=False)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.modifiers() & Qt.ControlModifier:
+            if event.key() == Qt.Key_Z:
+                if event.modifiers() & Qt.ShiftModifier:
+                    self.redo_adjustments()
+                else:
+                    self.undo_adjustments()
+                return
+            if event.key() == Qt.Key_Y:
+                self.redo_adjustments()
+                return
         if self._handle_color_timing_shortcut(event):
             return
         if event.key() == Qt.Key_Left:
@@ -3088,6 +3372,10 @@ class MainWindow(QMainWindow):
         if key in {Qt.Key_R, Qt.Key_F}:
             self._nudge_exposure(step if key == Qt.Key_R else -step)
             return True
+        if key in {Qt.Key_BracketLeft, Qt.Key_BracketRight}:
+            mid_step = 1 if event.modifiers() & Qt.ShiftModifier else 5
+            self._nudge_mid_point(-mid_step if key == Qt.Key_BracketLeft else mid_step)
+            return True
         return False
 
     def _nudge_global_balance(self, axis_name: str, delta: int) -> None:
@@ -3103,6 +3391,14 @@ class MainWindow(QMainWindow):
         updated.exposure = self._clamp_adjustment(updated.exposure + delta)
         self.control_panel.set_adjustments(updated, emit=True)
         self.statusBar().showMessage(f"Exposure {updated.exposure:+d}")
+
+    def _nudge_mid_point(self, delta: int) -> None:
+        updated = deepcopy(self.adjustments)
+        lower = max(0, updated.black_point + 1)
+        upper = min(100, updated.white_point - 1)
+        updated.mid_point = max(lower, min(upper, updated.mid_point + int(delta)))
+        self.control_panel.set_adjustments(updated, emit=True)
+        self.statusBar().showMessage(f"Gray point {updated.mid_point}")
 
     @staticmethod
     def _clamp_adjustment(value: int) -> int:

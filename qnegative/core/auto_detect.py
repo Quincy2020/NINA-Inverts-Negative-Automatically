@@ -16,6 +16,8 @@ DETECT_MAX_EDGE = 1400
 FRAME_CONFIDENCE_HIGH = 0.72
 FRAME_CONFIDENCE_MEDIUM = 0.68
 FRAME_MAX_AREA_RATIO = 0.70
+CENTERED_EDGE_INSET_RATIO = 0.025
+CENTERED_EDGE_CONFIDENCE_HIGH = 0.68
 BASE_CONFIDENCE_HIGH = 0.68
 BASE_CONFIDENCE_MEDIUM = 0.45
 
@@ -111,6 +113,36 @@ def detect_film_frame(
     if image.size == 0:
         return None
 
+    scaled = resize_long_edge(image, max_size=DETECT_MAX_EDGE)
+    detect_size = ImageSize(width=scaled.shape[1], height=scaled.shape[0])
+    gray = _normalize_luminance_to_uint8(scaled)
+    edges = _edge_map(gray)
+    centered_candidate = _centered_edge_frame_candidate(
+        gray,
+        edges,
+        image_size=detect_size,
+        format_hint=format_hint,
+    )
+    if centered_candidate is not None and centered_candidate.confidence >= CENTERED_EDGE_CONFIDENCE_HIGH:
+        preview_rect = scale_rect(centered_candidate.rect, detect_size, preview_size)
+        source_rect = _fit_rect_to_format_hint(
+            scale_rect(preview_rect, preview_size, source_size),
+            source_size,
+            format_hint,
+        )
+        source_rect = _inset_axis_aligned_rect(source_rect, CENTERED_EDGE_INSET_RATIO)
+        return AutoFrameResult(
+            rect=source_rect,
+            confidence=round(float(centered_candidate.confidence), 3),
+            confidence_level=_confidence_level(
+                centered_candidate.confidence,
+                FRAME_CONFIDENCE_HIGH,
+                FRAME_CONFIDENCE_MEDIUM,
+            ),
+            format_hint=centered_candidate.format_hint,
+            method=centered_candidate.method,
+        )
+
     ranked = _ranker_frame_candidates(
         image,
         preview_size=preview_size,
@@ -121,13 +153,9 @@ def detect_film_frame(
     if ranked is not None:
         return ranked
 
-    scaled = resize_long_edge(image, max_size=DETECT_MAX_EDGE)
-    detect_size = ImageSize(width=scaled.shape[1], height=scaled.shape[0])
-    gray = _normalize_luminance_to_uint8(scaled)
-    edges = _edge_map(gray)
+    best: _FrameCandidate | None = None
     masks = _candidate_masks(gray, edges)
 
-    best: _FrameCandidate | None = None
     image_area = float(gray.shape[0] * gray.shape[1])
     for method, mask in masks:
         contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -154,6 +182,10 @@ def detect_film_frame(
     )
     if projection_candidate is not None and (best is None or projection_candidate.confidence > best.confidence):
         best = projection_candidate
+    if centered_candidate is not None and centered_candidate.confidence >= CENTERED_EDGE_CONFIDENCE_HIGH:
+        best = centered_candidate
+    elif centered_candidate is not None and (best is None or centered_candidate.confidence > best.confidence):
+        best = centered_candidate
 
     if best is None or best.confidence < FRAME_CONFIDENCE_MEDIUM:
         return None
@@ -164,6 +196,8 @@ def detect_film_frame(
         source_size,
         format_hint,
     )
+    if best.method == "centered-edge-inset":
+        source_rect = _inset_axis_aligned_rect(source_rect, CENTERED_EDGE_INSET_RATIO)
     return AutoFrameResult(
         rect=source_rect,
         confidence=round(float(best.confidence), 3),
@@ -299,6 +333,107 @@ def _candidate_masks(gray: np.ndarray, edges: np.ndarray) -> list[tuple[str, np.
     bright = cv2.morphologyEx(bright, cv2.MORPH_OPEN, open_5, iterations=1)
     masks.append(("threshold-bright", bright))
     return masks
+
+
+def _centered_edge_frame_candidate(
+    gray: np.ndarray,
+    edges: np.ndarray,
+    *,
+    image_size: ImageSize,
+    format_hint: str,
+) -> _FrameCandidate | None:
+    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    col_signal = _smooth_signal(np.percentile(np.abs(grad_x), 96, axis=0), 17)
+    row_signal = _smooth_signal(np.percentile(np.abs(grad_y), 96, axis=1), 17)
+
+    center_x = image_size.width // 2
+    center_y = image_size.height // 2
+    left = _center_out_boundary(col_signal, center_x, -1)
+    right = _center_out_boundary(col_signal, center_x, 1)
+    top = _center_out_boundary(row_signal, center_y, -1)
+    bottom = _center_out_boundary(row_signal, center_y, 1)
+    if left is None or right is None or top is None or bottom is None:
+        return None
+
+    left_idx, left_strength = left
+    right_idx, right_strength = right
+    top_idx, top_strength = top
+    bottom_idx, bottom_strength = bottom
+    width = right_idx - left_idx + 1
+    height = bottom_idx - top_idx + 1
+    if width <= 0 or height <= 0:
+        return None
+    if width < image_size.width * 0.30 or height < image_size.height * 0.30:
+        return None
+
+    rect = ImageRect(
+        x=int(left_idx),
+        y=int(top_idx),
+        width=int(width),
+        height=int(height),
+        angle=0.0,
+    )
+    area_ratio = (width * height) / max(1.0, float(image_size.width * image_size.height))
+    if area_ratio < 0.14 or area_ratio > 0.98:
+        return None
+
+    strength_values = np.array(
+        [left_strength, right_strength, top_strength, bottom_strength],
+        dtype=np.float32,
+    )
+    signal_values = np.concatenate([col_signal.reshape(-1), row_signal.reshape(-1)])
+    signal_reference = max(1.0, float(np.percentile(signal_values, 92)))
+    strength_score = float(np.clip(np.mean(strength_values) / signal_reference, 0.0, 1.0))
+    balance_score = 1.0 - float(
+        np.clip(np.std(strength_values) / max(1.0, np.mean(strength_values)), 0.0, 1.0)
+    )
+    aspect_score, matched_format = _aspect_score(width / max(height, 1), format_hint)
+    edge_support = _edge_support(edges, rotated_rect_corners(rect))
+    center_prior = _center_prior(rect.center_x, rect.center_y, image_size)
+    area_score = 1.0 - float(np.clip(abs(area_ratio - 0.55) / 0.55, 0.0, 1.0))
+
+    confidence = float(
+        np.clip(
+            strength_score * 0.34
+            + edge_support * 0.18
+            + aspect_score * 0.20
+            + center_prior * 0.14
+            + area_score * 0.08
+            + balance_score * 0.06,
+            0.0,
+            0.96,
+        )
+    )
+    if confidence < FRAME_CONFIDENCE_MEDIUM:
+        return None
+
+    return _FrameCandidate(
+        rect=rect,
+        confidence=confidence,
+        format_hint=matched_format,
+        method="centered-edge-inset",
+    )
+
+
+def _center_out_boundary(signal: np.ndarray, center: int, direction: int) -> tuple[int, float] | None:
+    length = signal.size
+    if length < 32:
+        return None
+
+    margin = max(2, int(round(length * 0.018)))
+    min_distance = max(6, int(round(length * 0.10)))
+    search_start = margin if direction < 0 else min(length - margin, center + min_distance)
+    search_stop = max(margin, center - min_distance) if direction < 0 else length - margin
+    search = signal[search_start:search_stop]
+    if search.size == 0:
+        return None
+    noise_floor = float(np.percentile(signal, 72))
+    idx = int(search_start + np.argmax(search))
+    value = float(signal[idx])
+    if value >= max(noise_floor * 1.12, noise_floor + 1.0):
+        return idx, value
+    return None
 
 
 def _projection_frame_candidate(
@@ -555,6 +690,19 @@ def _fit_rect_to_format_hint(rect: ImageRect, image_size: ImageSize, format_hint
         width=min(fitted.width, image_size.width),
         height=min(fitted.height, image_size.height),
         angle=fitted.angle,
+    )
+
+
+def _inset_axis_aligned_rect(rect: ImageRect, inset_ratio: float) -> ImageRect:
+    inset = float(np.clip(inset_ratio, 0.0, 0.12))
+    dx = int(round(rect.width * inset))
+    dy = int(round(rect.height * inset))
+    return ImageRect(
+        x=rect.x + dx,
+        y=rect.y + dy,
+        width=max(1, rect.width - dx * 2),
+        height=max(1, rect.height - dy * 2),
+        angle=0.0,
     )
 
 

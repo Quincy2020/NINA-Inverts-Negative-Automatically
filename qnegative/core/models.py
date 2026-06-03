@@ -109,12 +109,15 @@ class DensityMatrixParams:
 @dataclass
 class LensCorrectionParams:
     enabled: bool = False
+    mode: str = "off"
     strength: int = 0
     radius: int = 100
     center_x: int = 50
     center_y: int = 50
     smoothness: int = 200
     max_gain: int = 200
+    flat_profile_path: str | None = None
+    flat_strength: int = 100
 
 
 @dataclass

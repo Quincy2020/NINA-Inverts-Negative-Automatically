@@ -3,7 +3,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
-    QCheckBox,
     QComboBox,
     QFrame,
     QGroupBox,
@@ -14,6 +13,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -39,12 +39,19 @@ class ControlPanel(QWidget):
     adjustmentsChanged = Signal(dict)
     adjustmentInteractionStarted = Signal()
     adjustmentInteractionFinished = Signal()
+    lensProfileSaveRequested = Signal()
+    lensProfileLoadRequested = Signal()
+    lensFlatProfileCreateRequested = Signal()
+    lensApplyAllRequested = Signal()
+    lensApplyUnprocessedRequested = Signal()
+    lensApplyCompletedRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("controlPanel")
         self.setMinimumWidth(340)
         self._developer_invert_mode: str | None = None
+        self._slider_value_labels: dict[QSlider, QLabel] = {}
 
         self.file_label = QLabel("No file open")
         self.file_label.setObjectName("mutedLabel")
@@ -112,13 +119,14 @@ class ControlPanel(QWidget):
         self.analysis_inset_spin.setRange(0, 20)
         self.analysis_inset_spin.setValue(5)
         self.analysis_inset_spin.setSuffix("%")
-        self.lens_enable_check = QCheckBox("Enable Lens Correction")
         self.lens_strength_slider = self._make_slider(0, 100, 0)
         self.lens_radius_slider = self._make_slider(20, 180, 100)
         self.lens_center_x_slider = self._make_slider(0, 100, 50)
         self.lens_center_y_slider = self._make_slider(0, 100, 50)
         self.lens_smoothness_slider = self._make_slider(25, 400, 200)
         self.lens_max_gain_slider = self._make_slider(100, 300, 200)
+        self.lens_flat_strength_slider = self._make_slider(0, 200, 100)
+        self._flat_profile_path: str | None = None
         self.histogram_levels = HistogramLevelsWidget()
         self.density_matrix_panel = DensityMatrixPanel()
         self.camera_color_panel = self._camera_color_developer_panel()
@@ -156,6 +164,7 @@ class ControlPanel(QWidget):
         root.addWidget(self._tools_section())
         root.addWidget(self._adjustment_section())
         root.addWidget(self._white_balance_section())
+        root.addWidget(self._lens_correction_section())
         root.addStretch(1)
         root.addWidget(self._output_section())
 
@@ -202,8 +211,6 @@ class ControlPanel(QWidget):
         mode_row.addWidget(self.invert_mode_combo, 1)
         layout.addLayout(mode_row)
 
-        layout.addWidget(self._divider())
-        layout.addWidget(self.film_label)
         return group
 
     def _adjustment_section(self) -> QGroupBox:
@@ -226,7 +233,6 @@ class ControlPanel(QWidget):
         boundary_row.addStretch(1)
         boundary_row.addWidget(self.analysis_inset_spin)
         layout.addLayout(boundary_row)
-        layout.addWidget(self._lens_correction_section())
         return group
 
     def _lens_correction_section(self) -> CollapsibleSection:
@@ -234,17 +240,82 @@ class ControlPanel(QWidget):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
-        layout.addWidget(self.lens_enable_check)
-        layout.addLayout(self._slider_row("Strength", self.lens_strength_slider, "0", "100"))
-        layout.addLayout(self._slider_row("Radius", self.lens_radius_slider, "20", "180"))
-        layout.addLayout(self._slider_row("Center X", self.lens_center_x_slider, "0", "100"))
-        layout.addLayout(self._slider_row("Center Y", self.lens_center_y_slider, "0", "100"))
-        layout.addLayout(self._slider_row("Smoothness", self.lens_smoothness_slider, "0.25", "4.0"))
-        layout.addLayout(self._slider_row("Max Gain", self.lens_max_gain_slider, "1.0x", "3.0x"))
-        hint = QLabel("Corrects camera/lens falloff before inversion. Start with Strength 20-40.")
-        hint.setObjectName("mutedLabel")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+
+        frame = QFrame()
+        frame.setObjectName("lensCorrectionCard")
+        card_layout = QVBoxLayout(frame)
+        card_layout.setContentsMargins(8, 8, 8, 8)
+        card_layout.setSpacing(8)
+
+        self.lens_off_panel = QWidget()
+        off_layout = QVBoxLayout(self.lens_off_panel)
+        off_layout.setContentsMargins(6, 10, 6, 8)
+        off_label = QLabel("Lens falloff correction is disabled.")
+        off_label.setObjectName("mutedLabel")
+        off_label.setWordWrap(True)
+        off_layout.addWidget(off_label)
+
+        self.lens_radial_panel = QWidget()
+        radial_layout = QVBoxLayout(self.lens_radial_panel)
+        radial_layout.setContentsMargins(6, 10, 6, 8)
+        radial_layout.setSpacing(8)
+        radial_layout.addLayout(self._slider_row("Strength", self.lens_strength_slider, "0", "100"))
+        radial_layout.addLayout(self._slider_row("Radius", self.lens_radius_slider, "20", "180"))
+        radial_layout.addLayout(self._slider_row("Center X", self.lens_center_x_slider, "0", "100"))
+        radial_layout.addLayout(self._slider_row("Center Y", self.lens_center_y_slider, "0", "100"))
+        radial_layout.addLayout(self._slider_row("Smoothness", self.lens_smoothness_slider, "0.25", "4.0"))
+        radial_layout.addLayout(self._slider_row("Max Gain", self.lens_max_gain_slider, "1.0x", "3.0x"))
+
+        self.lens_flat_panel = QWidget()
+        flat_layout = QVBoxLayout(self.lens_flat_panel)
+        flat_layout.setContentsMargins(6, 10, 6, 8)
+        flat_layout.setSpacing(8)
+        self.lens_flat_profile_card = QFrame()
+        self.lens_flat_profile_card.setObjectName("lensProfileCard")
+        profile_card_layout = QVBoxLayout(self.lens_flat_profile_card)
+        profile_card_layout.setContentsMargins(8, 8, 8, 8)
+        self.lens_flat_profile_label = QLabel("No flat-frame profile loaded")
+        self.lens_flat_profile_label.setObjectName("mutedLabel")
+        self.lens_flat_profile_label.setWordWrap(True)
+        profile_card_layout.addWidget(self.lens_flat_profile_label)
+        flat_layout.addWidget(self.lens_flat_profile_card)
+        self.lens_flat_strength_row = QWidget()
+        flat_strength_layout = QVBoxLayout(self.lens_flat_strength_row)
+        flat_strength_layout.setContentsMargins(0, 0, 0, 0)
+        flat_strength_layout.addLayout(self._slider_row("Strength", self.lens_flat_strength_slider, "0", "200"))
+        flat_layout.addWidget(self.lens_flat_strength_row)
+        self.lens_create_flat_profile_button = QPushButton("Create From Flat RAW")
+        flat_layout.addWidget(self.lens_create_flat_profile_button)
+
+        self.lens_tabs = QTabWidget()
+        self.lens_tabs.setObjectName("lensCorrectionTabs")
+        self.lens_tabs.addTab(self.lens_off_panel, "Off")
+        self.lens_tabs.addTab(self.lens_radial_panel, "Radial")
+        self.lens_tabs.addTab(self.lens_flat_panel, "Flat")
+        card_layout.addWidget(self.lens_tabs)
+
+        self.lens_profile_row = QWidget()
+        profile_row = QHBoxLayout(self.lens_profile_row)
+        profile_row.setContentsMargins(0, 0, 0, 0)
+        self.lens_save_profile_button = QPushButton("Save")
+        self.lens_load_profile_button = QPushButton("Load")
+        profile_row.addWidget(self.lens_save_profile_button)
+        profile_row.addWidget(self.lens_load_profile_button)
+        card_layout.addWidget(self.lens_profile_row)
+
+        self.lens_apply_row = QWidget()
+        apply_row = QHBoxLayout(self.lens_apply_row)
+        apply_row.setContentsMargins(0, 0, 0, 0)
+        self.lens_apply_all_button = QPushButton("Apply All")
+        self.lens_apply_unprocessed_button = QPushButton("Unprocessed")
+        self.lens_apply_completed_button = QPushButton("Completed")
+        apply_row.addWidget(self.lens_apply_all_button)
+        apply_row.addWidget(self.lens_apply_unprocessed_button)
+        apply_row.addWidget(self.lens_apply_completed_button)
+        card_layout.addWidget(self.lens_apply_row)
+
+        layout.addWidget(frame)
+        self._set_lens_mode_widgets("off")
         return CollapsibleSection("Lens Correction", panel, expanded=False)
 
     def _density_matrix_section(self) -> CollapsibleSection:
@@ -340,11 +411,18 @@ class ControlPanel(QWidget):
             self.lens_center_y_slider,
             self.lens_smoothness_slider,
             self.lens_max_gain_slider,
+            self.lens_flat_strength_slider,
         ):
             slider.sliderPressed.connect(self.adjustmentInteractionStarted.emit)
             slider.sliderReleased.connect(self.adjustmentInteractionFinished.emit)
             slider.valueChanged.connect(self._emit_adjustments)
-        self.lens_enable_check.toggled.connect(self._emit_adjustments)
+        self.lens_tabs.currentChanged.connect(self._lens_tab_changed)
+        self.lens_save_profile_button.clicked.connect(self.lensProfileSaveRequested.emit)
+        self.lens_load_profile_button.clicked.connect(self.lensProfileLoadRequested.emit)
+        self.lens_create_flat_profile_button.clicked.connect(self.lensFlatProfileCreateRequested.emit)
+        self.lens_apply_all_button.clicked.connect(self.lensApplyAllRequested.emit)
+        self.lens_apply_unprocessed_button.clicked.connect(self.lensApplyUnprocessedRequested.emit)
+        self.lens_apply_completed_button.clicked.connect(self.lensApplyCompletedRequested.emit)
         self.analysis_inset_spin.valueChanged.connect(self._emit_adjustments)
         self.density_matrix_panel.matrixChanged.connect(self._emit_adjustments)
         self.white_balance_panel.balanceChanged.connect(self._emit_adjustments)
@@ -366,10 +444,41 @@ class ControlPanel(QWidget):
         self.tool_group.addButton(button, list(ToolMode).index(mode))
         return button
 
+    def _lens_tab_changed(self, _index: int) -> None:
+        self._set_lens_mode_widgets(self._current_lens_mode())
+        self._emit_adjustments()
+
+    def _set_lens_mode_widgets(self, mode: str) -> None:
+        normalized = mode if mode in {"off", "radial", "flat_frame"} else "off"
+        self.lens_profile_row.setVisible(normalized != "off")
+        self.lens_apply_row.setVisible(normalized != "off")
+        self.lens_flat_strength_row.setVisible(
+            normalized == "flat_frame" and bool(self._flat_profile_path)
+        )
+        if normalized == "radial":
+            self.lens_tabs.setCurrentIndex(1)
+        elif normalized == "flat_frame":
+            self.lens_tabs.setCurrentIndex(2)
+        else:
+            self.lens_tabs.setCurrentIndex(0)
+        self._update_lens_tabs_height()
+
+    def _current_lens_mode(self) -> str:
+        return ("off", "radial", "flat_frame")[max(0, min(2, self.lens_tabs.currentIndex()))]
+
+    def _update_lens_tabs_height(self) -> None:
+        current = self.lens_tabs.currentWidget()
+        if current is None:
+            return
+        page_height = current.sizeHint().height()
+        tab_height = self.lens_tabs.tabBar().sizeHint().height()
+        self.lens_tabs.setFixedHeight(max(82, page_height + tab_height + 18))
+
     def _emit_tool_mode(self, button_id: int) -> None:
         self.toolChanged.emit(list(ToolMode)[button_id])
 
     def _emit_adjustments(self) -> None:
+        lens_mode = self._current_lens_mode()
         self.adjustmentsChanged.emit(
             {
                 "exposure": self.exposure_slider.value(),
@@ -379,13 +488,16 @@ class ControlPanel(QWidget):
                 "saturation": self.saturation_slider.value(),
                 "camera_color_strength": self.camera_color_slider.value(),
                 "lens_correction": LensCorrectionParams(
-                    enabled=self.lens_enable_check.isChecked(),
+                    enabled=lens_mode != "off",
+                    mode=lens_mode,
                     strength=self.lens_strength_slider.value(),
                     radius=self.lens_radius_slider.value(),
                     center_x=self.lens_center_x_slider.value(),
                     center_y=self.lens_center_y_slider.value(),
                     smoothness=self.lens_smoothness_slider.value(),
                     max_gain=self.lens_max_gain_slider.value(),
+                    flat_profile_path=self._flat_profile_path,
+                    flat_strength=self.lens_flat_strength_slider.value(),
                 ),
                 "analysis_inset_percent": self.analysis_inset_spin.value(),
                 "invert_mode": self._current_invert_mode(),
@@ -435,9 +547,14 @@ class ControlPanel(QWidget):
         wrapper = QVBoxLayout()
         header = QHBoxLayout()
         name = QLabel(label)
-        value = QLabel(str(slider.value()))
+        value = QLabel(self._format_slider_value(slider, slider.value()))
         value.setObjectName("sliderValue")
-        slider.valueChanged.connect(lambda current, target=value: target.setText(str(current)))
+        self._slider_value_labels[slider] = value
+        slider.valueChanged.connect(
+            lambda current, source=slider, target=value: target.setText(
+                self._format_slider_value(source, current)
+            )
+        )
         header.addWidget(name)
         header.addStretch(1)
         header.addWidget(value)
@@ -455,6 +572,19 @@ class ControlPanel(QWidget):
         wrapper.addWidget(slider)
         wrapper.addLayout(scale)
         return wrapper
+
+    def _format_slider_value(self, slider: QSlider, value: int) -> str:
+        if slider is self.lens_smoothness_slider:
+            return f"{value / 100.0:.2f}"
+        if slider is self.lens_max_gain_slider:
+            return f"{value / 100.0:.2f}x"
+        if slider is self.lens_flat_strength_slider:
+            return f"{value}%"
+        return str(value)
+
+    def _refresh_slider_value_labels(self) -> None:
+        for slider, label in self._slider_value_labels.items():
+            label.setText(self._format_slider_value(slider, slider.value()))
 
     def _section(self, title: str) -> QGroupBox:
         group = QGroupBox(title)
@@ -534,13 +664,15 @@ class ControlPanel(QWidget):
             self.contrast_slider,
             self.saturation_slider,
             self.camera_color_slider,
-            self.lens_enable_check,
+            self.lens_tabs,
+            self.lens_create_flat_profile_button,
             self.lens_strength_slider,
             self.lens_radius_slider,
             self.lens_center_x_slider,
             self.lens_center_y_slider,
             self.lens_smoothness_slider,
             self.lens_max_gain_slider,
+            self.lens_flat_strength_slider,
             self.analysis_inset_spin,
             self.histogram_levels,
             self.density_matrix_panel,
@@ -557,13 +689,28 @@ class ControlPanel(QWidget):
             self.contrast_slider.setValue(adjustments.contrast)
             self.saturation_slider.setValue(adjustments.saturation)
             self.camera_color_slider.setValue(adjustments.camera_color_strength)
-            self.lens_enable_check.setChecked(adjustments.lens_correction.enabled)
+            lens_mode = (
+                adjustments.lens_correction.mode
+                if adjustments.lens_correction.enabled
+                else "off"
+            )
+            self._flat_profile_path = adjustments.lens_correction.flat_profile_path
+            self._set_lens_mode_widgets(lens_mode)
+            self.lens_flat_profile_label.setText(
+                f"Flat profile\n{self._flat_profile_path.split('/')[-1].split(chr(92))[-1]}"
+                if self._flat_profile_path
+                else "No flat-frame profile loaded"
+            )
             self.lens_strength_slider.setValue(adjustments.lens_correction.strength)
             self.lens_radius_slider.setValue(adjustments.lens_correction.radius)
             self.lens_center_x_slider.setValue(adjustments.lens_correction.center_x)
             self.lens_center_y_slider.setValue(adjustments.lens_correction.center_y)
             self.lens_smoothness_slider.setValue(adjustments.lens_correction.smoothness)
             self.lens_max_gain_slider.setValue(adjustments.lens_correction.max_gain)
+            self.lens_flat_strength_slider.setValue(adjustments.lens_correction.flat_strength)
+            self.lens_flat_strength_row.setVisible(
+                lens_mode == "flat_frame" and bool(self._flat_profile_path)
+            )
             self.analysis_inset_spin.setValue(adjustments.analysis_inset_percent)
             index = self.invert_mode_combo.findData(adjustments.invert_mode)
             self._developer_invert_mode = adjustments.invert_mode if index < 0 else None
@@ -579,6 +726,7 @@ class ControlPanel(QWidget):
             )
             self.density_matrix_panel.set_adjustments(adjustments)
             self.white_balance_panel.set_adjustments(adjustments)
+            self._refresh_slider_value_labels()
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
@@ -628,6 +776,39 @@ class ControlPanel(QWidget):
                 color: #cfd6df;
                 min-width: 34px;
                 qproperty-alignment: AlignRight;
+            }
+            QFrame#lensCorrectionCard {
+                background: transparent;
+                border: none;
+            }
+            QFrame#lensProfileCard {
+                background: #11151b;
+                border: 1px solid #3a4350;
+                border-radius: 5px;
+            }
+            QTabWidget#lensCorrectionTabs::pane {
+                border: 1px solid #3a414c;
+                border-radius: 5px;
+                background: #20242b;
+                top: -1px;
+            }
+            QTabWidget#lensCorrectionTabs QTabBar::tab {
+                background: #2d333d;
+                color: #cfd6df;
+                border: 1px solid #444c59;
+                padding: 6px 9px;
+                min-width: 44px;
+            }
+            QTabWidget#lensCorrectionTabs QTabBar::tab:selected {
+                background: #41627a;
+                color: #f2f4f7;
+                border-color: #67a4c7;
+            }
+            QTabWidget#lensCorrectionTabs QTabBar::tab:first {
+                border-top-left-radius: 5px;
+            }
+            QTabWidget#lensCorrectionTabs QTabBar::tab:last {
+                border-top-right-radius: 5px;
             }
             QPushButton, QToolButton {
                 background: #2d333d;

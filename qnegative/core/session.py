@@ -190,12 +190,17 @@ def _density_matrix_from_dict(payload: dict[str, Any]) -> DensityMatrixParams:
 
 
 def _lens_correction_from_dict(payload: dict[str, Any]) -> LensCorrectionParams:
+    enabled = bool(payload.get("enabled", False))
+    mode = str(payload.get("mode") or ("radial" if enabled else "off"))
     return LensCorrectionParams(
-        enabled=bool(payload.get("enabled", False)),
+        enabled=enabled,
+        mode=mode,
         strength=int(payload.get("strength", 0)),
         radius=int(payload.get("radius", 100)),
         center_x=int(payload.get("center_x", 50)),
         center_y=int(payload.get("center_y", 50)),
         smoothness=int(payload.get("smoothness", 200)),
         max_gain=int(payload.get("max_gain", 200)),
+        flat_profile_path=payload.get("flat_profile_path"),
+        flat_strength=int(payload.get("flat_strength", 100)),
     )

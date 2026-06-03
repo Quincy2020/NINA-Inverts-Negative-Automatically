@@ -57,6 +57,7 @@ class OpenGLPreviewView(QOpenGLWidget):
         self._tool_mode = ToolMode.PAN
         self._transform_context_enabled = False
         self._wb_point: ImagePoint | None = None
+        self._status_overlay_text = ""
 
         self._zoom_factor = 1.0
         self._pan_offset = QPointF(0.0, 0.0)
@@ -149,6 +150,10 @@ class OpenGLPreviewView(QOpenGLWidget):
         self.update()
         self.viewStatusChanged.emit(text)
 
+    def set_status_overlay(self, text: str) -> None:
+        self._status_overlay_text = text
+        self.update()
+
     def restore_selections(
         self,
         *,
@@ -197,6 +202,7 @@ class OpenGLPreviewView(QOpenGLWidget):
             if not self._gpu_preview_enabled:
                 self._paint_cpu_image(painter)
             self._paint_saved_selections(painter)
+            self._paint_status_overlay(painter)
         painter.end()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -510,6 +516,27 @@ class OpenGLPreviewView(QOpenGLWidget):
     def _paint_saved_selections(self, painter: QPainter) -> None:
         if self._wb_point is not None:
             self._paint_image_point(painter, self._wb_point, QColor("#58c7ff"))
+
+    def _paint_status_overlay(self, painter: QPainter) -> None:
+        if not self._status_overlay_text:
+            return
+
+        font = QFont()
+        font.setPointSize(10)
+        font.setWeight(QFont.Medium)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        lines = self._status_overlay_text.splitlines()
+        width = max(metrics.horizontalAdvance(line) for line in lines) + 24
+        height = metrics.lineSpacing() * len(lines) + 18
+        rect = QRectF(18, 18, width, height)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(10, 12, 15, 178))
+        painter.drawRoundedRect(rect, 6, 6)
+        painter.setPen(QColor("#eef3f8"))
+        text_rect = rect.adjusted(12, 9, -12, -9)
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, self._status_overlay_text)
 
     def _paint_image_point(self, painter: QPainter, point: ImagePoint, color: QColor) -> None:
         view_point = self._image_point_to_view(point)
