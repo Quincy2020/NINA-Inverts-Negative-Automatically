@@ -70,6 +70,11 @@ class PreviewRenderSignals(QObject):
     failed = Signal(int, str, bool)
 
 
+class AutoDetectSignals(QObject):
+    finished = Signal(int, object)
+    failed = Signal(int, str)
+
+
 INTERACTIVE_PREVIEW_MAX_EDGE = 720
 FINAL_RENDER_QUALITY = "final"
 INTERACTIVE_RENDER_QUALITY = "interactive"
@@ -96,6 +101,15 @@ class PreviewRenderOutput:
     result: NegativePreviewResult
     cache: PreviewStageCache
     quality: str
+
+
+@dataclass(frozen=True)
+class AutoDetectOutput:
+    mode: str
+    path: Path | None
+    frame_result: AutoFrameResult | None
+    base_result: AutoBaseResult | None
+    fallback_state: ImageProcessingState | None
 
 
 def scaled_raw_preview(preview: RawPreview, *, max_edge: int) -> RawPreview:
@@ -255,6 +269,74 @@ def invert_mode_label(mode: str) -> str:
         InvertMode.SIMPLE.value: "Simple",
     }
     return labels.get(mode, mode)
+
+
+class AutoDetectTask(QRunnable):
+    def __init__(
+        self,
+        *,
+        job_id: int,
+        mode: str,
+        path: Path | None,
+        preview: RawPreview,
+        format_hint: str,
+        detect_base: bool,
+        current_film_rect: ImageRect | None,
+        fallback_state: ImageProcessingState | None,
+    ) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.mode = mode
+        self.path = path
+        self.preview = preview
+        self.format_hint = format_hint
+        self.detect_base = detect_base
+        self.current_film_rect = current_film_rect
+        self.fallback_state = fallback_state
+        self.signals = AutoDetectSignals()
+
+    def run(self) -> None:
+        frame_result: AutoFrameResult | None = None
+        base_result: AutoBaseResult | None = None
+        try:
+            if self.mode == "frame_base":
+                result = detect_frame_and_base(
+                    self.preview.preview_linear_rgb,
+                    preview_size=self.preview.preview_size,
+                    source_size=self.preview.source_size,
+                    format_hint=self.format_hint,
+                    detect_base=self.detect_base,
+                )
+                frame_result = result.frame
+                base_result = result.base
+            elif self.mode == "frame":
+                frame_result = detect_film_frame(
+                    self.preview.preview_linear_rgb,
+                    preview_size=self.preview.preview_size,
+                    source_size=self.preview.source_size,
+                    format_hint=self.format_hint,
+                )
+            elif self.mode == "base":
+                base_result = detect_film_base(
+                    self.preview.preview_linear_rgb,
+                    preview_size=self.preview.preview_size,
+                    source_size=self.preview.source_size,
+                    frame_rect=self.current_film_rect,
+                )
+        except Exception as exc:
+            self.signals.failed.emit(self.job_id, str(exc))
+            return
+
+        self.signals.finished.emit(
+            self.job_id,
+            AutoDetectOutput(
+                mode=self.mode,
+                path=self.path,
+                frame_result=frame_result,
+                base_result=base_result,
+                fallback_state=self.fallback_state,
+            ),
+        )
 
 
 class PreviewRenderTask(QRunnable):
@@ -550,6 +632,8 @@ class MainWindow(QMainWindow):
         self._render_in_progress = False
         self._render_pending = False
         self._render_pending_show_errors = False
+        self._auto_detect_job_id = 0
+        self._auto_detect_in_progress = False
         self._export_in_progress = False
 
         self.control_panel = ControlPanel()
@@ -677,6 +761,7 @@ class MainWindow(QMainWindow):
             self._save_current_state()
 
         self._cancel_preview_render()
+        self._cancel_auto_detect()
 
         if refresh_sequence:
             self._set_folder_sequence(path)
@@ -827,40 +912,52 @@ class MainWindow(QMainWindow):
         if self.current_preview is None:
             QMessageBox.information(self, "Auto Detect", "Open a RAW file before auto detection.")
             return
+        if self._auto_detect_in_progress:
+            self.statusBar().showMessage("Auto detect already running...")
+            return
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        frame_result: AutoFrameResult | None = None
-        base_result: AutoBaseResult | None = None
-        try:
-            if mode == "frame_base":
-                result = detect_frame_and_base(
-                    self.current_preview.preview_linear_rgb,
-                    preview_size=self.current_preview.preview_size,
-                    source_size=self.current_preview.source_size,
-                    format_hint=self.control_panel.auto_format(),
-                    detect_base=self._film_base_required_for_current_mode(),
-                )
-                frame_result = result.frame
-                base_result = result.base
-            elif mode == "frame":
-                frame_result = detect_film_frame(
-                    self.current_preview.preview_linear_rgb,
-                    preview_size=self.current_preview.preview_size,
-                    source_size=self.current_preview.source_size,
-                    format_hint=self.control_panel.auto_format(),
-                )
-            elif mode == "base":
-                base_result = detect_film_base(
-                    self.current_preview.preview_linear_rgb,
-                    preview_size=self.current_preview.preview_size,
-                    source_size=self.current_preview.source_size,
-                    frame_rect=self.film_rect,
-                )
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._auto_detect_job_id += 1
+        job_id = self._auto_detect_job_id
+        task = AutoDetectTask(
+            job_id=job_id,
+            mode=mode,
+            path=self.current_path,
+            preview=self.current_preview,
+            format_hint=self.control_panel.auto_format(),
+            detect_base=self._film_base_required_for_current_mode(),
+            current_film_rect=self.film_rect,
+            fallback_state=self._previous_image_state(),
+        )
+        task.signals.finished.connect(self._auto_detect_finished)
+        task.signals.failed.connect(self._auto_detect_failed)
+        self._auto_detect_in_progress = True
+        self.statusBar().showMessage("Auto detect running in background...")
+        self._thread_pool.start(task)
+
+    def _auto_detect_finished(self, job_id: int, output: AutoDetectOutput) -> None:
+        if job_id != self._auto_detect_job_id:
+            return
+        self._auto_detect_in_progress = False
+        if output.path != self.current_path:
+            self.statusBar().showMessage("Auto detect result ignored after file change")
+            return
+
+        self._apply_auto_detect_output(output)
+
+    def _auto_detect_failed(self, job_id: int, message: str) -> None:
+        if job_id != self._auto_detect_job_id:
+            return
+        self._auto_detect_in_progress = False
+        self.statusBar().showMessage("Auto detect failed")
+        QMessageBox.warning(self, "Auto Detect Failed", message)
+
+    def _apply_auto_detect_output(self, output: AutoDetectOutput) -> None:
+        mode = output.mode
+        frame_result = output.frame_result
+        base_result = output.base_result
 
         used_fallback = False
-        fallback_state = self._previous_image_state()
+        fallback_state = output.fallback_state
         if mode in {"frame", "frame_base"} and frame_result is None and fallback_state is not None:
             frame_result = AutoFrameResult(
                 rect=fallback_state.film_rect,
@@ -1356,6 +1453,7 @@ class MainWindow(QMainWindow):
 
     def reset_workspace(self) -> None:
         self._cancel_preview_render()
+        self._cancel_auto_detect()
         self.origin_view.clear_selections()
         self.preview_view.set_placeholder("Positive preview waiting")
         self.preview_refresh_timer.stop()
@@ -1379,6 +1477,10 @@ class MainWindow(QMainWindow):
         self._render_in_progress = False
         self._render_pending = False
         self._render_pending_show_errors = False
+
+    def _cancel_auto_detect(self) -> None:
+        self._auto_detect_job_id += 1
+        self._auto_detect_in_progress = False
 
     def _apply_auto_levels(self, levels: dict[str, int]) -> None:
         self._applying_auto_levels = True

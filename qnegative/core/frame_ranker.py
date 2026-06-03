@@ -12,9 +12,10 @@ from qnegative.core.models import ImageRect, ImageSize
 from qnegative.core.preview import resize_long_edge
 
 
-FRAME_RANKER_MAX_EDGE = 384
-FRAME_RANKER_GLOBAL_CANDIDATES = 1400
-FRAME_RANKER_KEEP_CANDIDATES = 360
+FRAME_RANKER_MAX_EDGE = 320
+FRAME_RANKER_GLOBAL_CANDIDATES = 900
+FRAME_RANKER_KEEP_CANDIDATES = 240
+FRAME_RANKER_ANGLE_SNAP_DEGREES = 4.0
 
 FORMAT_RATIOS = {
     "135": 1.50,
@@ -137,7 +138,7 @@ def detect_ranked_frame_candidates(
     for index in order[: max(1, top_k)]:
         rect = rects[int(index)]
         preview_rect = scale_rect(rect, ranker_size, preview_size)
-        source_rect = scale_rect(preview_rect, preview_size, source_size)
+        source_rect = snap_small_angle_rect(scale_rect(preview_rect, preview_size, source_size))
         score = float(predictions[int(index)])
         results.append(
             RankedFrameCandidate(
@@ -149,6 +150,18 @@ def detect_ranked_frame_candidates(
             )
         )
     return results
+
+
+def snap_small_angle_rect(rect: ImageRect) -> ImageRect:
+    if abs(rect.angle) > FRAME_RANKER_ANGLE_SNAP_DEGREES:
+        return rect
+    return ImageRect(
+        x=rect.x,
+        y=rect.y,
+        width=rect.width,
+        height=rect.height,
+        angle=0.0,
+    )
 
 
 @lru_cache(maxsize=4)
