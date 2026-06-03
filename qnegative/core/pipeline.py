@@ -122,6 +122,7 @@ class LabPrintNegativeStage:
     histogram: np.ndarray
     mask_rgb: np.ndarray
     film_rect_preview: ImageRect
+    analysis_inset: float
     camera_to_srgb_matrix: np.ndarray | None = None
 
 
@@ -383,7 +384,10 @@ def process_lab_print_preview(
     base: NegativeBasePreview,
     adjustments: AdjustmentParams,
 ) -> NegativePreviewResult:
-    negative_stage = build_lab_print_negative_stage(base)
+    negative_stage = build_lab_print_negative_stage(
+        base,
+        analysis_inset=analysis_inset_from_adjustments(adjustments),
+    )
     levels_stage = build_lab_print_levels_stage(negative_stage, adjustments)
     color_stage = build_lab_print_color_stage(levels_stage, adjustments)
     return build_lab_print_display_stage(color_stage, adjustments)
@@ -393,6 +397,7 @@ def build_lab_print_negative_stage(
     base: NegativeBasePreview,
     *,
     include_histogram: bool = True,
+    analysis_inset: float = LAB_PRINT_ANALYSIS_INSET,
 ) -> LabPrintNegativeStage:
     source_linear = (
         base.film_camera_wb_linear_rgb
@@ -404,7 +409,7 @@ def build_lab_print_negative_stage(
         percentile_clip=LAB_PRINT_LOG_PERCENTILE_CLIP,
     )
     positive_control = 1.0 - normalized_log
-    analysis_control = analysis_inset_crop(positive_control, LAB_PRINT_ANALYSIS_INSET)
+    analysis_control = analysis_inset_crop(positive_control, analysis_inset)
     histogram = (
         luminance_histogram(analysis_control)
         if include_histogram
@@ -417,6 +422,7 @@ def build_lab_print_negative_stage(
         histogram=histogram,
         mask_rgb=base.mask_rgb,
         film_rect_preview=base.film_rect_preview,
+        analysis_inset=analysis_inset,
         camera_to_srgb_matrix=base.camera_to_srgb_matrix,
     )
 
@@ -429,7 +435,7 @@ def build_lab_print_levels_stage(
 ) -> LabPrintLevelsStage:
     if auto_levels is None:
         auto_levels = suggest_lab_print_luminance_levels(
-            analysis_inset_crop(negative_stage.normalized_log, LAB_PRINT_ANALYSIS_INSET),
+            analysis_inset_crop(negative_stage.normalized_log, negative_stage.analysis_inset),
             adjustments,
             camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
         )
@@ -613,6 +619,10 @@ def analysis_inset_crop(image: np.ndarray, inset: float) -> np.ndarray:
     if cut_y * 2 >= height or cut_x * 2 >= width:
         return image
     return image[cut_y : height - cut_y, cut_x : width - cut_x]
+
+
+def analysis_inset_from_adjustments(adjustments: AdjustmentParams) -> float:
+    return float(np.clip(adjustments.analysis_inset_percent / 100.0, 0.0, 0.20))
 
 
 def apply_log_hd_print_curve(

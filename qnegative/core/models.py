@@ -121,6 +121,7 @@ class AdjustmentParams:
     camera_color_strength: int = 0
     soft_highlights: bool = False
     soft_shadows: bool = False
+    analysis_inset_percent: int = 5
     black_point: int = 0
     mid_point: int = 50
     white_point: int = 100

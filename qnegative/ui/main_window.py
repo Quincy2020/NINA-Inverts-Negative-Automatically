@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from qnegative.core.file_sequence import IMAGE_EXTENSIONS, RAW_EXTENSIONS, list_supported_files
+from qnegative.core.frame_ranker import load_frame_ranker
 from qnegative.core.auto_detect import (
     AutoBaseResult,
     AutoFrameResult,
@@ -53,6 +54,8 @@ from qnegative.core.pipeline import (
     build_negative_base_preview,
     build_density_preview_analysis,
     process_negative_base_preview,
+    analysis_inset_from_adjustments,
+    analysis_inset_crop,
     suggest_lab_print_luminance_levels,
     suggest_global_balance_from_neutral,
 )
@@ -77,6 +80,10 @@ class AutoDetectSignals(QObject):
 class RawPreviewSignals(QObject):
     finished = Signal(int, object, object)
     failed = Signal(int, object, str)
+
+
+class ModelWarmupSignals(QObject):
+    finished = Signal(bool, str)
 
 
 INTERACTIVE_PREVIEW_MAX_EDGE = 720
@@ -213,6 +220,7 @@ def lab_print_auto_key(adjustments: AdjustmentParams) -> tuple:
         adjustments.print_curve,
         adjustments.exposure,
         adjustments.contrast,
+        adjustments.analysis_inset_percent,
         adjustments.soft_highlights,
         adjustments.soft_shadows,
         adjustments.auto_wb,
@@ -233,6 +241,7 @@ def lab_print_levels_key(
     return (
         "lab_print_levels",
         negative_key,
+        adjustments.analysis_inset_percent,
         adjustments.black_point,
         adjustments.mid_point,
         adjustments.white_point,
@@ -291,6 +300,16 @@ class RawPreviewTask(QRunnable):
             return
 
         self.signals.finished.emit(self.job_id, self.path, preview)
+
+
+class ModelWarmupTask(QRunnable):
+    def __init__(self) -> None:
+        super().__init__()
+        self.signals = ModelWarmupSignals()
+
+    def run(self) -> None:
+        loaded = load_frame_ranker()
+        self.signals.finished.emit(loaded is not None, loaded[1] if loaded is not None else "")
 
 
 class AutoDetectTask(QRunnable):
@@ -424,14 +443,17 @@ class PreviewRenderTask(QRunnable):
         base_key: tuple,
         base: NegativeBasePreview,
     ) -> PreviewRenderOutput:
-        negative_key = ("lab_print_negative", base_key)
+        negative_key = ("lab_print_negative", base_key, self.adjustments.analysis_inset_percent)
         if (
             self.render_cache.negative_key == negative_key
             and self.render_cache.negative_stage is not None
         ):
             negative_stage = self.render_cache.negative_stage
         else:
-            negative_stage = build_lab_print_negative_stage(base)
+            negative_stage = build_lab_print_negative_stage(
+                base,
+                analysis_inset=analysis_inset_from_adjustments(self.adjustments),
+            )
 
         levels_key = lab_print_levels_key(
             negative_key,
@@ -570,11 +592,15 @@ class TiffExportTask(QRunnable):
                 result = process_negative_base_preview(base, adjusted)
             return result.processed_linear_rgb
 
-        negative_stage = build_lab_print_negative_stage(base, include_histogram=False)
+        negative_stage = build_lab_print_negative_stage(
+            base,
+            include_histogram=False,
+            analysis_inset=analysis_inset_from_adjustments(self.adjustments),
+        )
         effective = deepcopy(self.adjustments)
         if self.auto_levels_pending:
             auto_levels = suggest_lab_print_luminance_levels(
-                negative_stage.normalized_log,
+                analysis_inset_crop(negative_stage.normalized_log, negative_stage.analysis_inset),
                 effective,
                 camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
             )
@@ -656,6 +682,7 @@ class MainWindow(QMainWindow):
         self._render_pending_show_errors = False
         self._raw_preview_job_id = 0
         self._raw_preview_in_progress = False
+        self._model_warmup_in_progress = False
         self._auto_detect_job_id = 0
         self._auto_detect_in_progress = False
         self._export_in_progress = False
@@ -678,9 +705,10 @@ class MainWindow(QMainWindow):
         self._connect()
         self._apply_style()
         self.control_panel.set_adjustments(self.adjustments, emit=False)
-        self.set_tool_mode(ToolMode.MASK_PICKER)
+        self.set_tool_mode(ToolMode.FILM_RECT)
 
         self.statusBar().showMessage("Ready")
+        QTimer.singleShot(120, self._start_frame_ranker_warmup)
 
     def _build_layout(self) -> None:
         right_pane = QWidget()
@@ -733,6 +761,25 @@ class MainWindow(QMainWindow):
         self.camera_color_dock.visibilityChanged.connect(camera_color_action.setChecked)
         developer_menu.addAction(camera_color_action)
 
+        developer_menu.addSeparator()
+        density_mode_action = QAction("Use Density Mode", self)
+        density_mode_action.triggered.connect(lambda: self._set_developer_invert_mode(InvertMode.DENSITY.value))
+        developer_menu.addAction(density_mode_action)
+
+        simple_mode_action = QAction("Use Simple Mode", self)
+        simple_mode_action.triggered.connect(lambda: self._set_developer_invert_mode(InvertMode.SIMPLE.value))
+        developer_menu.addAction(simple_mode_action)
+
+        base_picker_action = QAction("Base Picker Tool", self)
+        base_picker_action.triggered.connect(lambda: self.set_tool_mode(ToolMode.MASK_PICKER))
+        developer_menu.addAction(base_picker_action)
+
+    def _set_developer_invert_mode(self, mode: str) -> None:
+        updated = deepcopy(self.adjustments)
+        updated.invert_mode = mode
+        self.control_panel.set_adjustments(updated, emit=True)
+        self.statusBar().showMessage(f"Developer invert mode: {invert_mode_label(mode)}")
+
     def _connect(self) -> None:
         self.control_panel.openRequested.connect(self.open_file)
         self.control_panel.exportRequested.connect(self.export_current)
@@ -771,6 +818,21 @@ class MainWindow(QMainWindow):
             return
 
         self.load_path(Path(path), refresh_sequence=True)
+
+    def _start_frame_ranker_warmup(self) -> None:
+        if self._model_warmup_in_progress:
+            return
+        self._model_warmup_in_progress = True
+        self._refresh_activity_progress()
+        task = ModelWarmupTask()
+        task.signals.finished.connect(self._frame_ranker_warmup_finished)
+        self._thread_pool.start(task)
+
+    def _frame_ranker_warmup_finished(self, loaded: bool, model_name: str) -> None:
+        self._model_warmup_in_progress = False
+        self._refresh_activity_progress()
+        if loaded:
+            self.statusBar().showMessage(f"Frame model ready: {model_name}")
 
     def load_path(self, path: Path, *, refresh_sequence: bool = False) -> None:
         if self.current_path == path:
@@ -835,12 +897,14 @@ class MainWindow(QMainWindow):
         task.signals.finished.connect(self._raw_preview_finished)
         task.signals.failed.connect(self._raw_preview_failed)
         self._raw_preview_in_progress = True
+        self._refresh_activity_progress()
         self._thread_pool.start(task)
 
     def _raw_preview_finished(self, job_id: int, path: Path, preview: RawPreview) -> None:
         if job_id != self._raw_preview_job_id or path != self.current_path:
             return
         self._raw_preview_in_progress = False
+        self._refresh_activity_progress()
 
         self.current_preview = preview
         pixmap = self._pixmap_from_rgb8(preview.display_rgb8)
@@ -859,6 +923,7 @@ class MainWindow(QMainWindow):
         if job_id != self._raw_preview_job_id or path != self.current_path:
             return
         self._raw_preview_in_progress = False
+        self._refresh_activity_progress()
         self.image_view.set_raw_placeholder(path)
         self.control_panel.set_image_loaded(False)
         self.control_panel.set_image_status("RAW preview failed")
@@ -966,6 +1031,7 @@ class MainWindow(QMainWindow):
         task.signals.finished.connect(self._auto_detect_finished)
         task.signals.failed.connect(self._auto_detect_failed)
         self._auto_detect_in_progress = True
+        self._refresh_activity_progress()
         self.statusBar().showMessage("Auto detect running in background...")
         self._thread_pool.start(task)
 
@@ -973,6 +1039,7 @@ class MainWindow(QMainWindow):
         if job_id != self._auto_detect_job_id:
             return
         self._auto_detect_in_progress = False
+        self._refresh_activity_progress()
         if output.path != self.current_path:
             self.statusBar().showMessage("Auto detect result ignored after file change")
             return
@@ -983,6 +1050,7 @@ class MainWindow(QMainWindow):
         if job_id != self._auto_detect_job_id:
             return
         self._auto_detect_in_progress = False
+        self._refresh_activity_progress()
         self.statusBar().showMessage("Auto detect failed")
         QMessageBox.warning(self, "Auto Detect Failed", message)
 
@@ -1096,7 +1164,7 @@ class MainWindow(QMainWindow):
         ):
             self.auto_levels_pending = False
         self.statusBar().showMessage(
-            "Adjust: mode {invert_mode}, curve {print_curve}, WB {auto_wb}, exposure {exposure}, highlights {highlights}, shadows {shadows}, contrast {contrast}, saturation {saturation}, camera color {camera_color_strength}, black {black_point}, mid {mid_point}, white {white_point}".format(
+            "Adjust: mode {invert_mode}, curve {print_curve}, WB {auto_wb}, exposure {exposure}, highlights {highlights}, shadows {shadows}, contrast {contrast}, saturation {saturation}, boundary {analysis_inset_percent}%, camera color {camera_color_strength}, black {black_point}, mid {mid_point}, white {white_point}".format(
                 **values
             )
         )
@@ -1517,10 +1585,22 @@ class MainWindow(QMainWindow):
     def _cancel_raw_preview(self) -> None:
         self._raw_preview_job_id += 1
         self._raw_preview_in_progress = False
+        self._refresh_activity_progress()
 
     def _cancel_auto_detect(self) -> None:
         self._auto_detect_job_id += 1
         self._auto_detect_in_progress = False
+        self._refresh_activity_progress()
+
+    def _refresh_activity_progress(self) -> None:
+        if self._raw_preview_in_progress:
+            self.control_panel.set_activity_progress(True, text="Loading RAW preview...")
+        elif self._auto_detect_in_progress:
+            self.control_panel.set_activity_progress(True, text="Finding frame...")
+        elif self._model_warmup_in_progress:
+            self.control_panel.set_activity_progress(True, text="Loading frame model...")
+        else:
+            self.control_panel.set_activity_progress(False)
 
     def _apply_auto_levels(self, levels: dict[str, int]) -> None:
         self._applying_auto_levels = True

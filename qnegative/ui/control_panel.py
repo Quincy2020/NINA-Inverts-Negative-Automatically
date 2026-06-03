@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -41,6 +42,7 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("controlPanel")
         self.setMinimumWidth(340)
+        self._developer_invert_mode: str | None = None
 
         self.file_label = QLabel("No file open")
         self.file_label.setObjectName("mutedLabel")
@@ -70,9 +72,7 @@ class ControlPanel(QWidget):
         self.reset_button = QPushButton("Reset")
         self.invert_mode_combo = QComboBox()
         self.invert_mode_combo.addItem("Lab Print", InvertMode.LAB_PRINT.value)
-        self.invert_mode_combo.addItem("Density", InvertMode.DENSITY.value)
         self.invert_mode_combo.addItem("Log Bounds", InvertMode.LOG_BOUNDS.value)
-        self.invert_mode_combo.addItem("Simple", InvertMode.SIMPLE.value)
         self.print_curve_combo = QComboBox()
         self.print_curve_combo.addItem("Linear", PrintCurveMode.LINEAR.value)
         self.print_curve_combo.addItem("Soft Print", PrintCurveMode.SOFT.value)
@@ -88,7 +88,7 @@ class ControlPanel(QWidget):
 
         self.mask_picker_button = self._make_tool_button("Base Picker", ToolMode.MASK_PICKER)
         self.film_rect_button = self._make_tool_button("Frame Area", ToolMode.FILM_RECT)
-        self.mask_picker_button.setChecked(True)
+        self.film_rect_button.setChecked(True)
         self.auto_format_combo = QComboBox()
         self.auto_format_combo.addItem("Auto", "auto")
         self.auto_format_combo.addItem("135", "135")
@@ -97,9 +97,7 @@ class ControlPanel(QWidget):
         self.auto_format_combo.addItem("67", "67")
         self.auto_format_combo.addItem("69", "69")
         self._style_combo_popup(self.auto_format_combo)
-        self.auto_frame_base_button = QPushButton("Frame + Base")
-        self.auto_frame_button = QPushButton("Frame Only")
-        self.auto_base_button = QPushButton("Base Only")
+        self.auto_frame_button = QPushButton("Auto Frame")
 
         self.exposure_slider = self._make_slider(-100, 100, 0)
         self.highlights_slider = self._make_slider(-100, 100, 0)
@@ -107,6 +105,10 @@ class ControlPanel(QWidget):
         self.contrast_slider = self._make_slider(-100, 100, 0)
         self.saturation_slider = self._make_slider(-100, 100, 0)
         self.camera_color_slider = self._make_slider(0, 100, 0)
+        self.analysis_inset_spin = QSpinBox()
+        self.analysis_inset_spin.setRange(0, 20)
+        self.analysis_inset_spin.setValue(5)
+        self.analysis_inset_spin.setSuffix("%")
         self.histogram_levels = HistogramLevelsWidget()
         self.density_matrix_panel = DensityMatrixPanel()
         self.camera_color_panel = self._camera_color_developer_panel()
@@ -141,7 +143,6 @@ class ControlPanel(QWidget):
 
         root.addWidget(self._file_section())
         root.addWidget(self._histogram_section())
-        root.addWidget(self._auto_detect_section())
         root.addWidget(self._tools_section())
         root.addWidget(self._selection_section())
         root.addWidget(self._invert_section())
@@ -162,21 +163,6 @@ class ControlPanel(QWidget):
         layout.addWidget(self.sequence_label)
         return group
 
-    def _auto_detect_section(self) -> QGroupBox:
-        group = self._section("Auto Detect")
-        layout = QVBoxLayout(group)
-        format_row = QHBoxLayout()
-        format_row.addWidget(QLabel("Format"))
-        format_row.addWidget(self.auto_format_combo, 1)
-        layout.addLayout(format_row)
-
-        row = QHBoxLayout()
-        row.addWidget(self.auto_frame_base_button)
-        row.addWidget(self.auto_frame_button)
-        row.addWidget(self.auto_base_button)
-        layout.addLayout(row)
-        return group
-
     def _histogram_section(self) -> QGroupBox:
         group = self._section("Dynamic Range")
         layout = QVBoxLayout(group)
@@ -189,9 +175,14 @@ class ControlPanel(QWidget):
         layout.setSpacing(8)
 
         row = QHBoxLayout()
-        row.addWidget(self.mask_picker_button)
         row.addWidget(self.film_rect_button)
+        row.addWidget(self.auto_frame_button)
         layout.addLayout(row)
+
+        format_row = QHBoxLayout()
+        format_row.addWidget(QLabel("Format"))
+        format_row.addWidget(self.auto_format_combo, 1)
+        layout.addLayout(format_row)
         return group
 
     def _selection_section(self) -> QGroupBox:
@@ -235,6 +226,12 @@ class ControlPanel(QWidget):
         curve_row.addWidget(self.print_curve_combo, 1)
         layout.addLayout(curve_row)
         layout.addWidget(self.print_curve_widget)
+
+        boundary_row = QHBoxLayout()
+        boundary_row.addWidget(QLabel("Boundary"))
+        boundary_row.addStretch(1)
+        boundary_row.addWidget(self.analysis_inset_spin)
+        layout.addLayout(boundary_row)
         return group
 
     def _density_matrix_section(self) -> CollapsibleSection:
@@ -247,6 +244,11 @@ class ControlPanel(QWidget):
         group = self._section("Output")
         layout = QVBoxLayout(group)
         layout.addWidget(self.export_button)
+        self.activity_progress = QProgressBar()
+        self.activity_progress.setRange(0, 0)
+        self.activity_progress.setTextVisible(True)
+        self.activity_progress.hide()
+        layout.addWidget(self.activity_progress)
         self.export_progress = QProgressBar()
         self.export_progress.setRange(0, 0)
         self.export_progress.setFormat("Exporting TIFF...")
@@ -306,11 +308,9 @@ class ControlPanel(QWidget):
         self.export_button.clicked.connect(self.exportRequested.emit)
         self.invert_button.clicked.connect(self.invertRequested.emit)
         self.reset_button.clicked.connect(self.resetRequested.emit)
-        self.auto_frame_base_button.clicked.connect(lambda: self.autoDetectRequested.emit("frame_base"))
-        self.auto_frame_button.clicked.connect(lambda: self.autoDetectRequested.emit("frame"))
-        self.auto_base_button.clicked.connect(lambda: self.autoDetectRequested.emit("base"))
+        self.auto_frame_button.clicked.connect(lambda: self.autoDetectRequested.emit("frame_base"))
         self.tool_group.idClicked.connect(self._emit_tool_mode)
-        self.invert_mode_combo.currentIndexChanged.connect(self._emit_adjustments)
+        self.invert_mode_combo.currentIndexChanged.connect(self._invert_mode_combo_changed)
         self.print_curve_combo.currentIndexChanged.connect(self._print_curve_changed)
 
         for slider in (
@@ -324,6 +324,7 @@ class ControlPanel(QWidget):
             slider.sliderPressed.connect(self.adjustmentInteractionStarted.emit)
             slider.sliderReleased.connect(self.adjustmentInteractionFinished.emit)
             slider.valueChanged.connect(self._emit_adjustments)
+        self.analysis_inset_spin.valueChanged.connect(self._emit_adjustments)
         self.density_matrix_panel.matrixChanged.connect(self._emit_adjustments)
         self.white_balance_panel.balanceChanged.connect(self._emit_adjustments)
         self.white_balance_panel.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
@@ -356,7 +357,8 @@ class ControlPanel(QWidget):
                 "contrast": self.contrast_slider.value(),
                 "saturation": self.saturation_slider.value(),
                 "camera_color_strength": self.camera_color_slider.value(),
-                "invert_mode": self.invert_mode_combo.currentData(),
+                "analysis_inset_percent": self.analysis_inset_spin.value(),
+                "invert_mode": self._current_invert_mode(),
                 "print_curve": self.print_curve_combo.currentData(),
                 **self.histogram_levels.levels(),
                 **self.density_matrix_panel.values(),
@@ -367,6 +369,15 @@ class ControlPanel(QWidget):
     def _print_curve_changed(self) -> None:
         self.print_curve_widget.set_curve_mode(self.print_curve_combo.currentData())
         self._emit_adjustments()
+
+    def _invert_mode_combo_changed(self) -> None:
+        self._developer_invert_mode = None
+        self._emit_adjustments()
+
+    def _current_invert_mode(self) -> str:
+        if self._developer_invert_mode is not None:
+            return self._developer_invert_mode
+        return str(self.invert_mode_combo.currentData() or InvertMode.LAB_PRINT.value)
 
     def _make_slider(self, minimum: int, maximum: int, value: int) -> QSlider:
         slider = QSlider(Qt.Horizontal)
@@ -430,9 +441,7 @@ class ControlPanel(QWidget):
     def set_image_loaded(self, loaded: bool) -> None:
         self.invert_button.setEnabled(loaded)
         self.export_button.setEnabled(loaded and not self.export_progress.isVisible())
-        self.auto_frame_base_button.setEnabled(loaded)
         self.auto_frame_button.setEnabled(loaded)
-        self.auto_base_button.setEnabled(loaded)
 
     def auto_format(self) -> str:
         data = self.auto_format_combo.currentData()
@@ -477,6 +486,15 @@ class ControlPanel(QWidget):
         self.export_progress.setValue(max(0, min(100, value)))
         self.export_progress.setFormat(f"{text} %p%")
 
+    def set_activity_progress(self, active: bool, *, text: str = "Working...") -> None:
+        self.activity_progress.setVisible(active)
+        if active:
+            self.activity_progress.setRange(0, 0)
+            self.activity_progress.setFormat(text)
+        else:
+            self.activity_progress.setRange(0, 1)
+            self.activity_progress.setValue(0)
+
     def set_adjustments(self, adjustments: AdjustmentParams, *, emit: bool = False) -> None:
         widgets = (
             self.exposure_slider,
@@ -485,6 +503,7 @@ class ControlPanel(QWidget):
             self.contrast_slider,
             self.saturation_slider,
             self.camera_color_slider,
+            self.analysis_inset_spin,
             self.histogram_levels,
             self.density_matrix_panel,
             self.white_balance_panel,
@@ -500,7 +519,9 @@ class ControlPanel(QWidget):
             self.contrast_slider.setValue(adjustments.contrast)
             self.saturation_slider.setValue(adjustments.saturation)
             self.camera_color_slider.setValue(adjustments.camera_color_strength)
+            self.analysis_inset_spin.setValue(adjustments.analysis_inset_percent)
             index = self.invert_mode_combo.findData(adjustments.invert_mode)
+            self._developer_invert_mode = adjustments.invert_mode if index < 0 else None
             self.invert_mode_combo.setCurrentIndex(0 if index < 0 else index)
             curve_index = self.print_curve_combo.findData(adjustments.print_curve)
             self.print_curve_combo.setCurrentIndex(2 if curve_index < 0 else curve_index)
