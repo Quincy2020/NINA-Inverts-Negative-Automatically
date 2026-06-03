@@ -6,15 +6,19 @@ from pathlib import Path
 from time import perf_counter
 
 import numpy as np
-import tifffile
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QImage, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QDockWidget,
     QFileDialog,
     QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QMessageBox,
     QSplitter,
@@ -90,6 +94,11 @@ class RawPreviewSignals(QObject):
     failed = Signal(int, object, str)
 
 
+class PreInvertSignals(QObject):
+    finished = Signal(int, object)
+    failed = Signal(int, object, str)
+
+
 class ModelWarmupSignals(QObject):
     finished = Signal(bool, str)
 
@@ -99,8 +108,125 @@ FINAL_RENDER_QUALITY = "final"
 INTERACTIVE_RENDER_QUALITY = "interactive"
 FINAL_RENDER_DEBOUNCE_MS = 80
 INTERACTIVE_RENDER_DEBOUNCE_MS = 115
-PREVIEW_RESULT_CACHE_LIMIT = 6
-RAW_PREVIEW_CACHE_LIMIT = 6
+PREVIEW_RESULT_CACHE_LIMIT = 16
+RAW_PREVIEW_CACHE_LIMIT = 16
+
+
+class BatchExportDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("batchExportDialog")
+        self.setWindowTitle("Batch Export")
+        self.setWindowModality(Qt.NonModal)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
+        self.setMinimumSize(340, 250)
+        self.resize(380, 280)
+
+        self.current_label = QLabel("Waiting")
+        self.current_label.setObjectName("batchCurrentLabel")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("Waiting")
+        self.queue = QListWidget()
+        self.queue.setObjectName("batchQueue")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("Current"))
+        layout.addWidget(self.current_label)
+        layout.addWidget(self.progress)
+        layout.addWidget(QLabel("Queue"))
+        layout.addWidget(self.queue, 1)
+        self._apply_style()
+
+    def set_jobs(self, paths: list[Path]) -> None:
+        self.queue.clear()
+        for path in paths:
+            item = QListWidgetItem(path.name)
+            item.setData(Qt.UserRole, str(path))
+            self.queue.addItem(item)
+        self.progress.setValue(0)
+        self.progress.setFormat("Queued")
+        self.current_label.setText("Waiting")
+
+    def set_current(self, path: Path) -> None:
+        self.current_label.setText(path.name)
+        for index in range(self.queue.count()):
+            item = self.queue.item(index)
+            if item.data(Qt.UserRole) == str(path):
+                item.setText(f"> {path.name}")
+                self.queue.setCurrentRow(index)
+            elif not item.text().startswith("Done "):
+                item.setText(Path(item.data(Qt.UserRole)).name)
+
+    def update_progress(self, value: int, text: str) -> None:
+        self.progress.setValue(max(0, min(100, int(value))))
+        self.progress.setFormat(text)
+
+    def mark_done(self, path: Path) -> None:
+        for index in range(self.queue.count()):
+            item = self.queue.item(index)
+            if item.data(Qt.UserRole) == str(path):
+                item.setText(f"Done {path.name}")
+                break
+
+    def finish(self, text: str, *, auto_close_ms: int | None = None) -> None:
+        self.current_label.setText(text)
+        self.progress.setValue(100)
+        self.progress.setFormat(text)
+        if auto_close_ms is not None:
+            QTimer.singleShot(auto_close_ms, self.hide)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        event.ignore()
+
+    def _apply_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QDialog#batchExportDialog {
+                background: #20242b;
+                color: #e8eaed;
+            }
+            QLabel {
+                color: #e8eaed;
+            }
+            QLabel#batchCurrentLabel {
+                background: #15191f;
+                border: 1px solid #343c47;
+                border-radius: 5px;
+                padding: 8px;
+                font-weight: 600;
+            }
+            QListWidget#batchQueue {
+                background: #15191f;
+                border: 1px solid #343c47;
+                border-radius: 5px;
+                color: #cfd6df;
+                outline: 0;
+            }
+            QListWidget#batchQueue::item {
+                padding: 6px;
+            }
+            QListWidget#batchQueue::item:selected {
+                background: #2f5d82;
+                color: #ffffff;
+            }
+            QProgressBar {
+                background: #15191f;
+                border: 1px solid #343c47;
+                border-radius: 5px;
+                color: #e8eaed;
+                text-align: center;
+                height: 18px;
+            }
+            QProgressBar::chunk {
+                background: #4aa3ff;
+                border-radius: 4px;
+            }
+            """
+        )
 
 
 @dataclass(frozen=True)
@@ -150,6 +276,17 @@ class AutoDetectOutput:
     base_result: AutoBaseResult | None
     fallback_state: ImageProcessingState | None
     auto_preview: bool = False
+
+
+@dataclass(frozen=True)
+class PreInvertOutput:
+    path: Path
+    preview: RawPreview
+    frame_rect: ImageRect
+    adjustments: AdjustmentParams
+    result: NegativePreviewResult
+    cache_key: tuple | None
+    confidence: float
 
 
 def scaled_raw_preview(preview: RawPreview, *, max_edge: int) -> RawPreview:
@@ -384,6 +521,96 @@ class RawPreviewTask(QRunnable):
             return
 
         self.signals.finished.emit(self.job_id, self.path, preview)
+
+
+class PreInvertTask(QRunnable):
+    def __init__(
+        self,
+        *,
+        job_id: int,
+        path: Path,
+        max_size: int,
+        format_hint: str,
+        file_key: tuple,
+        adjustments: AdjustmentParams,
+        prior_frame_rect: ImageRect | None = None,
+    ) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.path = path
+        self.max_size = max_size
+        self.format_hint = format_hint
+        self.file_key = file_key
+        self.adjustments = deepcopy(adjustments)
+        self.prior_frame_rect = prior_frame_rect
+        self.signals = PreInvertSignals()
+
+    def run(self) -> None:
+        try:
+            preview = make_raw_preview(self.path, max_size=self.max_size)
+            detected = detect_frame_and_base(
+                preview.preview_linear_rgb,
+                preview_size=preview.preview_size,
+                source_size=preview.source_size,
+                format_hint=self.format_hint,
+                detect_base=False,
+                prior_frame_rect=self.prior_frame_rect,
+            )
+            frame = detected.frame
+            if frame is None or frame.confidence_level not in {"high", "fallback"}:
+                raise PipelineError("No high-confidence frame detected.")
+
+            base = build_negative_base_preview(
+                preview.preview_linear_rgb,
+                source_size=preview.source_size,
+                mask_point=None,
+                film_rect=frame.rect,
+                preview_camera_wb_linear_rgb=preview.preview_camera_wb_linear_rgb,
+                camera_to_srgb_matrix=preview.camera_to_srgb_matrix,
+            )
+            negative_stage = build_lab_print_negative_stage(
+                base,
+                analysis_inset=analysis_inset_from_adjustments(self.adjustments),
+            )
+            effective = deepcopy(self.adjustments)
+            auto_levels = suggest_lab_print_luminance_levels(
+                analysis_inset_crop(negative_stage.normalized_log, negative_stage.analysis_inset),
+                effective,
+                camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
+            )
+            effective.black_point = auto_levels["black_point"]
+            effective.mid_point = auto_levels["mid_point"]
+            effective.white_point = auto_levels["white_point"]
+            levels_stage = build_lab_print_levels_stage(
+                negative_stage,
+                effective,
+                auto_levels=auto_levels,
+            )
+            color_stage = build_lab_print_color_stage(levels_stage, effective)
+            result = build_lab_print_display_stage(color_stage, effective)
+            cache_key = preview_result_cache_key_for(
+                file_key=self.file_key,
+                preview=preview,
+                mask_point=None,
+                film_rect=frame.rect,
+                adjustments=effective,
+            )
+        except Exception as exc:
+            self.signals.failed.emit(self.job_id, self.path, str(exc))
+            return
+
+        self.signals.finished.emit(
+            self.job_id,
+            PreInvertOutput(
+                path=self.path,
+                preview=preview,
+                frame_rect=frame.rect,
+                adjustments=effective,
+                result=result,
+                cache_key=cache_key,
+                confidence=frame.confidence,
+            ),
+        )
 
 
 class ModelWarmupTask(QRunnable):
@@ -728,6 +955,8 @@ class TiffExportTask(QRunnable):
             self.signals.progress.emit(90, self._timed_progress_text("Writing TIFF", timings))
 
             stage_start = perf_counter()
+            import tifffile
+
             tifffile.imwrite(
                 self.output_path,
                 tiff_rgb16,
@@ -858,11 +1087,22 @@ class MainWindow(QMainWindow):
         self._auto_detect_job_id = 0
         self._auto_detect_auto_preview_jobs: set[int] = set()
         self._auto_detect_in_progress = False
+        self._preinvert_job_id = 0
+        self._preinvert_in_progress: set[int] = set()
+        self._preinvert_paths: set[Path] = set()
+        self._preinvert_queue: list[Path] = []
         self._export_in_progress = False
+        self._batch_export_queue: list[dict] = []
+        self._batch_export_total = 0
+        self._batch_export_done = 0
+        self._batch_export_active = False
+        self._batch_export_current_path: Path | None = None
         self._default_export_dir: Path | None = None
         self._gpu_preview_enabled = True
         self._auto_invert_after_frame_change = True
         self._auto_frame_new_negatives = True
+        self._auto_preinvert_nearby_frames = True
+        self._auto_preinvert_radius = 1
 
         self.control_panel = ControlPanel()
         self.origin_view = ImageView()
@@ -872,9 +1112,10 @@ class MainWindow(QMainWindow):
         self.preview_view.set_placeholder("Positive preview waiting")
         self.preview_tabs = QTabWidget()
         self.preview_tabs.setObjectName("previewTabs")
+        self.batch_export_dialog = BatchExportDialog(self)
         self.empty_state = QWidget()
         self.empty_state.setObjectName("emptyState")
-        self.open_empty_button = QPushButton("Open RAW / Image")
+        self.open_empty_button = QPushButton("Open Folder")
         self.open_empty_button.setObjectName("emptyOpenButton")
         self.view_stack = QStackedWidget()
         self.filmstrip = FolderFilmstrip()
@@ -886,6 +1127,7 @@ class MainWindow(QMainWindow):
         self._build_layout()
         self._build_menus()
         self._connect()
+        self._build_shortcuts()
         self._apply_style()
         self.control_panel.set_adjustments(self.adjustments, emit=False)
         self.set_tool_mode(ToolMode.FILM_RECT)
@@ -931,7 +1173,7 @@ class MainWindow(QMainWindow):
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
-        open_action = QAction("Open RAW / Image...", self)
+        open_action = QAction("Open RAW / TIFF...", self)
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
 
@@ -943,6 +1185,10 @@ class MainWindow(QMainWindow):
         export_action = QAction("Export TIFF...", self)
         export_action.triggered.connect(self.export_current)
         file_menu.addAction(export_action)
+
+        export_completed_action = QAction("Export Completed TIFFs...", self)
+        export_completed_action.triggered.connect(self.export_completed)
+        file_menu.addAction(export_completed_action)
 
         export_dir_action = QAction("Set Default Export Directory...", self)
         export_dir_action.triggered.connect(self.set_default_export_directory)
@@ -988,6 +1234,24 @@ class MainWindow(QMainWindow):
         self.auto_frame_new_negatives_action.setChecked(True)
         self.auto_frame_new_negatives_action.toggled.connect(self.set_auto_frame_new_negatives)
         settings_menu.addAction(self.auto_frame_new_negatives_action)
+
+        self.auto_preinvert_nearby_action = QAction("Auto Pre-Invert Nearby Frames", self)
+        self.auto_preinvert_nearby_action.setCheckable(True)
+        self.auto_preinvert_nearby_action.setChecked(True)
+        self.auto_preinvert_nearby_action.toggled.connect(self.set_auto_preinvert_nearby_frames)
+        settings_menu.addAction(self.auto_preinvert_nearby_action)
+
+        preinvert_radius_menu = settings_menu.addMenu("Auto Pre-Invert Range")
+        self.preinvert_radius_group = QActionGroup(self)
+        self.preinvert_radius_group.setExclusive(True)
+        for radius in (1, 2, 3, 5):
+            action = QAction(f"Previous/Next {radius}", self)
+            action.setCheckable(True)
+            action.setData(radius)
+            action.setChecked(radius == self._auto_preinvert_radius)
+            self.preinvert_radius_group.addAction(action)
+            preinvert_radius_menu.addAction(action)
+        self.preinvert_radius_group.triggered.connect(self.set_auto_preinvert_radius)
         settings_menu.addSeparator()
 
         developer_menu = settings_menu.addMenu("Developer")
@@ -1069,6 +1333,7 @@ class MainWindow(QMainWindow):
     def _connect(self) -> None:
         self.control_panel.openRequested.connect(self.open_file)
         self.control_panel.exportRequested.connect(self.export_current)
+        self.control_panel.batchExportRequested.connect(self.export_completed)
         self.control_panel.invertRequested.connect(self.preview_inversion)
         self.control_panel.resetRequested.connect(self.reset_workspace)
         self.control_panel.toolChanged.connect(self.set_tool_mode)
@@ -1076,7 +1341,7 @@ class MainWindow(QMainWindow):
         self.control_panel.adjustmentsChanged.connect(self.adjustments_changed)
         self.control_panel.adjustmentInteractionStarted.connect(self.adjustment_interaction_started)
         self.control_panel.adjustmentInteractionFinished.connect(self.adjustment_interaction_finished)
-        self.open_empty_button.clicked.connect(self.open_file)
+        self.open_empty_button.clicked.connect(self.open_folder)
 
         self.origin_view.maskPointSelected.connect(self.mask_point_selected)
         self.origin_view.filmRectSelected.connect(self.film_rect_selected)
@@ -1094,6 +1359,10 @@ class MainWindow(QMainWindow):
         self.filmstrip.nextRequested.connect(self.go_next_file)
         self.preview_refresh_timer.timeout.connect(self.preview_refresh_timeout)
 
+    def _build_shortcuts(self) -> None:
+        tab_shortcut = QShortcut(QKeySequence(Qt.Key_Tab), self)
+        tab_shortcut.activated.connect(self.toggle_preview_tab)
+
     def set_gpu_preview_enabled(self, enabled: bool) -> None:
         self._gpu_preview_enabled = bool(enabled)
         self.preview_view.set_gpu_preview_enabled(self._gpu_preview_enabled)
@@ -1110,12 +1379,29 @@ class MainWindow(QMainWindow):
         status = "enabled" if self._auto_frame_new_negatives else "disabled"
         self.statusBar().showMessage(f"Auto frame new negatives {status}")
 
+    def set_auto_preinvert_nearby_frames(self, enabled: bool) -> None:
+        self._auto_preinvert_nearby_frames = bool(enabled)
+        if not self._auto_preinvert_nearby_frames:
+            self._preinvert_queue = []
+        status = "enabled" if self._auto_preinvert_nearby_frames else "disabled"
+        self.statusBar().showMessage(f"Auto pre-invert nearby frames {status}")
+        if self._auto_preinvert_nearby_frames:
+            self._schedule_nearby_preinvert()
+
+    def set_auto_preinvert_radius(self, action: QAction) -> None:
+        self._auto_preinvert_radius = int(action.data())
+        self._preinvert_queue = []
+        self.statusBar().showMessage(
+            f"Auto pre-invert range: previous/next {self._auto_preinvert_radius}"
+        )
+        self._schedule_nearby_preinvert()
+
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Open RAW or Image",
+            "Open RAW or TIFF",
             str(Path.cwd()),
-            "RAW and Images (*.arw *.raw *.dng *.cr2 *.cr3 *.nef *.raf *.orf *.rw2 *.jpg *.jpeg *.png *.tif *.tiff *.bmp *.webp);;All files (*.*)",
+            "RAW and TIFF (*.arw *.raw *.dng *.cr2 *.cr3 *.nef *.raf *.orf *.rw2 *.tif *.tiff);;All files (*.*)",
         )
         if not path:
             return
@@ -1132,7 +1418,7 @@ class MainWindow(QMainWindow):
             return
         files = list_supported_files(Path(folder))
         if not files:
-            QMessageBox.information(self, "Open Folder", "No supported RAW or image files were found.")
+            QMessageBox.information(self, "Open Folder", "No supported RAW or TIFF files were found.")
             return
         self.load_path(files[0], refresh_sequence=True)
 
@@ -1243,6 +1529,7 @@ class MainWindow(QMainWindow):
         self._show_raw_preview(path, preview)
         restored_state = self._restore_state_for_path(path)
         self._maybe_auto_frame_new_negative(restored_state)
+        self._schedule_nearby_preinvert()
         if self.negative_preview_active:
             self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
         else:
@@ -1303,6 +1590,7 @@ class MainWindow(QMainWindow):
         self._show_raw_preview(path, cached.preview)
         restored_state = self._restore_state_for_path(path)
         self._maybe_auto_frame_new_negative(restored_state)
+        self._schedule_nearby_preinvert()
         if self.negative_preview_active:
             self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
         else:
@@ -1516,6 +1804,7 @@ class MainWindow(QMainWindow):
         suffix = " using previous image fallback" if used_fallback else ""
         self.statusBar().showMessage(f"Auto detect applied: {', '.join(details)}{suffix}")
         self._schedule_preview_if_ready(force=output.auto_preview)
+        self._schedule_nearby_preinvert()
 
     def adjustment_interaction_started(self) -> None:
         self._interactive_adjustment_active = True
@@ -2056,8 +2345,113 @@ class MainWindow(QMainWindow):
         task.signals.progress.connect(self._export_progress_updated)
         self._export_in_progress = True
         self.control_panel.export_button.setEnabled(False)
+        self.control_panel.batch_export_button.setEnabled(False)
         self.control_panel.set_export_progress(True, value=0, text="Starting export")
         self.statusBar().showMessage("Exporting 16-bit TIFF...")
+        self._thread_pool.start(task)
+
+    def export_completed(self) -> None:
+        if self._export_in_progress:
+            self.statusBar().showMessage("Export already in progress")
+            return
+        if self.current_path is not None:
+            self._save_current_state()
+
+        output_dir_text = QFileDialog.getExistingDirectory(
+            self,
+            "Export Completed TIFFs",
+            str(self._default_export_dir or (self.current_path.parent if self.current_path else Path.cwd())),
+        )
+        if not output_dir_text:
+            return
+
+        output_dir = Path(output_dir_text)
+        items = self._completed_export_items(output_dir)
+        if not items:
+            QMessageBox.information(
+                self,
+                "Export Completed TIFFs",
+                "No completed RAW positives were found in the current sequence.",
+            )
+            return
+
+        self._batch_export_queue = items
+        self._batch_export_total = len(items)
+        self._batch_export_done = 0
+        self._batch_export_active = True
+        self._export_in_progress = True
+        self.batch_export_dialog.set_jobs([item["source_path"] for item in items])
+        self.batch_export_dialog.show()
+        self.batch_export_dialog.raise_()
+        self.control_panel.export_button.setEnabled(False)
+        self.control_panel.batch_export_button.setEnabled(False)
+        self.control_panel.set_export_progress(True, value=0, text="Starting batch export")
+        self.statusBar().showMessage(f"Exporting {self._batch_export_total} completed TIFFs...")
+        self._start_next_batch_export()
+
+    def _completed_export_items(self, output_dir: Path) -> list[dict]:
+        ordered_paths = list(self.folder_files) if self.folder_files else list(self.image_states)
+        for path in self.image_states:
+            if path not in ordered_paths:
+                ordered_paths.append(path)
+
+        items: list[dict] = []
+        for path in ordered_paths:
+            state = self.image_states.get(path)
+            if state is None or not state.negative_preview_active:
+                continue
+            if path.suffix.lower() not in RAW_EXTENSIONS:
+                continue
+            if state.film_rect is None or not state.film_rect.is_valid():
+                continue
+            items.append(
+                {
+                    "source_path": path,
+                    "output_path": output_dir / f"{path.stem}_positive.tif",
+                    "mask_point": state.mask_point,
+                    "film_rect": state.film_rect,
+                    "adjustments": deepcopy(state.adjustments),
+                    "flip_horizontal": state.preview_flip_horizontal,
+                    "flip_vertical": state.preview_flip_vertical,
+                    "rotation_quarters": state.preview_rotation_quarters,
+                    "auto_levels_pending": state.auto_levels_pending,
+                    "preview_cmy_offsets": self._preview_cmy_offsets_for_path(path, state),
+                }
+            )
+        return items
+
+    def _preview_cmy_offsets_for_path(self, path: Path, state: ImageProcessingState) -> np.ndarray | None:
+        if state.adjustments.invert_mode != InvertMode.LAB_PRINT.value or not state.adjustments.auto_wb:
+            return None
+        cached = self.preview_result_cache.get(path)
+        if cached is None:
+            return None
+        return np.asarray(cached.result.wb_gains, dtype=np.float32).copy()
+
+    def _start_next_batch_export(self) -> None:
+        if not self._batch_export_queue:
+            self._batch_export_active = False
+            self._export_in_progress = False
+            self._batch_export_current_path = None
+            self.control_panel.update_export_progress(100, "Batch export complete")
+            self.control_panel.set_export_progress(False)
+            self.control_panel.export_button.setEnabled(True)
+            self.control_panel.batch_export_button.setEnabled(True)
+            self.batch_export_dialog.finish(
+                f"Batch exported {self._batch_export_done} TIFFs",
+                auto_close_ms=1200,
+            )
+            self.statusBar().showMessage(f"Batch exported {self._batch_export_done} TIFFs")
+            self._start_next_preinvert_jobs()
+            return
+
+        item = self._batch_export_queue.pop(0)
+        self._batch_export_current_path = item["source_path"]
+        self.batch_export_dialog.set_current(self._batch_export_current_path)
+        task = TiffExportTask(**item)
+        task.signals.finished.connect(self._export_finished)
+        task.signals.failed.connect(self._export_failed)
+        task.signals.progress.connect(self._export_progress_updated)
         self._thread_pool.start(task)
 
     def _current_preview_cmy_offsets_for_export(self) -> np.ndarray | None:
@@ -2078,20 +2472,43 @@ class MainWindow(QMainWindow):
         return np.asarray(cached.result.wb_gains, dtype=np.float32).copy()
 
     def _export_progress_updated(self, value: int, text: str) -> None:
+        if self._batch_export_active and self._batch_export_total:
+            text = f"Batch {self._batch_export_done + 1}/{self._batch_export_total}: {text}"
+            self.batch_export_dialog.update_progress(value, text)
         self.control_panel.update_export_progress(value, text)
         self.statusBar().showMessage(f"{text}...")
 
     def _export_finished(self, output_path: str, timings: dict[str, float]) -> None:
+        if self._batch_export_active:
+            self._batch_export_done += 1
+            if self._batch_export_current_path is not None:
+                self.batch_export_dialog.mark_done(self._batch_export_current_path)
+            timing_text = self._format_export_timings(timings)
+            if timing_text:
+                print(f"Export timings: {Path(output_path).name}: {timing_text}", flush=True)
+            progress = round(self._batch_export_done / max(1, self._batch_export_total) * 100)
+            self.control_panel.update_export_progress(
+                progress,
+                f"Batch exported {self._batch_export_done}/{self._batch_export_total}",
+            )
+            self.statusBar().showMessage(
+                f"Batch exported {self._batch_export_done}/{self._batch_export_total}: {Path(output_path).name}"
+            )
+            self._start_next_batch_export()
+            return
+
         self._export_in_progress = False
         timing_text = self._format_export_timings(timings)
         complete_text = f"Export complete ({timing_text})" if timing_text else "Export complete"
         self.control_panel.update_export_progress(100, complete_text)
         self.control_panel.set_export_progress(False)
         self.control_panel.export_button.setEnabled(True)
+        self.control_panel.batch_export_button.setEnabled(True)
         suffix = f" | {timing_text}" if timing_text else ""
         self.statusBar().showMessage(f"Exported TIFF: {output_path}{suffix}")
         if timing_text:
             print(f"Export timings: {timing_text}", flush=True)
+        self._start_next_preinvert_jobs()
 
     @staticmethod
     def _format_export_timings(timings: dict[str, float]) -> str:
@@ -2103,11 +2520,18 @@ class MainWindow(QMainWindow):
         return ", ".join(parts)
 
     def _export_failed(self, message: str) -> None:
+        if self._batch_export_active:
+            self._batch_export_active = False
+            self._batch_export_queue = []
+            self._batch_export_current_path = None
         self._export_in_progress = False
         self.control_panel.set_export_progress(False)
         self.control_panel.export_button.setEnabled(True)
+        self.control_panel.batch_export_button.setEnabled(True)
+        self.batch_export_dialog.finish("Batch export failed")
         QMessageBox.warning(self, "Export TIFF Failed", message)
         self.statusBar().showMessage("TIFF export failed")
+        self._start_next_preinvert_jobs()
 
     def reset_workspace(self) -> None:
         self._cancel_preview_render()
@@ -2153,6 +2577,8 @@ class MainWindow(QMainWindow):
             self.control_panel.set_activity_progress(True, text="Loading RAW preview...")
         elif self._auto_detect_in_progress:
             self.control_panel.set_activity_progress(True, text="Finding frame...")
+        elif self._preinvert_in_progress:
+            self.control_panel.set_activity_progress(True, text="Pre-inverting nearby frames...")
         elif self._model_warmup_in_progress:
             self.control_panel.set_activity_progress(True, text="Loading frame model...")
         else:
@@ -2247,6 +2673,121 @@ class MainWindow(QMainWindow):
             return
         self.auto_detect_current("frame_base", auto_preview=True)
 
+    def _schedule_nearby_preinvert(self) -> None:
+        if not self._auto_preinvert_nearby_frames:
+            return
+        if self.current_index < 0 or not self.folder_files:
+            return
+
+        radius = int(np.clip(self._auto_preinvert_radius, 0, 5))
+        start = max(0, self.current_index - radius)
+        end = min(len(self.folder_files), self.current_index + radius + 1)
+        candidates = [
+            path for path in self.folder_files[start:end]
+            if self._should_preinvert_path(path)
+        ]
+        ordered = sorted(
+            candidates,
+            key=lambda path: abs(self.folder_files.index(path) - self.current_index),
+        )
+        for path in ordered:
+            if path not in self._preinvert_queue:
+                self._preinvert_queue.append(path)
+        self._start_next_preinvert_jobs()
+
+    def _should_preinvert_path(self, path: Path) -> bool:
+        if path == self.current_path:
+            return False
+        if path.suffix.lower() not in RAW_EXTENSIONS:
+            return False
+        if path in self._preinvert_paths or path in self.image_states:
+            return False
+        if path in self.preview_result_cache:
+            return False
+        return True
+
+    def _start_next_preinvert_jobs(self) -> None:
+        if self._export_in_progress:
+            self._refresh_activity_progress()
+            return
+        while self._preinvert_queue and len(self._preinvert_in_progress) < 2:
+            path = self._preinvert_queue.pop(0)
+            if not self._should_preinvert_path(path):
+                continue
+            self._preinvert_job_id += 1
+            job_id = self._preinvert_job_id
+            self._preinvert_in_progress.add(job_id)
+            self._preinvert_paths.add(path)
+            task = PreInvertTask(
+                job_id=job_id,
+                path=path,
+                max_size=DEFAULT_PREVIEW_MAX_EDGE,
+                format_hint=self.control_panel.auto_format(),
+                file_key=self._file_key_for_path(path),
+                adjustments=self._default_adjustments(),
+                prior_frame_rect=self._preinvert_prior_frame_rect(),
+            )
+            task.signals.finished.connect(self._preinvert_finished)
+            task.signals.failed.connect(self._preinvert_failed)
+            self._thread_pool.start(task)
+        self._refresh_activity_progress()
+
+    def _preinvert_finished(self, job_id: int, output: PreInvertOutput) -> None:
+        self._preinvert_in_progress.discard(job_id)
+        self._preinvert_paths.discard(output.path)
+        self._cache_preinvert_output(output)
+        self._start_next_preinvert_jobs()
+
+    def _preinvert_failed(self, job_id: int, path: Path, message: str) -> None:
+        self._preinvert_in_progress.discard(job_id)
+        self._preinvert_paths.discard(path)
+        self.statusBar().showMessage(f"Auto pre-invert skipped {path.name}: {message}")
+        self._start_next_preinvert_jobs()
+
+    def _cache_preinvert_output(self, output: PreInvertOutput) -> None:
+        if output.path in self.image_states:
+            return
+        self.raw_preview_cache.pop(output.path, None)
+        self.raw_preview_cache[output.path] = CachedRawPreview(
+            key=self._raw_preview_cache_key(output.path),
+            preview=output.preview,
+        )
+        while len(self.raw_preview_cache) > RAW_PREVIEW_CACHE_LIMIT:
+            oldest_path = next(iter(self.raw_preview_cache))
+            self.raw_preview_cache.pop(oldest_path, None)
+
+        if output.cache_key is not None:
+            self.preview_result_cache.pop(output.path, None)
+            self.preview_result_cache[output.path] = CachedPreviewResult(
+                key=output.cache_key,
+                result=output.result,
+            )
+            while len(self.preview_result_cache) > PREVIEW_RESULT_CACHE_LIMIT:
+                oldest_path = next(iter(self.preview_result_cache))
+                self.preview_result_cache.pop(oldest_path, None)
+
+        self.image_states[output.path] = ImageProcessingState(
+            mask_point=None,
+            film_rect=output.frame_rect,
+            white_balance_point=None,
+            adjustments=deepcopy(output.adjustments),
+            negative_preview_active=True,
+            auto_levels_pending=False,
+        )
+        self.filmstrip.set_processed_thumbnail(
+            output.path,
+            self._pixmap_from_rgb8(output.result.display_rgb8),
+        )
+        self.statusBar().showMessage(
+            f"Auto pre-inverted {output.path.name} ({output.confidence:.2f})"
+        )
+
+    def _preinvert_prior_frame_rect(self) -> ImageRect | None:
+        if self.film_rect is not None:
+            return self.film_rect
+        state = self._previous_image_state()
+        return state.film_rect if state is not None else None
+
     def _previous_image_state(self) -> ImageProcessingState | None:
         if not self.folder_files:
             return None
@@ -2285,15 +2826,70 @@ class MainWindow(QMainWindow):
         self.load_path(self.folder_files[next_index], refresh_sequence=False)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self._handle_color_timing_shortcut(event):
+            return
         if event.key() == Qt.Key_Left:
             self.go_previous_file()
             return
         if event.key() == Qt.Key_Right:
             self.go_next_file()
             return
+        if event.key() in {Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter}:
+            self.confirm_current_and_go_next()
+            return
         super().keyPressEvent(event)
 
+    def _handle_color_timing_shortcut(self, event) -> bool:
+        modifiers = event.modifiers()
+        if modifiers not in (Qt.NoModifier, Qt.ShiftModifier):
+            return False
+        key = event.key()
+        step = 5 if event.modifiers() & Qt.ShiftModifier else 20
+        if key in {Qt.Key_Q, Qt.Key_A}:
+            self._nudge_global_balance("blue_yellow", -step if key == Qt.Key_Q else step)
+            return True
+        if key in {Qt.Key_W, Qt.Key_S}:
+            self._nudge_global_balance("green_magenta", -step if key == Qt.Key_W else step)
+            return True
+        if key in {Qt.Key_E, Qt.Key_D}:
+            self._nudge_global_balance("red_cyan", -step if key == Qt.Key_E else step)
+            return True
+        if key in {Qt.Key_R, Qt.Key_F}:
+            self._nudge_exposure(step if key == Qt.Key_R else -step)
+            return True
+        return False
+
+    def _nudge_global_balance(self, axis_name: str, delta: int) -> None:
+        updated = deepcopy(self.adjustments)
+        axis = updated.color_balance.global_balance
+        current = int(getattr(axis, axis_name))
+        setattr(axis, axis_name, self._clamp_adjustment(current + delta))
+        self.control_panel.set_adjustments(updated, emit=True)
+        self.statusBar().showMessage(f"{axis_name.replace('_', ' ')} {getattr(axis, axis_name):+d}")
+
+    def _nudge_exposure(self, delta: int) -> None:
+        updated = deepcopy(self.adjustments)
+        updated.exposure = self._clamp_adjustment(updated.exposure + delta)
+        self.control_panel.set_adjustments(updated, emit=True)
+        self.statusBar().showMessage(f"Exposure {updated.exposure:+d}")
+
+    @staticmethod
+    def _clamp_adjustment(value: int) -> int:
+        return max(-100, min(100, int(value)))
+
+    def toggle_preview_tab(self) -> None:
+        target = self.preview_view if self.preview_tabs.currentWidget() == self.origin_view else self.origin_view
+        self.preview_tabs.setCurrentWidget(target)
+
+    def confirm_current_and_go_next(self) -> None:
+        if self.current_path is None:
+            return
+        self._save_current_state()
+        self.statusBar().showMessage(f"Confirmed: {self.current_path.name}")
+        self.go_next_file()
+
     def _set_folder_sequence(self, path: Path) -> None:
+        self._preinvert_queue = []
         self.folder_files = list_supported_files(path.parent)
         self._sync_sequence_position(path)
         self.filmstrip.set_files(self.folder_files, path)

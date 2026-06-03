@@ -189,7 +189,14 @@ class FolderFilmstrip(QWidget):
             item.set_active(path is not None and item_path == path)
         self._update_buttons()
         if path in self._items:
-            self.scroll_area.ensureWidgetVisible(self._items[path], 24, 0)
+            self._center_item(self._items[path])
+
+    def _center_item(self, item: ThumbnailItem) -> None:
+        bar = self.scroll_area.horizontalScrollBar()
+        viewport_width = max(1, self.scroll_area.viewport().width())
+        item_center = item.x() + item.width() // 2
+        target = item_center - viewport_width // 2
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), target)))
 
     def _scroll_by_wheel(self, delta: int) -> None:
         bar = self.scroll_area.horizontalScrollBar()

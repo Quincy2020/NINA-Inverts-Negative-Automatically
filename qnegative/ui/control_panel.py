@@ -30,6 +30,7 @@ from qnegative.ui.white_balance_panel import WhiteBalancePanel
 class ControlPanel(QWidget):
     openRequested = Signal()
     exportRequested = Signal()
+    batchExportRequested = Signal()
     invertRequested = Signal()
     resetRequested = Signal()
     toolChanged = Signal(object)
@@ -65,6 +66,8 @@ class ControlPanel(QWidget):
 
         self.export_button = QPushButton("Export")
         self.export_button.setEnabled(False)
+        self.batch_export_button = QPushButton("Export Completed")
+        self.batch_export_button.setEnabled(False)
 
         self.invert_button = QPushButton("Invert Preview")
         self.invert_button.setEnabled(False)
@@ -227,6 +230,7 @@ class ControlPanel(QWidget):
         group = self._section("Output")
         layout = QVBoxLayout(group)
         layout.addWidget(self.export_button)
+        layout.addWidget(self.batch_export_button)
         self.activity_progress = QProgressBar()
         self.activity_progress.setRange(0, 0)
         self.activity_progress.setTextVisible(True)
@@ -288,6 +292,7 @@ class ControlPanel(QWidget):
 
     def _connect(self) -> None:
         self.export_button.clicked.connect(self.exportRequested.emit)
+        self.batch_export_button.clicked.connect(self.batchExportRequested.emit)
         self.invert_button.clicked.connect(self.invertRequested.emit)
         self.reset_button.clicked.connect(self.resetRequested.emit)
         self.auto_frame_button.clicked.connect(lambda: self.autoDetectRequested.emit("frame_base"))
@@ -423,6 +428,7 @@ class ControlPanel(QWidget):
     def set_image_loaded(self, loaded: bool) -> None:
         self.invert_button.setEnabled(loaded)
         self.export_button.setEnabled(loaded and not self.export_progress.isVisible())
+        self.batch_export_button.setEnabled(loaded and not self.export_progress.isVisible())
         self.auto_frame_button.setEnabled(loaded)
 
     def auto_format(self) -> str:
