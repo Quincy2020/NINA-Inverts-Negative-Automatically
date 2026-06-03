@@ -24,6 +24,8 @@ env/
 exports/
 output/
 tmp/
+build/
+dist/
 
 calibration_debug/
 calibration_look/

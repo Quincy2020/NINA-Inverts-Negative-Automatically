@@ -12,6 +12,22 @@ python -m qnegative.app
 
 Open a RAW/TIFF from `File > Open RAW / TIFF...` or open a folder from `File > Open Folder...`.
 
+## Build
+
+Windows one-folder build:
+
+```powershell
+.\scripts\build_windows.ps1 -Clean
+```
+
+The executable is written to:
+
+```text
+dist\NINA\NINA.exe
+```
+
+This build uses PyInstaller and keeps Qt/rawpy dependencies next to the executable. The one-folder layout is preferred for now because it starts faster and is less fragile than a single-file bundle.
+
 ## Current MVP
 
 - Folder sequence browsing with a bottom filmstrip.
