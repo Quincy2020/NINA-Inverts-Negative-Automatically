@@ -63,7 +63,6 @@ class ControlPanel(QWidget):
         ):
             label.setWordWrap(True)
 
-        self.open_button = QPushButton("Open RAW / Image")
         self.export_button = QPushButton("Export")
         self.export_button.setEnabled(False)
 
@@ -141,11 +140,9 @@ class ControlPanel(QWidget):
         title.setObjectName("appTitle")
         root.addWidget(title)
 
-        root.addWidget(self._file_section())
+        root.addWidget(self._status_section())
         root.addWidget(self._histogram_section())
         root.addWidget(self._tools_section())
-        root.addWidget(self._selection_section())
-        root.addWidget(self._invert_section())
         root.addWidget(self._adjustment_section())
         root.addWidget(self._white_balance_section())
         root.addStretch(1)
@@ -154,10 +151,9 @@ class ControlPanel(QWidget):
         scroll_area.setWidget(content)
         outer.addWidget(scroll_area)
 
-    def _file_section(self) -> QGroupBox:
-        group = self._section("File")
+    def _status_section(self) -> QGroupBox:
+        group = self._section("Status")
         layout = QVBoxLayout(group)
-        layout.addWidget(self.open_button)
         layout.addWidget(self.file_label)
         layout.addWidget(self.image_label)
         layout.addWidget(self.sequence_label)
@@ -179,37 +175,24 @@ class ControlPanel(QWidget):
         row.addWidget(self.auto_frame_button)
         layout.addLayout(row)
 
+        action_row = QHBoxLayout()
+        action_row.addWidget(self.invert_button)
+        action_row.addWidget(self.reset_button)
+        layout.addLayout(action_row)
+
         format_row = QHBoxLayout()
         format_row.addWidget(QLabel("Format"))
         format_row.addWidget(self.auto_format_combo, 1)
         layout.addLayout(format_row)
-        return group
-
-    def _selection_section(self) -> QGroupBox:
-        group = self._section("Selections")
-        layout = QVBoxLayout(group)
-        layout.addWidget(QLabel("Base"))
-        layout.addWidget(self.mask_label)
-        layout.addWidget(self._divider())
-        layout.addWidget(QLabel("Frame"))
-        layout.addWidget(self.film_label)
-        return group
-
-    def _invert_section(self) -> QGroupBox:
-        group = self._section("Invert")
-        layout = QVBoxLayout(group)
 
         mode_row = QHBoxLayout()
         mode_label = QLabel("Invert Model")
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.invert_mode_combo, 1)
-
-        action_row = QHBoxLayout()
-        action_row.addWidget(self.invert_button)
-        action_row.addWidget(self.reset_button)
-
         layout.addLayout(mode_row)
-        layout.addLayout(action_row)
+
+        layout.addWidget(self._divider())
+        layout.addWidget(self.film_label)
         return group
 
     def _adjustment_section(self) -> QGroupBox:
@@ -304,7 +287,6 @@ class ControlPanel(QWidget):
         return panel
 
     def _connect(self) -> None:
-        self.open_button.clicked.connect(self.openRequested.emit)
         self.export_button.clicked.connect(self.exportRequested.emit)
         self.invert_button.clicked.connect(self.invertRequested.emit)
         self.reset_button.clicked.connect(self.resetRequested.emit)

@@ -10,7 +10,7 @@ from qnegative.core.models import ImageSize
 from qnegative.core.raw_loader import load_raw_rgb16
 
 
-DEFAULT_PREVIEW_MAX_EDGE = 2048
+DEFAULT_PREVIEW_MAX_EDGE = 1080
 
 
 @dataclass(frozen=True)

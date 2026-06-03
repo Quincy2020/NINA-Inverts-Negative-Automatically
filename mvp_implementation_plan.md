@@ -392,3 +392,189 @@ Base:
 2. 如果 frame 没找到，在图像边缘带采样
 3. 候选按低方差、不 clipping、亮度、橙色/片基色倾向评分
 4. 输出 mask_point 或 mask_rgb + confidence
+
+## 10. 2026-06-03 自动框线、片基 fallback 与维护记录
+
+这一轮新增的重点是：把“自动辅助选框”的实验链路跑通，同时让默认 Lab Print 工作流不再强制依赖片基点。
+
+### 新增功能
+
+- [x] Lab Print 模式允许无片基反转。
+  - `qnegative/core/pipeline.py::build_negative_base_preview()` 在 `mask_point is None` 时使用 `[1.0, 1.0, 1.0]` 作为占位 base。
+  - 这个 fallback 只应该视为“无片基占位”，不是实际采样到的片基。
+  - UI 状态会显示 `Base fallback: none`，避免误认为已经采样到片基 RGB。
+- [x] 非 Lab Print 模式继续要求片基。
+  - `Density`、`Simple`、`Log Bounds` 仍然依赖 `raw / base` 或类似逻辑，所以 UI 会阻止无片基预览/导出。
+  - 维护时不要把这个限制去掉，除非这些模式也设计了独立的无片基算法。
+- [x] Lab Print TIFF 导出也允许无片基。
+  - 导出检查逻辑与预览一致：Lab Print 只要求有效 frame；其他模式仍要求 frame + base。
+- [x] 新增 `qnegative/core/frame_ranker.py`。
+  - 作用：加载轻量 frame ranker 模型，为自动框线提供候选排序。
+  - 默认模型搜索顺序：
+    1. `models/frame_ranker.joblib`
+    2. `models/frame_ranker_dual_smoke.joblib`
+  - 当前推理配置：
+    - 预览最长边：`384`
+    - 全局候选：`1400`
+    - 预筛候选保留：`360`
+  - 推理结果返回 `RankedFrameCandidate`，包含 `rect`、`confidence`、`score`、`format_hint`、`method`。
+- [x] `auto_detect.py` 接入 ranker。
+  - `detect_film_frame()` 会先尝试 `_ranker_frame_candidates()`。
+  - ranker 不可用、置信度不够或异常时，自动 fallback 到原来的 OpenCV contour/projection 检测。
+  - 这保证实验模型不会破坏原有手动/传统检测路径。
+- [x] 新增 `qnegative/tools/generate_frame_labels.py`。
+  - 作用：用已经裁切好的正片 reference 和对应未裁切 RAW/负片生成 frame label。
+  - 按文件名 stem 匹配 negative/positive，支持递归扫描。
+  - 支持 reference 方向搜索：`identity`、`rot90`、`rot180`、`rot270`、`flip_h` 及其旋转组合。
+  - 输出 JSONL label、summary 和 debug overlay/contact sheet。
+- [x] 新增 `qnegative/tools/train_frame_ranker.py`。
+  - 作用：训练 ExtraTreesRegressor 候选框 ranker。
+  - 训练目标是候选框与标注框的 IoU。
+  - 使用 confidence 加权，高置信 label 权重更高。
+  - 支持小角度旋转、缩放、平移的数据增强。
+  - 新增 dual-mode prefilter：
+    - `base_ring_score`：适合框外有亮片基、稳定片基环绕的情况。
+    - `tight_crop_score`：适合翻拍台紧裁、框外偏黑但框本身正确的情况。
+  - 不再把“框外黑”直接作为强惩罚，因为部分高质量翻拍确实紧贴黑色翻拍台。
+- [x] 依赖新增：
+  - `scikit-learn`
+  - `joblib`
+
+### 当前烟测结果
+
+本轮可用烟测模型：
+
+```text
+models/frame_ranker_dual_smoke.joblib
+```
+
+训练/评估命令：
+
+```text
+python -m qnegative.tools.train_frame_ranker ^
+  --labels calibration\frame_labels_expanded.jsonl ^
+  --max-labels 60 ^
+  --preview-max-size 512 ^
+  --candidates-per-image 120 ^
+  --global-candidates 2600 ^
+  --augmentations 1 ^
+  --out-dir calibration\frame_ranker_smoke_dual_60 ^
+  --model-out models\frame_ranker_dual_smoke.joblib
+```
+
+烟测指标：
+
+```text
+labels: 60
+train: 45
+test: 15
+train samples: 8640
+Top1 mean IoU: 0.909
+Top1 median IoU: 0.924
+Top3 mean best IoU: 0.916
+Top3 median best IoU: 0.924
+Raw oracle mean IoU: 0.926
+Top1 IoU >= 0.80: 100%
+Top1 IoU >= 0.85: 86.7%
+Top3 IoU >= 0.85: 93.3%
+```
+
+维护判断：
+
+- 这个结果足够用于“自动建议框线 + 用户检查/微调”。
+- 还不应该直接作为“完全自动裁切并批量应用”的最终版本。
+- 模型 Top1 已经接近 raw oracle，说明当前瓶颈主要是候选生成器，而不是 ExtraTrees 排序器。
+
+### 当前数据与产物
+
+- `calibration/frame_labels_expanded.jsonl`
+  - 当前主 label 集。
+  - 由正片 reference 反投影到负片得到。
+- `calibration/frame_ranker_smoke_dual_60/frame_ranker_report.json`
+  - 当前 smoke report。
+- `models/frame_ranker_dual_smoke.joblib`
+  - 当前可用于实验性自动框线的模型。
+
+注意：
+
+- `negative file/`、`posituve file/`、TIFF、RAW、JPG/PNG debug 图都在 `.gitignore` 中，不应提交。
+- `*.stackdump` 已加入 `.gitignore`，不要提交 shell 崩溃 dump。
+
+### 自动片基与无片基策略
+
+当前策略：
+
+```text
+Lab Print:
+  frame 有效即可预览/导出
+  mask_point 可选
+  无 mask_point 时显示 Base fallback: none
+
+Density / Simple / Log Bounds:
+  frame + mask_point 必须存在
+```
+
+原因：
+
+- 当前默认 Lab Print 主要依据 frame 内部的 log bounds、levels、print curve 和 WB 流程工作。
+- 它本身已有 `LAB_PRINT_ANALYSIS_INSET = 0.05`，会在分析黑白中性点时避开裁切边缘 5%，降低边框/片基污染直方图的概率。
+- Density/Simple 仍然更接近 `raw / base` 模型，无片基会改变算法语义。
+
+未来自动片基 scorer 建议：
+
+1. 在 frame 外四条边生成条带候选。
+2. 沿旋转框方向采样多个小 patch。
+3. 排除：
+   - clipped 区域；
+   - 过暗区域；
+   - 方差过高区域；
+   - 明显图像内容区域。
+4. 对候选加分：
+   - 局部亮度稳定；
+   - RGB/亮度方差低；
+   - 与 frame 内 5% inset 后的底片主体相比，密度明显更低；
+   - 多个候选 patch 的 RGB 中位数一致。
+5. 如果找不到可信片基：
+   - Lab Print：继续使用无片基 fallback。
+   - 其他模式：提示用户手动点选片基。
+
+### 自动框线后续维护建议
+
+优先优化候选生成器，而不是继续盲目加大模型：
+
+- 当前候选生成器仍偏粗暴，很多时间花在对大量候选做 mask/ring stats。
+- 每个候选现在都会 rasterize rect mask、计算 inside/outside 特征，正式全量训练会很慢。
+- 下一步应该做候选生成器评估：
+
+```text
+对每张 label 图：
+  生成候选
+  计算 max IoU / top oracle IoU
+  记录候选数量和耗时
+```
+
+目标：
+
+```text
+候选数量：200 - 800
+Top oracle IoU >= 0.90 的比例 > 95%
+```
+
+达到这个目标后，再训练 CNN 或更复杂模型才更有意义。
+
+### 不要踩的坑
+
+- 不要把 “框外黑” 简单视为错误。
+  - 紧裁翻拍台常常框外就是黑色，但框是正确的。
+- 不要让自动框线静默覆盖用户手动框。
+  - 自动功能应当是建议，或者中置信度时让用户确认。
+- 不要提交完整 RAW/TIFF 数据集。
+  - 当前 repo 只保留 label、report、轻量模型和工具代码。
+- 不要让 Lab Print fallback base 误导成真实片基。
+  - UI 文案必须继续区分 `Base fallback: none` 和 `Base RGB ...`。
+
+滑块调节时虽然有 stage cache，但仍然会启动完整 render task
+它会检查 key 后跳过一些 stage，但任务创建、pixmap 更新、histogram/status 更新仍然频繁。
+
+部分参数的 cache key 还可以更精细
+现在 display key 包含 highlights/shadows/saturation，color key 包含 exposure/contrast/curve/WB 等。下一步可以继续把“只影响显示层”的东西拆得更干净。

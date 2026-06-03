@@ -38,6 +38,14 @@ LAB_PRINT_ANALYSIS_INSET = 0.05
 GLOBAL_BALANCE_SCALE = 55.0
 TONAL_BALANCE_SCALE = 75.0
 FILMIC_LUT_SIZE = 4096
+LOG_PRINT_CURVE_LUT_4096 = "lut_4096"
+LOG_PRINT_CURVE_LUT_8192 = "lut_8192"
+LOG_PRINT_CURVE_DIRECT = "direct"
+LOG_PRINT_CURVE_ENGINE = LOG_PRINT_CURVE_LUT_8192
+LOG_PRINT_CURVE_LUT_SIZES = {
+    LOG_PRINT_CURVE_LUT_4096: 4096,
+    LOG_PRINT_CURVE_LUT_8192: 8192,
+}
 GAMUT_EPSILON = 1e-6
 GAMUT_LOWER_MARGIN = 1e-5
 GAMUT_UPPER_MARGIN = 1.0 - GAMUT_LOWER_MARGIN
@@ -52,6 +60,7 @@ FILMIC_CURVE_PRESETS: dict[str, tuple[tuple[float, float], tuple[float, float]]]
     PrintCurveMode.CONTRAST.value: ((0.20, 0.07), (0.82, 0.97)),
 }
 _FILMIC_CURVE_LUTS: dict[str, np.ndarray] = {}
+_LOG_PRINT_CURVE_LUTS: dict[tuple, np.ndarray] = {}
 
 LOG_COLOR_SEPARATION_MATRIX = np.array(
     [
@@ -456,10 +465,14 @@ def build_lab_print_levels_stage(
 def build_lab_print_color_stage(
     levels_stage: LabPrintLevelsStage,
     adjustments: AdjustmentParams,
+    *,
+    cmy_offsets: np.ndarray | None = None,
 ) -> LabPrintColorStage:
     normalized_for_print = levels_stage.normalized_for_print
 
-    if adjustments.auto_wb:
+    if cmy_offsets is not None:
+        cmy_offsets = np.asarray(cmy_offsets, dtype=np.float32)
+    elif adjustments.auto_wb:
         cmy_offsets = estimate_lab_print_auto_cmy_offsets(normalized_for_print)
     else:
         cmy_offsets = np.zeros(3, dtype=np.float32)
@@ -631,7 +644,143 @@ def apply_log_hd_print_curve(
     *,
     cmy_offsets: np.ndarray,
 ) -> np.ndarray:
-    return log_hd_print_response(normalized_log, adjustments, cmy_offsets=cmy_offsets)
+    # The direct H&D response uses several exp/power passes per channel.
+    # A per-channel LUT keeps preview/export visually identical to the
+    # reference path while avoiding that cost on full-resolution exports.
+    if LOG_PRINT_CURVE_ENGINE == LOG_PRINT_CURVE_DIRECT:
+        return log_hd_print_response(normalized_log, adjustments, cmy_offsets=cmy_offsets)
+    return log_hd_print_response_lut(
+        normalized_log,
+        adjustments,
+        cmy_offsets=cmy_offsets,
+        lut_size=LOG_PRINT_CURVE_LUT_SIZES.get(LOG_PRINT_CURVE_ENGINE, 8192),
+    )
+
+
+def set_log_print_curve_engine(engine: str) -> None:
+    global LOG_PRINT_CURVE_ENGINE
+    if engine not in {
+        LOG_PRINT_CURVE_LUT_4096,
+        LOG_PRINT_CURVE_LUT_8192,
+        LOG_PRINT_CURVE_DIRECT,
+    }:
+        raise ValueError(f"Unknown print curve engine: {engine}")
+    LOG_PRINT_CURVE_ENGINE = engine
+
+
+def log_print_curve_engine() -> str:
+    return LOG_PRINT_CURVE_ENGINE
+
+
+def log_hd_print_response_lut(
+    normalized_log: np.ndarray,
+    adjustments: AdjustmentParams,
+    *,
+    cmy_offsets: np.ndarray,
+    lut_size: int,
+) -> np.ndarray:
+    clipped = np.clip(normalized_log, 0.0, 1.0).astype(np.float32, copy=False)
+    lut = log_hd_print_curve_lut(adjustments, cmy_offsets=cmy_offsets, lut_size=lut_size)
+    scaled = clipped * np.float32(lut_size - 1)
+    index = np.floor(scaled).astype(np.int32)
+    index = np.clip(index, 0, lut_size - 2)
+    frac = scaled - index
+
+    out = np.empty_like(clipped, dtype=np.float32)
+    for channel in range(3):
+        channel_index = index[:, :, channel]
+        channel_frac = frac[:, :, channel]
+        channel_lut = lut[channel]
+        low = channel_lut[channel_index]
+        high = channel_lut[channel_index + 1]
+        out[:, :, channel] = low * (1.0 - channel_frac) + high * channel_frac
+    return out
+
+
+def log_hd_print_curve_lut(
+    adjustments: AdjustmentParams,
+    *,
+    cmy_offsets: np.ndarray,
+    lut_size: int,
+) -> np.ndarray:
+    offsets = np.asarray(cmy_offsets, dtype=np.float32).reshape(3)
+    # CMY offsets shift the log input independently for each channel, so they
+    # are part of the LUT identity rather than a post-curve adjustment.
+    key = (
+        int(lut_size),
+        adjustments.print_curve,
+        int(adjustments.exposure),
+        int(adjustments.contrast),
+        bool(adjustments.soft_highlights),
+        bool(adjustments.soft_shadows),
+        tuple(round(float(value), 7) for value in offsets),
+    )
+    cached = _LOG_PRINT_CURVE_LUTS.get(key)
+    if cached is not None:
+        return cached
+
+    samples = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
+    density, grade = log_print_density_grade(adjustments)
+    pivot = float(np.clip(1.0 - (0.01 + density * LOG_DENSITY_MULTIPLIER), 0.02, 0.98))
+    slope = float(np.clip(1.0 + grade * LOG_GRADE_MULTIPLIER, 0.1, 16.0))
+    toe = float(np.clip(0.20 if adjustments.soft_shadows else 0.0, -1.0, 1.0))
+    shoulder = float(np.clip(0.20 if adjustments.soft_highlights else 0.0, -1.0, 1.0))
+
+    lut = np.empty((3, lut_size), dtype=np.float32)
+    for channel in range(3):
+        lut[channel] = log_hd_print_response_1d(
+            samples,
+            pivot=pivot,
+            slope=slope,
+            toe=toe,
+            shoulder=shoulder,
+            cmy_offset=float(offsets[channel]),
+        )
+
+    _LOG_PRINT_CURVE_LUTS[key] = lut
+    while len(_LOG_PRINT_CURVE_LUTS) > 32:
+        oldest_key = next(iter(_LOG_PRINT_CURVE_LUTS))
+        _LOG_PRINT_CURVE_LUTS.pop(oldest_key, None)
+    return lut
+
+
+def log_hd_print_response_1d(
+    normalized_log: np.ndarray,
+    *,
+    pivot: float,
+    slope: float,
+    toe: float,
+    shoulder: float,
+    cmy_offset: float,
+) -> np.ndarray:
+    value = np.clip(normalized_log, 0.0, 1.0).astype(np.float32, copy=False) + np.float32(cmy_offset)
+    diff = value - np.float32(pivot)
+
+    toe_mask = logistic(LOG_TOE_WIDTH * (diff / max(1.0 - pivot, LOG_MODE_EPSILON) - 0.5))
+    shoulder_mask = logistic(-LOG_SHOULDER_WIDTH * (diff / max(pivot, LOG_MODE_EPSILON) + 0.5))
+    toe_transition = np.clip(toe_mask * (1.0 - toe_mask) * 4.0, 0.0, 1.0)
+    shoulder_transition = np.clip(shoulder_mask * (1.0 - shoulder_mask) * 4.0, 0.0, 1.0)
+
+    toe_lift_mask = toe_transition if toe > 0.0 else toe_mask
+    shoulder_lift_mask = shoulder_transition if shoulder > 0.0 else shoulder_mask
+
+    diff_adjusted = (
+        diff
+        - np.float32(toe) * toe_lift_mask * 0.28
+        + np.float32(shoulder) * shoulder_lift_mask * 0.25
+    )
+    slope_mod = np.clip(
+        1.0
+        - max(toe, 0.0) * toe_transition * 0.55
+        - max(shoulder, 0.0) * shoulder_transition * 0.45
+        - min(toe, 0.0) * toe_mask * 0.20
+        - min(shoulder, 0.0) * shoulder_mask * 0.20,
+        0.1,
+        2.0,
+    )
+    print_density = LOG_D_MAX * logistic(np.float32(slope) * diff_adjusted * slope_mod)
+    linear = np.power(10.0, -print_density)
+    return np.clip(linear, 0.0, 1.0).astype(np.float32, copy=False)
 
 
 def log_hd_print_response(

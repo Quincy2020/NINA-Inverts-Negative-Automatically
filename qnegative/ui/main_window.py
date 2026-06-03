@@ -3,17 +3,22 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import tifffile
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QImage, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QImage, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QDockWidget,
     QFileDialog,
+    QHBoxLayout,
     QMainWindow,
+    QPushButton,
     QMessageBox,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -53,12 +58,15 @@ from qnegative.core.pipeline import (
     build_lab_print_negative_stage,
     build_negative_base_preview,
     build_density_preview_analysis,
+    log_print_curve_engine,
     process_negative_base_preview,
     analysis_inset_from_adjustments,
     analysis_inset_crop,
+    set_log_print_curve_engine,
     suggest_lab_print_luminance_levels,
     suggest_global_balance_from_neutral,
 )
+from qnegative.core.pipeline import LOG_PRINT_CURVE_DIRECT, LOG_PRINT_CURVE_LUT_4096, LOG_PRINT_CURVE_LUT_8192
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview, make_raw_preview, resize_long_edge
 from qnegative.core.raw_loader import load_raw_rgb16
 from qnegative.ui.control_panel import ControlPanel
@@ -114,6 +122,7 @@ class PreviewRenderOutput:
     result: NegativePreviewResult
     cache: PreviewStageCache
     quality: str
+    applied_auto_levels: bool = False
 
 
 @dataclass(frozen=True)
@@ -439,6 +448,7 @@ class PreviewRenderTask(QRunnable):
                     result=result,
                     cache=PreviewStageCache(base_key=base_key, base=base),
                     quality=self.quality,
+                    applied_auto_levels=False,
                 )
         except Exception as exc:
             self.signals.failed.emit(self.job_id, str(exc), self.show_errors)
@@ -476,10 +486,25 @@ class PreviewRenderTask(QRunnable):
                 analysis_inset=analysis_inset_from_adjustments(self.adjustments),
             )
 
+        effective_adjustments = deepcopy(self.adjustments)
+        applied_auto_levels = False
+        if self.auto_levels_pending:
+            auto_levels = suggest_lab_print_luminance_levels(
+                analysis_inset_crop(negative_stage.normalized_log, negative_stage.analysis_inset),
+                effective_adjustments,
+                camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
+            )
+            effective_adjustments.black_point = auto_levels["black_point"]
+            effective_adjustments.mid_point = auto_levels["mid_point"]
+            effective_adjustments.white_point = auto_levels["white_point"]
+            applied_auto_levels = True
+        else:
+            auto_levels = current_levels(effective_adjustments)
+
         levels_key = lab_print_levels_key(
             negative_key,
-            self.adjustments,
-            auto_levels_pending=self.auto_levels_pending,
+            effective_adjustments,
+            auto_levels_pending=False,
         )
         if (
             self.render_cache.levels_key == levels_key
@@ -489,27 +514,27 @@ class PreviewRenderTask(QRunnable):
         else:
             levels_stage = build_lab_print_levels_stage(
                 negative_stage,
-                self.adjustments,
-                auto_levels=None if self.auto_levels_pending else current_levels(self.adjustments),
+                effective_adjustments,
+                auto_levels=auto_levels,
             )
 
-        color_key = lab_print_color_key(levels_key, self.adjustments)
+        color_key = lab_print_color_key(levels_key, effective_adjustments)
         if (
             self.render_cache.color_key == color_key
             and self.render_cache.color_stage is not None
         ):
             color_stage = self.render_cache.color_stage
         else:
-            color_stage = build_lab_print_color_stage(levels_stage, self.adjustments)
+            color_stage = build_lab_print_color_stage(levels_stage, effective_adjustments)
 
-        display_key = lab_print_display_key(color_key, self.adjustments)
+        display_key = lab_print_display_key(color_key, effective_adjustments)
         if (
             self.render_cache.display_key == display_key
             and self.render_cache.display_result is not None
         ):
             result = self.render_cache.display_result
         else:
-            result = build_lab_print_display_stage(color_stage, self.adjustments)
+            result = build_lab_print_display_stage(color_stage, effective_adjustments)
 
         return PreviewRenderOutput(
             result=result,
@@ -526,12 +551,13 @@ class PreviewRenderTask(QRunnable):
                 display_result=result,
             ),
             quality=self.quality,
+            applied_auto_levels=applied_auto_levels,
         )
 
 
 class ExportSignals(QObject):
     progress = Signal(int, str)
-    finished = Signal(str)
+    finished = Signal(str, object)
     failed = Signal(str)
 
 
@@ -548,6 +574,7 @@ class TiffExportTask(QRunnable):
         flip_vertical: bool,
         rotation_quarters: int,
         auto_levels_pending: bool,
+        preview_cmy_offsets: np.ndarray | None = None,
     ) -> None:
         super().__init__()
         self.source_path = source_path
@@ -559,9 +586,16 @@ class TiffExportTask(QRunnable):
         self.flip_vertical = flip_vertical
         self.rotation_quarters = rotation_quarters
         self.auto_levels_pending = auto_levels_pending
+        self.preview_cmy_offsets = (
+            np.asarray(preview_cmy_offsets, dtype=np.float32).copy()
+            if preview_cmy_offsets is not None
+            else None
+        )
         self.signals = ExportSignals()
 
     def run(self) -> None:
+        timings: dict[str, float] = {}
+        stage_start = perf_counter()
         try:
             self.signals.progress.emit(5, "Loading RAW")
             needs_camera_transform = self.adjustments.camera_color_strength > 0
@@ -570,7 +604,10 @@ class TiffExportTask(QRunnable):
                 half_size=False,
                 include_display_transform=needs_camera_transform,
             )
-            self.signals.progress.emit(30, "Building base")
+            timings["RAW decode"] = perf_counter() - stage_start
+            self.signals.progress.emit(30, self._timed_progress_text("Building base", timings))
+
+            stage_start = perf_counter()
             base = build_negative_base_preview(
                 raw_image.as_float32(),
                 source_size=raw_image.source_size,
@@ -579,10 +616,20 @@ class TiffExportTask(QRunnable):
                 preview_camera_wb_linear_rgb=raw_image.camera_wb_as_float32(),
                 camera_to_srgb_matrix=raw_image.camera_to_srgb_matrix,
             )
-            self.signals.progress.emit(55, "Processing positive")
-            export_linear_rgb = self._process_export(base)
+            timings["Build base"] = perf_counter() - stage_start
+            positive_text = (
+                "Processing positive with preview CMY WB"
+                if self.preview_cmy_offsets is not None
+                else "Processing positive"
+            )
+            self.signals.progress.emit(55, self._timed_progress_text(positive_text, timings))
 
-            self.signals.progress.emit(75, "Preparing TIFF")
+            stage_start = perf_counter()
+            export_linear_rgb = self._process_export(base)
+            timings["Lab Print"] = perf_counter() - stage_start
+
+            self.signals.progress.emit(75, self._timed_progress_text("Preparing TIFF", timings))
+            stage_start = perf_counter()
             linear_rgb = transform_preview_array(
                 export_linear_rgb,
                 flip_horizontal=self.flip_horizontal,
@@ -590,17 +637,28 @@ class TiffExportTask(QRunnable):
                 rotation_quarters=self.rotation_quarters,
             )
             tiff_rgb16 = linear_to_srgb16(linear_rgb)
-            self.signals.progress.emit(90, "Writing TIFF")
+            timings["Prepare TIFF"] = perf_counter() - stage_start
+            self.signals.progress.emit(90, self._timed_progress_text("Writing TIFF", timings))
+
+            stage_start = perf_counter()
             tifffile.imwrite(
                 self.output_path,
                 tiff_rgb16,
                 photometric="rgb",
             )
+            timings["TIFF write"] = perf_counter() - stage_start
         except Exception as exc:
             self.signals.failed.emit(str(exc))
             return
 
-        self.signals.finished.emit(str(self.output_path))
+        self.signals.finished.emit(str(self.output_path), timings)
+
+    @staticmethod
+    def _timed_progress_text(current: str, timings: dict[str, float]) -> str:
+        if not timings:
+            return current
+        elapsed = ", ".join(f"{name} {seconds:.1f}s" for name, seconds in timings.items())
+        return f"{current} ({elapsed})"
 
     def _process_export(self, base: NegativeBasePreview) -> np.ndarray:
         if self.adjustments.invert_mode != InvertMode.LAB_PRINT.value:
@@ -636,7 +694,11 @@ class TiffExportTask(QRunnable):
             effective,
             auto_levels=auto_levels,
         )
-        color_stage = build_lab_print_color_stage(levels_stage, effective)
+        color_stage = build_lab_print_color_stage(
+            levels_stage,
+            effective,
+            cmy_offsets=self.preview_cmy_offsets if effective.auto_wb else None,
+        )
         return build_lab_print_export_linear(color_stage, effective)
 
 
@@ -709,6 +771,8 @@ class MainWindow(QMainWindow):
         self._auto_detect_job_id = 0
         self._auto_detect_in_progress = False
         self._export_in_progress = False
+        self._default_export_dir: Path | None = None
+        self._gpu_preview_enabled = True
 
         self.control_panel = ControlPanel()
         self.origin_view = ImageView()
@@ -718,13 +782,19 @@ class MainWindow(QMainWindow):
         self.preview_view.set_placeholder("Positive preview waiting")
         self.preview_tabs = QTabWidget()
         self.preview_tabs.setObjectName("previewTabs")
+        self.empty_state = QWidget()
+        self.empty_state.setObjectName("emptyState")
+        self.open_empty_button = QPushButton("Open RAW / Image")
+        self.open_empty_button.setObjectName("emptyOpenButton")
+        self.view_stack = QStackedWidget()
         self.filmstrip = FolderFilmstrip()
+        self.filmstrip.hide()
         self.preview_refresh_timer = QTimer(self)
         self.preview_refresh_timer.setSingleShot(True)
         self.preview_refresh_timer.setInterval(FINAL_RENDER_DEBOUNCE_MS)
 
         self._build_layout()
-        self._build_developer_menu()
+        self._build_menus()
         self._connect()
         self._apply_style()
         self.control_panel.set_adjustments(self.adjustments, emit=False)
@@ -738,9 +808,23 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_pane)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
+
+        empty_layout = QVBoxLayout(self.empty_state)
+        empty_layout.setContentsMargins(24, 24, 24, 24)
+        empty_layout.addStretch(1)
+        empty_row = QHBoxLayout()
+        empty_row.addStretch(1)
+        empty_row.addWidget(self.open_empty_button)
+        empty_row.addStretch(1)
+        empty_layout.addLayout(empty_row)
+        empty_layout.addStretch(1)
+
         self.preview_tabs.addTab(self.origin_view, "Origin")
         self.preview_tabs.addTab(self.preview_view, "Preview")
-        right_layout.addWidget(self.preview_tabs, 1)
+        self.view_stack.addWidget(self.empty_state)
+        self.view_stack.addWidget(self.preview_tabs)
+        self.view_stack.setCurrentWidget(self.empty_state)
+        right_layout.addWidget(self.view_stack, 1)
         right_layout.addWidget(self.filmstrip)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -755,8 +839,56 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
 
-    def _build_developer_menu(self) -> None:
-        developer_menu = self.menuBar().addMenu("Developer")
+    def _build_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        open_action = QAction("Open RAW / Image...", self)
+        open_action.triggered.connect(self.open_file)
+        file_menu.addAction(open_action)
+
+        open_folder_action = QAction("Open Folder...", self)
+        open_folder_action.triggered.connect(self.open_folder)
+        file_menu.addAction(open_folder_action)
+        file_menu.addSeparator()
+
+        export_action = QAction("Export TIFF...", self)
+        export_action.triggered.connect(self.export_current)
+        file_menu.addAction(export_action)
+
+        export_dir_action = QAction("Set Default Export Directory...", self)
+        export_dir_action.triggered.connect(self.set_default_export_directory)
+        file_menu.addAction(export_dir_action)
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(QApplication.quit)
+        file_menu.addAction(exit_action)
+
+        edit_menu = self.menuBar().addMenu("Edit")
+        invert_action = QAction("Invert Preview", self)
+        invert_action.triggered.connect(self.preview_inversion)
+        edit_menu.addAction(invert_action)
+
+        reset_action = QAction("Reset Current Image", self)
+        reset_action.triggered.connect(self.reset_workspace)
+        edit_menu.addAction(reset_action)
+
+        view_menu = self.menuBar().addMenu("View")
+        origin_action = QAction("Origin", self)
+        origin_action.triggered.connect(lambda: self.preview_tabs.setCurrentWidget(self.origin_view))
+        view_menu.addAction(origin_action)
+        preview_action = QAction("Preview", self)
+        preview_action.triggered.connect(lambda: self.preview_tabs.setCurrentWidget(self.preview_view))
+        view_menu.addAction(preview_action)
+
+        settings_menu = self.menuBar().addMenu("Settings")
+        self.gpu_preview_action = QAction("GPU Preview Acceleration", self)
+        self.gpu_preview_action.setCheckable(True)
+        self.gpu_preview_action.setChecked(True)
+        self.gpu_preview_action.toggled.connect(self.set_gpu_preview_enabled)
+        settings_menu.addAction(self.gpu_preview_action)
+        settings_menu.addSeparator()
+
+        developer_menu = settings_menu.addMenu("Developer")
 
         self.density_matrix_dock = QDockWidget("Density Matrix", self)
         self.density_matrix_dock.setObjectName("densityMatrixDock")
@@ -797,11 +929,40 @@ class MainWindow(QMainWindow):
         base_picker_action.triggered.connect(lambda: self.set_tool_mode(ToolMode.MASK_PICKER))
         developer_menu.addAction(base_picker_action)
 
+        developer_menu.addSeparator()
+        export_advanced_menu = developer_menu.addMenu("Export Advanced")
+        print_curve_menu = export_advanced_menu.addMenu("Print Curve Engine")
+        self.print_curve_engine_group = QActionGroup(self)
+        self.print_curve_engine_group.setExclusive(True)
+        for label, engine in (
+            ("LUT 8192", LOG_PRINT_CURVE_LUT_8192),
+            ("LUT 4096", LOG_PRINT_CURVE_LUT_4096),
+            ("Direct Reference", LOG_PRINT_CURVE_DIRECT),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setData(engine)
+            action.setChecked(engine == log_print_curve_engine())
+            self.print_curve_engine_group.addAction(action)
+            print_curve_menu.addAction(action)
+        self.print_curve_engine_group.triggered.connect(self.set_print_curve_engine)
+
     def _set_developer_invert_mode(self, mode: str) -> None:
         updated = deepcopy(self.adjustments)
         updated.invert_mode = mode
         self.control_panel.set_adjustments(updated, emit=True)
         self.statusBar().showMessage(f"Developer invert mode: {invert_mode_label(mode)}")
+
+    def set_print_curve_engine(self, action: QAction) -> None:
+        engine = str(action.data())
+        set_log_print_curve_engine(engine)
+        self._reset_preview_stage_caches()
+        if self.current_path is not None:
+            self.preview_result_cache.pop(self.current_path, None)
+        label = action.text()
+        self.statusBar().showMessage(f"Print curve engine: {label}")
+        if self.negative_preview_active:
+            self._schedule_preview_if_ready()
 
     def _connect(self) -> None:
         self.control_panel.openRequested.connect(self.open_file)
@@ -813,6 +974,7 @@ class MainWindow(QMainWindow):
         self.control_panel.adjustmentsChanged.connect(self.adjustments_changed)
         self.control_panel.adjustmentInteractionStarted.connect(self.adjustment_interaction_started)
         self.control_panel.adjustmentInteractionFinished.connect(self.adjustment_interaction_finished)
+        self.open_empty_button.clicked.connect(self.open_file)
 
         self.origin_view.maskPointSelected.connect(self.mask_point_selected)
         self.origin_view.filmRectSelected.connect(self.film_rect_selected)
@@ -830,6 +992,12 @@ class MainWindow(QMainWindow):
         self.filmstrip.nextRequested.connect(self.go_next_file)
         self.preview_refresh_timer.timeout.connect(self.preview_refresh_timeout)
 
+    def set_gpu_preview_enabled(self, enabled: bool) -> None:
+        self._gpu_preview_enabled = bool(enabled)
+        self.preview_view.set_gpu_preview_enabled(self._gpu_preview_enabled)
+        status = "enabled" if self._gpu_preview_enabled else "disabled"
+        self.statusBar().showMessage(f"GPU preview acceleration {status}")
+
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -841,6 +1009,31 @@ class MainWindow(QMainWindow):
             return
 
         self.load_path(Path(path), refresh_sequence=True)
+
+    def open_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Open Folder",
+            str(self.current_path.parent if self.current_path is not None else Path.cwd()),
+        )
+        if not folder:
+            return
+        files = list_supported_files(Path(folder))
+        if not files:
+            QMessageBox.information(self, "Open Folder", "No supported RAW or image files were found.")
+            return
+        self.load_path(files[0], refresh_sequence=True)
+
+    def set_default_export_directory(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Default Export Directory",
+            str(self._default_export_dir or (self.current_path.parent if self.current_path else Path.cwd())),
+        )
+        if not folder:
+            return
+        self._default_export_dir = Path(folder)
+        self.statusBar().showMessage(f"Default export directory: {self._default_export_dir}")
 
     def _start_frame_ranker_warmup(self) -> None:
         if self._model_warmup_in_progress:
@@ -879,6 +1072,8 @@ class MainWindow(QMainWindow):
             self._sync_sequence_position(path)
 
         self.current_path = path
+        self.view_stack.setCurrentWidget(self.preview_tabs)
+        self.filmstrip.show()
         self.current_preview = None
         self.negative_preview_active = False
         self.auto_levels_pending = True
@@ -1237,6 +1432,8 @@ class MainWindow(QMainWindow):
                 **values
             )
         )
+        if self._apply_gpu_display_adjustment(previous):
+            return
         if self.negative_preview_active:
             if self._render_in_progress:
                 self._render_pending = True
@@ -1246,6 +1443,13 @@ class MainWindow(QMainWindow):
                 else FINAL_RENDER_DEBOUNCE_MS
             )
             self.preview_refresh_timer.start()
+
+    def _apply_gpu_display_adjustment(self, previous: AdjustmentParams) -> bool:
+        del previous
+        # The experimental shader path used an 8-bit linear texture, which can
+        # quantize deep shadows before display gamma and bring back black-field
+        # artifacts. Keep final preview/display on the CPU pipeline for now.
+        return False
 
     def preview_inversion(self) -> None:
         self._queue_negative_render(show_errors=True, interactive=False)
@@ -1316,7 +1520,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if self.auto_levels_pending:
+        if self.auto_levels_pending and output.applied_auto_levels:
+            self._apply_auto_levels(result.auto_levels)
+            self.auto_levels_pending = False
+        elif self.auto_levels_pending:
             self._apply_auto_levels(result.auto_levels)
             self.auto_levels_pending = False
             self._render_pending = False
@@ -1659,7 +1866,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export TIFF", "Select a valid frame area before exporting.")
             return
 
-        default_path = self.current_path.with_name(f"{self.current_path.stem}_positive.tif")
+        if self._default_export_dir is not None:
+            default_path = self._default_export_dir / f"{self.current_path.stem}_positive.tif"
+        else:
+            default_path = self.current_path.with_name(f"{self.current_path.stem}_positive.tif")
         output, _selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export 16-bit TIFF",
@@ -1683,6 +1893,7 @@ class MainWindow(QMainWindow):
             flip_vertical=self._preview_flip_vertical,
             rotation_quarters=self._preview_rotation_quarters,
             auto_levels_pending=self.auto_levels_pending,
+            preview_cmy_offsets=self._current_preview_cmy_offsets_for_export(),
         )
         task.signals.finished.connect(self._export_finished)
         task.signals.failed.connect(self._export_failed)
@@ -1693,16 +1904,47 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Exporting 16-bit TIFF...")
         self._thread_pool.start(task)
 
+    def _current_preview_cmy_offsets_for_export(self) -> np.ndarray | None:
+        if self.current_path is None:
+            return None
+        if self.adjustments.invert_mode != InvertMode.LAB_PRINT.value or not self.adjustments.auto_wb:
+            return None
+        if self.auto_levels_pending:
+            return None
+
+        # Reuse preview CMY only when the final preview cache exactly matches
+        # the current image/selection/adjustments. Otherwise export recomputes
+        # auto WB at full resolution instead of risking stale color timing.
+        cached = self.preview_result_cache.get(self.current_path)
+        key = self._preview_result_cache_key()
+        if cached is None or key is None or cached.key != key:
+            return None
+        return np.asarray(cached.result.wb_gains, dtype=np.float32).copy()
+
     def _export_progress_updated(self, value: int, text: str) -> None:
         self.control_panel.update_export_progress(value, text)
         self.statusBar().showMessage(f"{text}...")
 
-    def _export_finished(self, output_path: str) -> None:
+    def _export_finished(self, output_path: str, timings: dict[str, float]) -> None:
         self._export_in_progress = False
-        self.control_panel.update_export_progress(100, "Export complete")
+        timing_text = self._format_export_timings(timings)
+        complete_text = f"Export complete ({timing_text})" if timing_text else "Export complete"
+        self.control_panel.update_export_progress(100, complete_text)
         self.control_panel.set_export_progress(False)
         self.control_panel.export_button.setEnabled(True)
-        self.statusBar().showMessage(f"Exported TIFF: {output_path}")
+        suffix = f" | {timing_text}" if timing_text else ""
+        self.statusBar().showMessage(f"Exported TIFF: {output_path}{suffix}")
+        if timing_text:
+            print(f"Export timings: {timing_text}", flush=True)
+
+    @staticmethod
+    def _format_export_timings(timings: dict[str, float]) -> str:
+        if not timings:
+            return ""
+        total = sum(float(seconds) for seconds in timings.values())
+        parts = [f"{name} {float(seconds):.1f}s" for name, seconds in timings.items()]
+        parts.append(f"total {total:.1f}s")
+        return ", ".join(parts)
 
     def _export_failed(self, message: str) -> None:
         self._export_in_progress = False
@@ -1906,10 +2148,58 @@ class MainWindow(QMainWindow):
             QMainWindow {
                 background: #15181d;
             }
+            QMenuBar {
+                background: #111419;
+                color: #f2f4f7;
+                border-bottom: 1px solid #303640;
+                padding: 2px 6px;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 6px 12px;
+                color: #f2f4f7;
+            }
+            QMenuBar::item:selected {
+                background: #2c3440;
+                border-radius: 4px;
+            }
+            QMenu {
+                background: #181d23;
+                color: #f2f4f7;
+                border: 1px solid #343c47;
+                padding: 5px 0;
+            }
+            QMenu::item {
+                padding: 7px 28px 7px 24px;
+            }
+            QMenu::item:selected {
+                background: #344150;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #343c47;
+                margin: 5px 8px;
+            }
             QStatusBar {
                 background: #20242b;
                 color: #cfd6df;
                 border-top: 1px solid #303640;
+            }
+            QWidget#emptyState {
+                background: #15181d;
+            }
+            QPushButton#emptyOpenButton {
+                background: #2f6f91;
+                border: 1px solid #63a8c9;
+                border-radius: 7px;
+                color: #ffffff;
+                font-size: 16px;
+                font-weight: 600;
+                padding: 14px 24px;
+                min-width: 220px;
+            }
+            QPushButton#emptyOpenButton:hover {
+                background: #397fa5;
             }
             QSplitter::handle {
                 background: #303640;
