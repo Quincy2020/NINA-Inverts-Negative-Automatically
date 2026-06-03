@@ -1,0 +1,6 @@
+# Optional dependencies for frame-ranker training/inference experiments.
+# The core app runs without these and falls back to OpenCV frame detection.
+-r requirements.txt
+Pillow>=10.0
+scikit-learn>=1.4
+joblib>=1.3

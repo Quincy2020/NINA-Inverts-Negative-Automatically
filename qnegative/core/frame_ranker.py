@@ -156,9 +156,15 @@ def _load_frame_ranker_cached(path_text: str) -> tuple[object, str] | None:
     path = Path(path_text)
     if not path.exists():
         return None
-    import joblib
+    try:
+        import joblib
+    except ImportError:
+        return None
 
-    payload = joblib.load(path)
+    try:
+        payload = joblib.load(path)
+    except Exception:
+        return None
     model = payload.get("model") if isinstance(payload, dict) else payload
     feature_names = payload.get("feature_names") if isinstance(payload, dict) else FEATURE_NAMES
     if model is None or list(feature_names) != FEATURE_NAMES:
