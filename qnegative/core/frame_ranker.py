@@ -12,10 +12,11 @@ from qnegative.core.models import ImageRect, ImageSize
 from qnegative.core.preview import resize_long_edge
 
 
-FRAME_RANKER_MAX_EDGE = 320
-FRAME_RANKER_GLOBAL_CANDIDATES = 900
-FRAME_RANKER_KEEP_CANDIDATES = 240
+FRAME_RANKER_MAX_EDGE = 256
+FRAME_RANKER_GLOBAL_CANDIDATES = 300
+FRAME_RANKER_KEEP_CANDIDATES = 96
 FRAME_RANKER_ANGLE_SNAP_DEGREES = 4.0
+FRAME_RANKER_OUTPUT_INSET_RATIO = 0.012
 
 FORMAT_RATIOS = {
     "135": 1.50,
@@ -138,7 +139,10 @@ def detect_ranked_frame_candidates(
     for index in order[: max(1, top_k)]:
         rect = rects[int(index)]
         preview_rect = scale_rect(rect, ranker_size, preview_size)
-        source_rect = snap_small_angle_rect(scale_rect(preview_rect, preview_size, source_size))
+        source_rect = inset_frame_rect(
+            snap_small_angle_rect(scale_rect(preview_rect, preview_size, source_size)),
+            inset_ratio=FRAME_RANKER_OUTPUT_INSET_RATIO,
+        )
         score = float(predictions[int(index)])
         results.append(
             RankedFrameCandidate(
@@ -161,6 +165,23 @@ def snap_small_angle_rect(rect: ImageRect) -> ImageRect:
         width=rect.width,
         height=rect.height,
         angle=0.0,
+    )
+
+
+def inset_frame_rect(rect: ImageRect, *, inset_ratio: float) -> ImageRect:
+    if inset_ratio <= 0.0:
+        return rect
+    inset = float(np.clip(inset_ratio, 0.0, 0.12))
+    dx = int(round(rect.width * inset))
+    dy = int(round(rect.height * inset))
+    width = max(1, rect.width - dx * 2)
+    height = max(1, rect.height - dy * 2)
+    return ImageRect(
+        x=rect.x + dx,
+        y=rect.y + dy,
+        width=width,
+        height=height,
+        angle=rect.angle,
     )
 
 
@@ -268,22 +289,57 @@ def normalized_uint8(values: np.ndarray) -> np.ndarray:
 
 def generate_global_candidates(size: ImageSize, *, count: int, rng: np.random.Generator) -> list[ImageRect]:
     rects: list[ImageRect] = []
-    ratios = sorted(set(float(value) for value in FORMAT_RATIOS.values()))
+    seen: set[tuple[int, int, int, int, int]] = set()
+    ratios = [1.50, 4.0 / 3.0, 1.0, 7.0 / 6.0]
+
+    def append_candidate(ratio: float, area_ratio: float, cx_norm: float, cy_norm: float, angle: float) -> None:
+        if len(rects) >= count:
+            return
+        rect = rect_from_format(size, ratio, area_ratio, cx_norm, cy_norm, angle)
+        key = (rect.x, rect.y, rect.width, rect.height, int(round(rect.angle * 10.0)))
+        if key in seen:
+            return
+        seen.add(key)
+        rects.append(rect)
+
+    priority_centers = (
+        (0.50, 0.50),
+        (0.485, 0.50),
+        (0.515, 0.50),
+        (0.50, 0.485),
+        (0.50, 0.515),
+        (0.47, 0.50),
+        (0.53, 0.50),
+        (0.50, 0.47),
+        (0.50, 0.53),
+    )
+    priority_areas = (0.72, 0.78, 0.66, 0.60, 0.84, 0.54, 0.48)
+    priority_angles = (0.0, -3.0, 3.0, -6.0, 6.0)
+    for cx_norm, cy_norm in priority_centers:
+        for area_ratio in priority_areas:
+            for angle in priority_angles:
+                for ratio in ratios:
+                    append_candidate(ratio, area_ratio, cx_norm, cy_norm, angle)
+                    if len(rects) >= count:
+                        return rects
+
     area_values = (0.42, 0.48, 0.54, 0.60, 0.66, 0.72, 0.78, 0.84)
     center_x_values = np.linspace(0.28, 0.72, 9)
     center_y_values = np.linspace(0.28, 0.72, 9)
     angle_values = (-12.0, -9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0)
 
     deterministic: list[tuple[float, float, float, float, float]] = []
-    for ratio in ratios:
-        for area_ratio in area_values:
-            for cx_norm in center_x_values:
-                for cy_norm in center_y_values:
-                    for angle in angle_values:
+    for cx_norm in center_x_values:
+        for cy_norm in center_y_values:
+            for area_ratio in area_values:
+                for angle in angle_values:
+                    for ratio in ratios:
                         deterministic.append((ratio, area_ratio, float(cx_norm), float(cy_norm), angle))
     rng.shuffle(deterministic)
     for ratio, area_ratio, cx_norm, cy_norm, angle in deterministic[:count]:
-        rects.append(rect_from_format(size, ratio, area_ratio, cx_norm, cy_norm, angle))
+        append_candidate(ratio, area_ratio, cx_norm, cy_norm, angle)
+        if len(rects) >= count:
+            return rects
 
     while len(rects) < count:
         ratio = float(rng.choice(ratios))
@@ -293,7 +349,7 @@ def generate_global_candidates(size: ImageSize, *, count: int, rng: np.random.Ge
         cx_norm = float(np.clip(rng.normal(0.50, 0.13), 0.18, 0.82))
         cy_norm = float(np.clip(rng.normal(0.50, 0.13), 0.18, 0.82))
         angle = float(rng.uniform(-12.0, 12.0))
-        rects.append(rect_from_format(size, ratio, area_ratio, cx_norm, cy_norm, angle))
+        append_candidate(ratio, area_ratio, cx_norm, cy_norm, angle)
     return rects
 
 

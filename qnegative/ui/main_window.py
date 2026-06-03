@@ -9,7 +9,6 @@ import tifffile
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
     QDockWidget,
     QFileDialog,
     QMainWindow,
@@ -73,6 +72,11 @@ class PreviewRenderSignals(QObject):
 class AutoDetectSignals(QObject):
     finished = Signal(int, object)
     failed = Signal(int, str)
+
+
+class RawPreviewSignals(QObject):
+    finished = Signal(int, object, object)
+    failed = Signal(int, object, str)
 
 
 INTERACTIVE_PREVIEW_MAX_EDGE = 720
@@ -269,6 +273,24 @@ def invert_mode_label(mode: str) -> str:
         InvertMode.SIMPLE.value: "Simple",
     }
     return labels.get(mode, mode)
+
+
+class RawPreviewTask(QRunnable):
+    def __init__(self, *, job_id: int, path: Path, max_size: int) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.path = path
+        self.max_size = max_size
+        self.signals = RawPreviewSignals()
+
+    def run(self) -> None:
+        try:
+            preview = make_raw_preview(self.path, max_size=self.max_size)
+        except Exception as exc:
+            self.signals.failed.emit(self.job_id, self.path, str(exc))
+            return
+
+        self.signals.finished.emit(self.job_id, self.path, preview)
 
 
 class AutoDetectTask(QRunnable):
@@ -632,6 +654,8 @@ class MainWindow(QMainWindow):
         self._render_in_progress = False
         self._render_pending = False
         self._render_pending_show_errors = False
+        self._raw_preview_job_id = 0
+        self._raw_preview_in_progress = False
         self._auto_detect_job_id = 0
         self._auto_detect_in_progress = False
         self._export_in_progress = False
@@ -761,6 +785,7 @@ class MainWindow(QMainWindow):
             self._save_current_state()
 
         self._cancel_preview_render()
+        self._cancel_raw_preview()
         self._cancel_auto_detect()
 
         if refresh_sequence:
@@ -792,7 +817,6 @@ class MainWindow(QMainWindow):
 
         if extension in RAW_EXTENSIONS:
             self.load_raw_preview(path)
-            self._restore_state_for_path(path)
             return
 
         self.image_view.set_placeholder(f"Unsupported file type: {extension or 'unknown'}")
@@ -804,22 +828,22 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Generating RAW {DEFAULT_PREVIEW_MAX_EDGE} preview...")
         self.control_panel.set_image_loaded(False)
         self.control_panel.set_image_status("Decoding RAW...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
 
-        try:
-            preview = make_raw_preview(path, max_size=DEFAULT_PREVIEW_MAX_EDGE)
-            pixmap = self._pixmap_from_rgb8(preview.display_rgb8)
-        except Exception as exc:
-            self.image_view.set_raw_placeholder(path)
-            self.control_panel.set_image_loaded(False)
-            self.control_panel.set_image_status("RAW preview failed")
-            QMessageBox.warning(self, "RAW Preview Failed", str(exc))
-            self.statusBar().showMessage("RAW preview failed")
+        self._raw_preview_job_id += 1
+        job_id = self._raw_preview_job_id
+        task = RawPreviewTask(job_id=job_id, path=path, max_size=DEFAULT_PREVIEW_MAX_EDGE)
+        task.signals.finished.connect(self._raw_preview_finished)
+        task.signals.failed.connect(self._raw_preview_failed)
+        self._raw_preview_in_progress = True
+        self._thread_pool.start(task)
+
+    def _raw_preview_finished(self, job_id: int, path: Path, preview: RawPreview) -> None:
+        if job_id != self._raw_preview_job_id or path != self.current_path:
             return
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._raw_preview_in_progress = False
 
         self.current_preview = preview
+        pixmap = self._pixmap_from_rgb8(preview.display_rgb8)
         self.control_panel.set_histogram(None)
         self.image_view.set_preview_pixmap(
             pixmap,
@@ -828,7 +852,18 @@ class MainWindow(QMainWindow):
         )
         self.control_panel.set_image_loaded(True)
         self.control_panel.set_image_status(preview.status_text())
+        self._restore_state_for_path(path)
         self.statusBar().showMessage(f"RAW preview ready: {path.name}")
+
+    def _raw_preview_failed(self, job_id: int, path: Path, message: str) -> None:
+        if job_id != self._raw_preview_job_id or path != self.current_path:
+            return
+        self._raw_preview_in_progress = False
+        self.image_view.set_raw_placeholder(path)
+        self.control_panel.set_image_loaded(False)
+        self.control_panel.set_image_status("RAW preview failed")
+        QMessageBox.warning(self, "RAW Preview Failed", message)
+        self.statusBar().showMessage("RAW preview failed")
 
     def set_tool_mode(self, mode: ToolMode) -> None:
         if mode == ToolMode.WB_PICKER:
@@ -1453,6 +1488,7 @@ class MainWindow(QMainWindow):
 
     def reset_workspace(self) -> None:
         self._cancel_preview_render()
+        self._cancel_raw_preview()
         self._cancel_auto_detect()
         self.origin_view.clear_selections()
         self.preview_view.set_placeholder("Positive preview waiting")
@@ -1477,6 +1513,10 @@ class MainWindow(QMainWindow):
         self._render_in_progress = False
         self._render_pending = False
         self._render_pending_show_errors = False
+
+    def _cancel_raw_preview(self) -> None:
+        self._raw_preview_job_id += 1
+        self._raw_preview_in_progress = False
 
     def _cancel_auto_detect(self) -> None:
         self._auto_detect_job_id += 1
