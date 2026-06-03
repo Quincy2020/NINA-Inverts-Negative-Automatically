@@ -77,12 +77,14 @@ def detect_frame_and_base(
     source_size: ImageSize,
     format_hint: str = "auto",
     detect_base: bool = True,
+    prior_frame_rect: ImageRect | None = None,
 ) -> AutoDetectResult:
     frame = detect_film_frame(
         preview_linear_rgb,
         preview_size=preview_size,
         source_size=source_size,
         format_hint=format_hint,
+        prior_frame_rect=prior_frame_rect,
     )
     if not detect_base:
         return AutoDetectResult(frame=frame, base=None)
@@ -103,6 +105,7 @@ def detect_film_frame(
     preview_size: ImageSize,
     source_size: ImageSize,
     format_hint: str = "auto",
+    prior_frame_rect: ImageRect | None = None,
 ) -> AutoFrameResult | None:
     image = _prepare_detection_image(preview_linear_rgb)
     if image.size == 0:
@@ -113,6 +116,7 @@ def detect_film_frame(
         preview_size=preview_size,
         source_size=source_size,
         format_hint=format_hint,
+        prior_frame_rect=prior_frame_rect,
     )
     if ranked is not None:
         return ranked
@@ -155,7 +159,11 @@ def detect_film_frame(
         return None
 
     preview_rect = scale_rect(best.rect, detect_size, preview_size)
-    source_rect = scale_rect(preview_rect, preview_size, source_size)
+    source_rect = _fit_rect_to_format_hint(
+        scale_rect(preview_rect, preview_size, source_size),
+        source_size,
+        format_hint,
+    )
     return AutoFrameResult(
         rect=source_rect,
         confidence=round(float(best.confidence), 3),
@@ -171,6 +179,7 @@ def _ranker_frame_candidates(
     preview_size: ImageSize,
     source_size: ImageSize,
     format_hint: str,
+    prior_frame_rect: ImageRect | None,
 ) -> AutoFrameResult | None:
     try:
         candidates = detect_ranked_frame_candidates(
@@ -179,6 +188,7 @@ def _ranker_frame_candidates(
             source_size=source_size,
             format_hint=format_hint,
             top_k=1,
+            prior_frame_rect=prior_frame_rect,
         )
     except Exception:
         return None
@@ -505,6 +515,47 @@ def _aspect_score(aspect: float, format_hint: str) -> tuple[float, str]:
             best_score = float(score)
             best_label = labels[min(index, len(labels) - 1)]
     return best_score, best_label
+
+
+def _fit_rect_to_format_hint(rect: ImageRect, image_size: ImageSize, format_hint: str) -> ImageRect:
+    if format_hint == "auto" or format_hint not in FORMAT_RATIOS:
+        return rect
+    target = float(FORMAT_RATIOS[format_hint][0])
+    current = rect.width / max(rect.height, 1)
+    if current < 1.0:
+        target = 1.0 / max(target, 1e-5)
+
+    width = float(rect.width)
+    height = float(rect.height)
+    if width / max(height, 1e-5) > target:
+        width = height * target
+    else:
+        height = width / max(target, 1e-5)
+    if width > image_size.width:
+        scale = image_size.width / max(width, 1e-5)
+        width *= scale
+        height *= scale
+    if height > image_size.height:
+        scale = image_size.height / max(height, 1e-5)
+        width *= scale
+        height *= scale
+
+    center_x = rect.center_x
+    center_y = rect.center_y
+    fitted = ImageRect(
+        x=int(round(center_x - width * 0.5)),
+        y=int(round(center_y - height * 0.5)),
+        width=max(1, int(round(width))),
+        height=max(1, int(round(height))),
+        angle=rect.angle,
+    )
+    return ImageRect(
+        x=max(0, min(fitted.x, max(0, image_size.width - fitted.width))),
+        y=max(0, min(fitted.y, max(0, image_size.height - fitted.height))),
+        width=min(fitted.width, image_size.width),
+        height=min(fitted.height, image_size.height),
+        angle=fitted.angle,
+    )
 
 
 def _edge_support(edges: np.ndarray, box_points: np.ndarray) -> float:

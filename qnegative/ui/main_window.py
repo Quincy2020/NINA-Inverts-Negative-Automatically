@@ -91,6 +91,8 @@ FINAL_RENDER_QUALITY = "final"
 INTERACTIVE_RENDER_QUALITY = "interactive"
 FINAL_RENDER_DEBOUNCE_MS = 80
 INTERACTIVE_RENDER_DEBOUNCE_MS = 115
+PREVIEW_RESULT_CACHE_LIMIT = 6
+RAW_PREVIEW_CACHE_LIMIT = 6
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,18 @@ class PreviewRenderOutput:
     result: NegativePreviewResult
     cache: PreviewStageCache
     quality: str
+
+
+@dataclass(frozen=True)
+class CachedPreviewResult:
+    key: tuple
+    result: NegativePreviewResult
+
+
+@dataclass(frozen=True)
+class CachedRawPreview:
+    key: tuple
+    preview: RawPreview
 
 
 @dataclass(frozen=True)
@@ -340,6 +354,11 @@ class AutoDetectTask(QRunnable):
         frame_result: AutoFrameResult | None = None
         base_result: AutoBaseResult | None = None
         try:
+            prior_frame_rect = (
+                self.fallback_state.film_rect
+                if self.fallback_state is not None
+                else None
+            )
             if self.mode == "frame_base":
                 result = detect_frame_and_base(
                     self.preview.preview_linear_rgb,
@@ -347,6 +366,7 @@ class AutoDetectTask(QRunnable):
                     source_size=self.preview.source_size,
                     format_hint=self.format_hint,
                     detect_base=self.detect_base,
+                    prior_frame_rect=prior_frame_rect,
                 )
                 frame_result = result.frame
                 base_result = result.base
@@ -356,6 +376,7 @@ class AutoDetectTask(QRunnable):
                     preview_size=self.preview.preview_size,
                     source_size=self.preview.source_size,
                     format_hint=self.format_hint,
+                    prior_frame_rect=prior_frame_rect,
                 )
             elif self.mode == "base":
                 base_result = detect_film_base(
@@ -652,6 +673,8 @@ class MainWindow(QMainWindow):
         self.folder_files: list[Path] = []
         self.current_index: int = -1
         self.image_states: dict[Path, ImageProcessingState] = {}
+        self.raw_preview_cache: dict[Path, CachedRawPreview] = {}
+        self.preview_result_cache: dict[Path, CachedPreviewResult] = {}
         self.mask_point: ImagePoint | None = None
         self.film_rect: ImageRect | None = None
         self.white_balance_point: ImagePoint | None = None
@@ -878,6 +901,8 @@ class MainWindow(QMainWindow):
             return
 
         if extension in RAW_EXTENSIONS:
+            if self._restore_cached_raw_preview(path):
+                return
             self.load_raw_preview(path)
             return
 
@@ -906,18 +931,13 @@ class MainWindow(QMainWindow):
         self._raw_preview_in_progress = False
         self._refresh_activity_progress()
 
-        self.current_preview = preview
-        pixmap = self._pixmap_from_rgb8(preview.display_rgb8)
-        self.control_panel.set_histogram(None)
-        self.image_view.set_preview_pixmap(
-            pixmap,
-            source_path=path,
-            source_size=preview.source_size,
-        )
-        self.control_panel.set_image_loaded(True)
-        self.control_panel.set_image_status(preview.status_text())
+        self._store_cached_raw_preview(preview)
+        self._show_raw_preview(path, preview)
         self._restore_state_for_path(path)
-        self.statusBar().showMessage(f"RAW preview ready: {path.name}")
+        if self.negative_preview_active:
+            self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
+        else:
+            self.statusBar().showMessage(f"RAW preview ready: {path.name}")
 
     def _raw_preview_failed(self, job_id: int, path: Path, message: str) -> None:
         if job_id != self._raw_preview_job_id or path != self.current_path:
@@ -929,6 +949,55 @@ class MainWindow(QMainWindow):
         self.control_panel.set_image_status("RAW preview failed")
         QMessageBox.warning(self, "RAW Preview Failed", message)
         self.statusBar().showMessage("RAW preview failed")
+
+    def _show_raw_preview(self, path: Path, preview: RawPreview) -> None:
+        self.current_preview = preview
+        pixmap = self._pixmap_from_rgb8(preview.display_rgb8)
+        self.control_panel.set_histogram(None)
+        self.image_view.set_preview_pixmap(
+            pixmap,
+            source_path=path,
+            source_size=preview.source_size,
+        )
+        self.control_panel.set_image_loaded(True)
+        self.control_panel.set_image_status(preview.status_text())
+
+    def _file_key_for_path(self, path: Path) -> tuple:
+        try:
+            stat = path.stat()
+        except OSError:
+            return (path,)
+        return (path, stat.st_size, stat.st_mtime_ns)
+
+    def _raw_preview_cache_key(self, path: Path) -> tuple:
+        return (self._file_key_for_path(path), DEFAULT_PREVIEW_MAX_EDGE)
+
+    def _store_cached_raw_preview(self, preview: RawPreview) -> None:
+        key = self._raw_preview_cache_key(preview.path)
+        self.raw_preview_cache.pop(preview.path, None)
+        self.raw_preview_cache[preview.path] = CachedRawPreview(
+            key=key,
+            preview=preview,
+        )
+        while len(self.raw_preview_cache) > RAW_PREVIEW_CACHE_LIMIT:
+            oldest_path = next(iter(self.raw_preview_cache))
+            self.raw_preview_cache.pop(oldest_path, None)
+
+    def _restore_cached_raw_preview(self, path: Path) -> bool:
+        cached = self.raw_preview_cache.get(path)
+        key = self._raw_preview_cache_key(path)
+        if cached is None or cached.key != key:
+            return False
+
+        self.raw_preview_cache.pop(path, None)
+        self.raw_preview_cache[path] = cached
+        self._show_raw_preview(path, cached.preview)
+        self._restore_state_for_path(path)
+        if self.negative_preview_active:
+            self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
+        else:
+            self.statusBar().showMessage(f"Cached RAW preview restored: {path.name}")
+        return True
 
     def set_tool_mode(self, mode: ToolMode) -> None:
         if mode == ToolMode.WB_PICKER:
@@ -1260,21 +1329,9 @@ class MainWindow(QMainWindow):
             result,
             update_filmstrip=output.quality == FINAL_RENDER_QUALITY,
         )
-        if self.mask_point is None and self.adjustments.invert_mode == InvertMode.LAB_PRINT.value:
-            base_text = "Base fallback: none"
-        else:
-            mask_rgb = ", ".join(f"{value:.4f}" for value in result.mask_rgb)
-            base_text = f"Base RGB {mask_rgb}"
-        wb_gains = ", ".join(f"{value:.3f}" for value in displayed_result.wb_gains)
-        wb_label = (
-            "WB CMY offset"
-            if self.adjustments.invert_mode
-            in (InvertMode.LOG_BOUNDS.value, InvertMode.LAB_PRINT.value)
-            else "WB gain"
-        )
-        self.control_panel.set_image_status(
-            f"Positive preview {displayed_result.width} x {displayed_result.height}\nMode {invert_mode_label(self.adjustments.invert_mode)}\n{base_text}\n{wb_label} {wb_gains}"
-        )
+        if output.quality == FINAL_RENDER_QUALITY:
+            self._store_cached_preview_result(result)
+        self._set_negative_preview_status(result, displayed_result)
         self.control_panel.set_histogram(displayed_result.histogram)
         self.negative_preview_active = True
         if show_errors:
@@ -1411,6 +1468,106 @@ class MainWindow(QMainWindow):
         self._preview_flip_horizontal = False
         self._preview_flip_vertical = False
         self._preview_rotation_quarters = 0
+
+    def _preview_file_key(self) -> tuple | None:
+        if self.current_path is None:
+            return None
+        return self._file_key_for_path(self.current_path)
+
+    def _adjustments_preview_cache_key(self, adjustments: AdjustmentParams) -> tuple:
+        return (
+            adjustments.invert_mode,
+            adjustments.print_curve,
+            adjustments.auto_wb,
+            color_balance_key(adjustments),
+            self._density_matrix_key(adjustments.density_matrix),
+            adjustments.exposure,
+            adjustments.highlights,
+            adjustments.shadows,
+            adjustments.contrast,
+            adjustments.saturation,
+            adjustments.camera_color_strength,
+            adjustments.soft_highlights,
+            adjustments.soft_shadows,
+            adjustments.analysis_inset_percent,
+            adjustments.black_point,
+            adjustments.mid_point,
+            adjustments.white_point,
+        )
+
+    def _preview_result_cache_key(self) -> tuple | None:
+        if self.current_preview is None:
+            return None
+        return (
+            self._preview_file_key(),
+            self.current_preview.source_size,
+            self.current_preview.preview_size,
+            matrix_key(self.current_preview.camera_to_srgb_matrix),
+            image_point_key(self.mask_point),
+            image_rect_key(self.film_rect),
+            self._adjustments_preview_cache_key(self.adjustments),
+        )
+
+    def _store_cached_preview_result(self, result: NegativePreviewResult) -> None:
+        if self.current_path is None or self.auto_levels_pending:
+            return
+        key = self._preview_result_cache_key()
+        if key is None:
+            return
+
+        self.preview_result_cache.pop(self.current_path, None)
+        self.preview_result_cache[self.current_path] = CachedPreviewResult(
+            key=key,
+            result=result,
+        )
+        while len(self.preview_result_cache) > PREVIEW_RESULT_CACHE_LIMIT:
+            oldest_path = next(iter(self.preview_result_cache))
+            self.preview_result_cache.pop(oldest_path, None)
+
+    def _restore_cached_preview_result(self) -> bool:
+        if self.current_path is None or self.auto_levels_pending:
+            return False
+        cached = self.preview_result_cache.get(self.current_path)
+        key = self._preview_result_cache_key()
+        if cached is None or key is None or cached.key != key:
+            return False
+
+        self.preview_result_cache.pop(self.current_path, None)
+        self.preview_result_cache[self.current_path] = cached
+        self._last_untransformed_negative_result = cached.result
+        displayed_result, _pixmap = self._update_preview_from_result(
+            cached.result,
+            update_filmstrip=True,
+        )
+        self.control_panel.set_histogram(displayed_result.histogram)
+        self._set_negative_preview_status(cached.result, displayed_result)
+        self.negative_preview_active = True
+        self.statusBar().showMessage("Cached positive preview restored")
+        return True
+
+    def _set_negative_preview_status(
+        self,
+        result: NegativePreviewResult,
+        displayed_result: NegativePreviewResult,
+    ) -> None:
+        if self.mask_point is None and self.adjustments.invert_mode == InvertMode.LAB_PRINT.value:
+            base_text = "Base fallback: none"
+        else:
+            mask_rgb = ", ".join(f"{value:.4f}" for value in result.mask_rgb)
+            base_text = f"Base RGB {mask_rgb}"
+        wb_gains = ", ".join(f"{value:.3f}" for value in displayed_result.wb_gains)
+        wb_label = (
+            "WB CMY offset"
+            if self.adjustments.invert_mode
+            in (InvertMode.LOG_BOUNDS.value, InvertMode.LAB_PRINT.value)
+            else "WB gain"
+        )
+        self.control_panel.set_image_status(
+            f"Positive preview {displayed_result.width} x {displayed_result.height}\n"
+            f"Mode {invert_mode_label(self.adjustments.invert_mode)}\n"
+            f"{base_text}\n"
+            f"{wb_label} {wb_gains}"
+        )
 
     def _negative_base_for_current(self) -> NegativeBasePreview:
         if self.current_preview is None:
@@ -1676,7 +1833,7 @@ class MainWindow(QMainWindow):
             film_rect=self.film_rect,
         )
 
-        if state.negative_preview_active:
+        if state.negative_preview_active and not self._restore_cached_preview_result():
             self._queue_negative_render(show_errors=False)
 
     def _previous_image_state(self) -> ImageProcessingState | None:
