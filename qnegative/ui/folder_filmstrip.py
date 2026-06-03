@@ -133,12 +133,14 @@ class FolderFilmstrip(QWidget):
         self.next_button.setFixedSize(34, 92)
 
         self.scroll_area = HorizontalWheelScrollArea()
+        self.scroll_area.setObjectName("filmstripScrollArea")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
 
         self.content = QWidget()
+        self.content.setObjectName("filmstripContent")
         self.content_layout = QHBoxLayout(self.content)
         self.content_layout.setContentsMargins(8, 8, 8, 8)
         self.content_layout.setSpacing(8)
@@ -249,8 +251,8 @@ class FolderFilmstrip(QWidget):
                 border-radius: 6px;
             }
             QFrame#thumbnailItem[active="true"] {
-                border: 3px solid #f2c94c;
-                background: #344150;
+                border: 3px solid #4aa3ff;
+                background: #26384a;
             }
             QLabel#thumbnailImage {
                 background: #111418;
@@ -269,8 +271,10 @@ class FolderFilmstrip(QWidget):
                 font-size: 9px;
                 font-weight: 700;
             }
-            QScrollArea {
-                background: transparent;
+            QScrollArea#filmstripScrollArea,
+            QScrollArea#filmstripScrollArea QWidget#qt_scrollarea_viewport,
+            QWidget#filmstripContent {
+                background: #15191f;
             }
             QScrollBar:horizontal {
                 background: #15191f;

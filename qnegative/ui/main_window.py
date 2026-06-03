@@ -119,9 +119,14 @@ class PreviewStageCache:
 
 @dataclass(frozen=True)
 class PreviewRenderOutput:
+    path: Path
     result: NegativePreviewResult
     cache: PreviewStageCache
     quality: str
+    cache_key: tuple | None = None
+    mask_point: ImagePoint | None = None
+    film_rect: ImageRect | None = None
+    adjustments: AdjustmentParams | None = None
     applied_auto_levels: bool = False
 
 
@@ -144,6 +149,7 @@ class AutoDetectOutput:
     frame_result: AutoFrameResult | None
     base_result: AutoBaseResult | None
     fallback_state: ImageProcessingState | None
+    auto_preview: bool = False
 
 
 def scaled_raw_preview(preview: RawPreview, *, max_edge: int) -> RawPreview:
@@ -217,6 +223,61 @@ def color_balance_key(adjustments: AdjustmentParams) -> tuple:
         tonal_balance_key(params.shadows),
         tonal_balance_key(params.midtones),
         tonal_balance_key(params.highlights),
+    )
+
+
+def density_matrix_params_key(matrix: DensityMatrixParams) -> tuple[float, ...]:
+    return (
+        round(float(matrix.m00), 7),
+        round(float(matrix.m01), 7),
+        round(float(matrix.m02), 7),
+        round(float(matrix.m10), 7),
+        round(float(matrix.m11), 7),
+        round(float(matrix.m12), 7),
+        round(float(matrix.m20), 7),
+        round(float(matrix.m21), 7),
+        round(float(matrix.m22), 7),
+    )
+
+
+def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
+    return (
+        adjustments.invert_mode,
+        adjustments.print_curve,
+        adjustments.auto_wb,
+        color_balance_key(adjustments),
+        density_matrix_params_key(adjustments.density_matrix),
+        adjustments.exposure,
+        adjustments.highlights,
+        adjustments.shadows,
+        adjustments.contrast,
+        adjustments.saturation,
+        adjustments.camera_color_strength,
+        adjustments.soft_highlights,
+        adjustments.soft_shadows,
+        adjustments.analysis_inset_percent,
+        adjustments.black_point,
+        adjustments.mid_point,
+        adjustments.white_point,
+    )
+
+
+def preview_result_cache_key_for(
+    *,
+    file_key: tuple,
+    preview: RawPreview,
+    mask_point: ImagePoint | None,
+    film_rect: ImageRect | None,
+    adjustments: AdjustmentParams,
+) -> tuple:
+    return (
+        file_key,
+        preview.source_size,
+        preview.preview_size,
+        matrix_key(preview.camera_to_srgb_matrix),
+        image_point_key(mask_point),
+        image_rect_key(film_rect),
+        adjustments_preview_cache_key(adjustments),
     )
 
 
@@ -347,6 +408,7 @@ class AutoDetectTask(QRunnable):
         detect_base: bool,
         current_film_rect: ImageRect | None,
         fallback_state: ImageProcessingState | None,
+        auto_preview: bool = False,
     ) -> None:
         super().__init__()
         self.job_id = job_id
@@ -357,6 +419,7 @@ class AutoDetectTask(QRunnable):
         self.detect_base = detect_base
         self.current_film_rect = current_film_rect
         self.fallback_state = fallback_state
+        self.auto_preview = auto_preview
         self.signals = AutoDetectSignals()
 
     def run(self) -> None:
@@ -406,6 +469,7 @@ class AutoDetectTask(QRunnable):
                 frame_result=frame_result,
                 base_result=base_result,
                 fallback_state=self.fallback_state,
+                auto_preview=self.auto_preview,
             ),
         )
 
@@ -422,6 +486,7 @@ class PreviewRenderTask(QRunnable):
         auto_levels_pending: bool,
         show_errors: bool,
         quality: str,
+        file_key: tuple | None = None,
         render_cache: PreviewStageCache | None = None,
     ) -> None:
         super().__init__()
@@ -433,6 +498,7 @@ class PreviewRenderTask(QRunnable):
         self.auto_levels_pending = auto_levels_pending
         self.show_errors = show_errors
         self.quality = quality
+        self.file_key = file_key
         self.render_cache = render_cache or PreviewStageCache()
         self.signals = PreviewRenderSignals()
 
@@ -445,9 +511,14 @@ class PreviewRenderTask(QRunnable):
             else:
                 result = process_negative_base_preview(base, self.adjustments)
                 output = PreviewRenderOutput(
+                    path=self.preview.path,
                     result=result,
                     cache=PreviewStageCache(base_key=base_key, base=base),
                     quality=self.quality,
+                    cache_key=self._result_cache_key(self.adjustments),
+                    mask_point=self.mask_point,
+                    film_rect=self.film_rect,
+                    adjustments=deepcopy(self.adjustments),
                     applied_auto_levels=False,
                 )
         except Exception as exc:
@@ -537,6 +608,7 @@ class PreviewRenderTask(QRunnable):
             result = build_lab_print_display_stage(color_stage, effective_adjustments)
 
         return PreviewRenderOutput(
+            path=self.preview.path,
             result=result,
             cache=PreviewStageCache(
                 base_key=base_key,
@@ -551,7 +623,22 @@ class PreviewRenderTask(QRunnable):
                 display_result=result,
             ),
             quality=self.quality,
+            cache_key=self._result_cache_key(effective_adjustments),
+            mask_point=self.mask_point,
+            film_rect=self.film_rect,
+            adjustments=deepcopy(effective_adjustments),
             applied_auto_levels=applied_auto_levels,
+        )
+
+    def _result_cache_key(self, adjustments: AdjustmentParams) -> tuple | None:
+        if self.file_key is None:
+            return None
+        return preview_result_cache_key_for(
+            file_key=self.file_key,
+            preview=self.preview,
+            mask_point=self.mask_point,
+            film_rect=self.film_rect,
+            adjustments=adjustments,
         )
 
 
@@ -769,10 +856,13 @@ class MainWindow(QMainWindow):
         self._raw_preview_in_progress = False
         self._model_warmup_in_progress = False
         self._auto_detect_job_id = 0
+        self._auto_detect_auto_preview_jobs: set[int] = set()
         self._auto_detect_in_progress = False
         self._export_in_progress = False
         self._default_export_dir: Path | None = None
         self._gpu_preview_enabled = True
+        self._auto_invert_after_frame_change = True
+        self._auto_frame_new_negatives = True
 
         self.control_panel = ControlPanel()
         self.origin_view = ImageView()
@@ -886,6 +976,18 @@ class MainWindow(QMainWindow):
         self.gpu_preview_action.setChecked(True)
         self.gpu_preview_action.toggled.connect(self.set_gpu_preview_enabled)
         settings_menu.addAction(self.gpu_preview_action)
+
+        self.auto_invert_after_frame_action = QAction("Auto Invert After Frame Change", self)
+        self.auto_invert_after_frame_action.setCheckable(True)
+        self.auto_invert_after_frame_action.setChecked(True)
+        self.auto_invert_after_frame_action.toggled.connect(self.set_auto_invert_after_frame_change)
+        settings_menu.addAction(self.auto_invert_after_frame_action)
+
+        self.auto_frame_new_negatives_action = QAction("Auto Frame New Negatives", self)
+        self.auto_frame_new_negatives_action.setCheckable(True)
+        self.auto_frame_new_negatives_action.setChecked(True)
+        self.auto_frame_new_negatives_action.toggled.connect(self.set_auto_frame_new_negatives)
+        settings_menu.addAction(self.auto_frame_new_negatives_action)
         settings_menu.addSeparator()
 
         developer_menu = settings_menu.addMenu("Developer")
@@ -998,6 +1100,16 @@ class MainWindow(QMainWindow):
         status = "enabled" if self._gpu_preview_enabled else "disabled"
         self.statusBar().showMessage(f"GPU preview acceleration {status}")
 
+    def set_auto_invert_after_frame_change(self, enabled: bool) -> None:
+        self._auto_invert_after_frame_change = bool(enabled)
+        status = "enabled" if self._auto_invert_after_frame_change else "disabled"
+        self.statusBar().showMessage(f"Auto invert after frame change {status}")
+
+    def set_auto_frame_new_negatives(self, enabled: bool) -> None:
+        self._auto_frame_new_negatives = bool(enabled)
+        status = "enabled" if self._auto_frame_new_negatives else "disabled"
+        self.statusBar().showMessage(f"Auto frame new negatives {status}")
+
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1061,6 +1173,7 @@ class MainWindow(QMainWindow):
 
         if self.current_path is not None and self.current_path != path:
             self._save_current_state()
+            self._start_pending_preview_before_switch()
 
         self._cancel_preview_render()
         self._cancel_raw_preview()
@@ -1128,7 +1241,8 @@ class MainWindow(QMainWindow):
 
         self._store_cached_raw_preview(preview)
         self._show_raw_preview(path, preview)
-        self._restore_state_for_path(path)
+        restored_state = self._restore_state_for_path(path)
+        self._maybe_auto_frame_new_negative(restored_state)
         if self.negative_preview_active:
             self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
         else:
@@ -1187,7 +1301,8 @@ class MainWindow(QMainWindow):
         self.raw_preview_cache.pop(path, None)
         self.raw_preview_cache[path] = cached
         self._show_raw_preview(path, cached.preview)
-        self._restore_state_for_path(path)
+        restored_state = self._restore_state_for_path(path)
+        self._maybe_auto_frame_new_negative(restored_state)
         if self.negative_preview_active:
             self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
         else:
@@ -1272,9 +1387,10 @@ class MainWindow(QMainWindow):
             f"WB picker: x={point.x}, y={point.y}, sample RGB {sample_text}, gains {gain_text}"
         )
 
-    def auto_detect_current(self, mode: str) -> None:
+    def auto_detect_current(self, mode: str, *, auto_preview: bool = False) -> None:
         if self.current_preview is None:
-            QMessageBox.information(self, "Auto Detect", "Open a RAW file before auto detection.")
+            if not auto_preview:
+                QMessageBox.information(self, "Auto Detect", "Open a RAW file before auto detection.")
             return
         if self._auto_detect_in_progress:
             self.statusBar().showMessage("Auto detect already running...")
@@ -1282,6 +1398,8 @@ class MainWindow(QMainWindow):
 
         self._auto_detect_job_id += 1
         job_id = self._auto_detect_job_id
+        if auto_preview:
+            self._auto_detect_auto_preview_jobs.add(job_id)
         task = AutoDetectTask(
             job_id=job_id,
             mode=mode,
@@ -1291,17 +1409,24 @@ class MainWindow(QMainWindow):
             detect_base=self._film_base_required_for_current_mode(),
             current_film_rect=self.film_rect,
             fallback_state=self._previous_image_state(),
+            auto_preview=auto_preview,
         )
         task.signals.finished.connect(self._auto_detect_finished)
         task.signals.failed.connect(self._auto_detect_failed)
         self._auto_detect_in_progress = True
         self._refresh_activity_progress()
-        self.statusBar().showMessage("Auto detect running in background...")
+        self.statusBar().showMessage(
+            "Auto frame running in background..."
+            if auto_preview
+            else "Auto detect running in background..."
+        )
         self._thread_pool.start(task)
 
     def _auto_detect_finished(self, job_id: int, output: AutoDetectOutput) -> None:
         if job_id != self._auto_detect_job_id:
+            self._auto_detect_auto_preview_jobs.discard(job_id)
             return
+        self._auto_detect_auto_preview_jobs.discard(job_id)
         self._auto_detect_in_progress = False
         self._refresh_activity_progress()
         if output.path != self.current_path:
@@ -1312,11 +1437,15 @@ class MainWindow(QMainWindow):
 
     def _auto_detect_failed(self, job_id: int, message: str) -> None:
         if job_id != self._auto_detect_job_id:
+            self._auto_detect_auto_preview_jobs.discard(job_id)
             return
+        auto_preview = job_id in self._auto_detect_auto_preview_jobs
+        self._auto_detect_auto_preview_jobs.discard(job_id)
         self._auto_detect_in_progress = False
         self._refresh_activity_progress()
         self.statusBar().showMessage("Auto detect failed")
-        QMessageBox.warning(self, "Auto Detect Failed", message)
+        if not auto_preview:
+            QMessageBox.warning(self, "Auto Detect Failed", message)
 
     def _apply_auto_detect_output(self, output: AutoDetectOutput) -> None:
         mode = output.mode
@@ -1371,7 +1500,8 @@ class MainWindow(QMainWindow):
 
         if not changed:
             self.statusBar().showMessage("Auto detect failed. Please select frame/base manually.")
-            QMessageBox.information(self, "Auto Detect", "No reliable frame or base was detected. Please select manually.")
+            if not output.auto_preview:
+                QMessageBox.information(self, "Auto Detect", "No reliable frame or base was detected. Please select manually.")
             return
 
         self.white_balance_point = None
@@ -1385,7 +1515,7 @@ class MainWindow(QMainWindow):
         self.preview_tabs.setCurrentWidget(self.origin_view)
         suffix = " using previous image fallback" if used_fallback else ""
         self.statusBar().showMessage(f"Auto detect applied: {', '.join(details)}{suffix}")
-        self._schedule_preview_if_ready()
+        self._schedule_preview_if_ready(force=output.auto_preview)
 
     def adjustment_interaction_started(self) -> None:
         self._interactive_adjustment_active = True
@@ -1489,6 +1619,7 @@ class MainWindow(QMainWindow):
             auto_levels_pending=self.auto_levels_pending,
             show_errors=show_errors,
             quality=quality,
+            file_key=self._file_key_for_path(render_preview.path),
             render_cache=self._preview_stage_caches[quality],
         )
         task.signals.finished.connect(self._preview_render_finished)
@@ -1504,6 +1635,7 @@ class MainWindow(QMainWindow):
 
     def _preview_render_finished(self, job_id: int, output: PreviewRenderOutput, show_errors: bool) -> None:
         if job_id != self._render_job_id:
+            self._store_stale_preview_result(output)
             return
 
         self._render_in_progress = False
@@ -1549,6 +1681,45 @@ class MainWindow(QMainWindow):
             else "Inverted preview ready"
         )
 
+    def _start_pending_preview_before_switch(self) -> None:
+        if not self.preview_refresh_timer.isActive():
+            return
+        self.preview_refresh_timer.stop()
+        self._queue_negative_render(show_errors=False, interactive=False)
+
+    def _store_stale_preview_result(self, output: PreviewRenderOutput) -> None:
+        if output.quality != FINAL_RENDER_QUALITY or output.cache_key is None:
+            return
+        if output.path == self.current_path:
+            return
+
+        self.preview_result_cache.pop(output.path, None)
+        self.preview_result_cache[output.path] = CachedPreviewResult(
+            key=output.cache_key,
+            result=output.result,
+        )
+        while len(self.preview_result_cache) > PREVIEW_RESULT_CACHE_LIMIT:
+            oldest_path = next(iter(self.preview_result_cache))
+            self.preview_result_cache.pop(oldest_path, None)
+
+        existing = self.image_states.get(output.path)
+        self.image_states[output.path] = ImageProcessingState(
+            mask_point=output.mask_point if output.mask_point is not None else (existing.mask_point if existing else None),
+            film_rect=output.film_rect if output.film_rect is not None else (existing.film_rect if existing else None),
+            white_balance_point=existing.white_balance_point if existing else None,
+            adjustments=deepcopy(output.adjustments) if output.adjustments is not None else (deepcopy(existing.adjustments) if existing else self._default_adjustments()),
+            negative_preview_active=True,
+            auto_levels_pending=False,
+            preview_flip_horizontal=existing.preview_flip_horizontal if existing else False,
+            preview_flip_vertical=existing.preview_flip_vertical if existing else False,
+            preview_rotation_quarters=existing.preview_rotation_quarters if existing else 0,
+        )
+        self.filmstrip.set_processed_thumbnail(
+            output.path,
+            self._pixmap_from_rgb8(output.result.display_rgb8),
+        )
+        self.statusBar().showMessage(f"Background preview cached: {output.path.name}")
+
     def _preview_render_failed(self, job_id: int, message: str, show_errors: bool) -> None:
         if job_id != self._render_job_id:
             return
@@ -1569,7 +1740,9 @@ class MainWindow(QMainWindow):
                 interactive=self._interactive_adjustment_active and not pending_show_errors,
             )
 
-    def _schedule_preview_if_ready(self) -> None:
+    def _schedule_preview_if_ready(self, *, force: bool = False) -> None:
+        if not force and not self._auto_invert_after_frame_change:
+            return
         if self.current_preview is None:
             return
         if self.film_rect is None or not self.film_rect.is_valid():
@@ -1682,37 +1855,20 @@ class MainWindow(QMainWindow):
         return self._file_key_for_path(self.current_path)
 
     def _adjustments_preview_cache_key(self, adjustments: AdjustmentParams) -> tuple:
-        return (
-            adjustments.invert_mode,
-            adjustments.print_curve,
-            adjustments.auto_wb,
-            color_balance_key(adjustments),
-            self._density_matrix_key(adjustments.density_matrix),
-            adjustments.exposure,
-            adjustments.highlights,
-            adjustments.shadows,
-            adjustments.contrast,
-            adjustments.saturation,
-            adjustments.camera_color_strength,
-            adjustments.soft_highlights,
-            adjustments.soft_shadows,
-            adjustments.analysis_inset_percent,
-            adjustments.black_point,
-            adjustments.mid_point,
-            adjustments.white_point,
-        )
+        return adjustments_preview_cache_key(adjustments)
 
     def _preview_result_cache_key(self) -> tuple | None:
         if self.current_preview is None:
             return None
-        return (
-            self._preview_file_key(),
-            self.current_preview.source_size,
-            self.current_preview.preview_size,
-            matrix_key(self.current_preview.camera_to_srgb_matrix),
-            image_point_key(self.mask_point),
-            image_rect_key(self.film_rect),
-            self._adjustments_preview_cache_key(self.adjustments),
+        file_key = self._preview_file_key()
+        if file_key is None:
+            return None
+        return preview_result_cache_key_for(
+            file_key=file_key,
+            preview=self.current_preview,
+            mask_point=self.mask_point,
+            film_rect=self.film_rect,
+            adjustments=self.adjustments,
         )
 
     def _store_cached_preview_result(self, result: NegativePreviewResult) -> None:
@@ -1988,6 +2144,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_auto_detect(self) -> None:
         self._auto_detect_job_id += 1
+        self._auto_detect_auto_preview_jobs.clear()
         self._auto_detect_in_progress = False
         self._refresh_activity_progress()
 
@@ -2033,7 +2190,7 @@ class MainWindow(QMainWindow):
             preview_rotation_quarters=self._preview_rotation_quarters,
         )
 
-    def _restore_state_for_path(self, path: Path) -> None:
+    def _restore_state_for_path(self, path: Path) -> bool:
         state = self.image_states.get(path)
         if state is None:
             self.mask_point = None
@@ -2047,7 +2204,7 @@ class MainWindow(QMainWindow):
             self.control_panel.set_film_status("Not selected")
             self.control_panel.set_adjustments(self.adjustments, emit=False)
             self.origin_view.restore_selections(mask_point=None, film_rect=None)
-            return
+            return False
 
         self.mask_point = state.mask_point
         self.film_rect = state.film_rect
@@ -2077,6 +2234,18 @@ class MainWindow(QMainWindow):
 
         if state.negative_preview_active and not self._restore_cached_preview_result():
             self._queue_negative_render(show_errors=False)
+        return True
+
+    def _maybe_auto_frame_new_negative(self, restored_state: bool) -> None:
+        if restored_state or not self._auto_frame_new_negatives:
+            return
+        if self.current_preview is None or self.current_path is None:
+            return
+        if self.current_path.suffix.lower() not in RAW_EXTENSIONS:
+            return
+        if self.film_rect is not None or self.negative_preview_active:
+            return
+        self.auto_detect_current("frame_base", auto_preview=True)
 
     def _previous_image_state(self) -> ImageProcessingState | None:
         if not self.folder_files:

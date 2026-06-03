@@ -22,7 +22,7 @@ LOG_SHOULDER_WIDTH = 2.5
 LOG_COLOR_SEPARATION_STRENGTH = 0.5
 LOG_AUTO_WB_MAX_OFFSET = 0.025
 LAB_PRINT_LOG_PERCENTILE_CLIP = 0.02
-LAB_PRINT_AUTO_WB_STRENGTH = 0.18
+LAB_PRINT_AUTO_WB_STRENGTH = 0.45
 LAB_PRINT_AUTO_WB_MAX_OFFSET = 0.04
 LAB_PRINT_COLOR_SEPARATION_STRENGTH = 0.45
 LAB_PRINT_AUTO_EXPOSURE_SAMPLE_LIMIT = 180_000
@@ -893,14 +893,10 @@ def estimate_lab_print_auto_cmy_offsets(
         return np.zeros(3, dtype=np.float32)
 
     median_log = np.median(sample, axis=0).astype(np.float32)
-    offsets = np.array(
-        [
-            0.0,
-            median_log[0] - median_log[1],
-            median_log[0] - median_log[2],
-        ],
-        dtype=np.float32,
-    )
+    # Use a zero-mean CMY correction instead of pinning red/cyan to zero.
+    # This lets all channels participate while preserving the average print
+    # exposure more than a one-channel reference offset would.
+    offsets = np.mean(median_log, dtype=np.float32) - median_log
     offsets *= float(np.clip(strength, 0.0, 1.0))
     return np.clip(offsets, -LAB_PRINT_AUTO_WB_MAX_OFFSET, LAB_PRINT_AUTO_WB_MAX_OFFSET).astype(np.float32, copy=False)
 
