@@ -2947,9 +2947,18 @@ class MainWindow(QMainWindow):
             self.image_states.update(restored)
         self._sync_sequence_position(path)
         self.filmstrip.set_files(self.folder_files, path)
+        self._restore_filmstrip_session_badges()
         if restored:
             self.statusBar().showMessage(
                 f"Loaded roll session: {len(restored)} saved images"
+            )
+
+    def _restore_filmstrip_session_badges(self) -> None:
+        for source_path in self.folder_files:
+            state = self.image_states.get(source_path)
+            self.filmstrip.set_processed_badge(
+                source_path,
+                bool(state is not None and state.negative_preview_active),
             )
 
     def _autosave_roll_session(self) -> None:

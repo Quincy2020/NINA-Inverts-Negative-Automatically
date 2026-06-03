@@ -77,8 +77,16 @@ class ThumbnailItem(QFrame):
         self.setToolTip("Positive preview generated")
         self.set_thumbnail(pixmap)
         self._processed = True
-        self.processed_badge.show()
-        self.processed_badge.raise_()
+        self.set_processed_badge(True)
+
+    def set_processed_badge(self, processed: bool) -> None:
+        if processed:
+            self.setToolTip("Positive preview generated")
+            self.processed_badge.show()
+            self.processed_badge.raise_()
+            return
+        self.setToolTip("")
+        self.processed_badge.hide()
 
     def has_processed_thumbnail(self) -> bool:
         return self._processed
@@ -209,6 +217,14 @@ class FolderFilmstrip(QWidget):
         if item is None:
             return
         item.set_processed_thumbnail(pixmap)
+
+    def set_processed_badge(self, path: Path | None, processed: bool) -> None:
+        if path is None:
+            return
+        item = self._items.get(path)
+        if item is None:
+            return
+        item.set_processed_badge(processed)
 
     def _clear_layout(self) -> None:
         while self.content_layout.count() > 1:
