@@ -73,6 +73,7 @@ from qnegative.core.pipeline import (
 from qnegative.core.pipeline import LOG_PRINT_CURVE_DIRECT, LOG_PRINT_CURVE_LUT_4096, LOG_PRINT_CURVE_LUT_8192
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview, make_raw_preview, resize_long_edge
 from qnegative.core.raw_loader import load_raw_rgb16
+from qnegative.core.session import load_roll_session, save_roll_session, session_path_for_folder
 from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.folder_filmstrip import FolderFilmstrip
 from qnegative.ui.gl_preview_view import OpenGLPreviewView
@@ -1103,6 +1104,8 @@ class MainWindow(QMainWindow):
         self._auto_frame_new_negatives = True
         self._auto_preinvert_nearby_frames = True
         self._auto_preinvert_radius = 1
+        self._roll_session_folder: Path | None = None
+        self._roll_session_autosave = True
 
         self.control_panel = ControlPanel()
         self.origin_view = ImageView()
@@ -1122,6 +1125,9 @@ class MainWindow(QMainWindow):
         self.filmstrip.hide()
         self.preview_refresh_timer = QTimer(self)
         self.preview_refresh_timer.setSingleShot(True)
+        self.roll_session_save_timer = QTimer(self)
+        self.roll_session_save_timer.setSingleShot(True)
+        self.roll_session_save_timer.setInterval(700)
         self.preview_refresh_timer.setInterval(FINAL_RENDER_DEBOUNCE_MS)
 
         self._build_layout()
@@ -1195,6 +1201,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(export_dir_action)
         file_menu.addSeparator()
 
+        save_session_action = QAction("Save Roll Session", self)
+        save_session_action.triggered.connect(self.save_roll_session_now)
+        file_menu.addAction(save_session_action)
+        file_menu.addSeparator()
+
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(QApplication.quit)
         file_menu.addAction(exit_action)
@@ -1240,6 +1251,12 @@ class MainWindow(QMainWindow):
         self.auto_preinvert_nearby_action.setChecked(True)
         self.auto_preinvert_nearby_action.toggled.connect(self.set_auto_preinvert_nearby_frames)
         settings_menu.addAction(self.auto_preinvert_nearby_action)
+
+        self.roll_session_autosave_action = QAction("Auto Save Roll Session", self)
+        self.roll_session_autosave_action.setCheckable(True)
+        self.roll_session_autosave_action.setChecked(True)
+        self.roll_session_autosave_action.toggled.connect(self.set_roll_session_autosave)
+        settings_menu.addAction(self.roll_session_autosave_action)
 
         preinvert_radius_menu = settings_menu.addMenu("Auto Pre-Invert Range")
         self.preinvert_radius_group = QActionGroup(self)
@@ -1358,6 +1375,7 @@ class MainWindow(QMainWindow):
         self.filmstrip.previousRequested.connect(self.go_previous_file)
         self.filmstrip.nextRequested.connect(self.go_next_file)
         self.preview_refresh_timer.timeout.connect(self.preview_refresh_timeout)
+        self.roll_session_save_timer.timeout.connect(self._save_current_state)
 
     def _build_shortcuts(self) -> None:
         tab_shortcut = QShortcut(QKeySequence(Qt.Key_Tab), self)
@@ -1395,6 +1413,11 @@ class MainWindow(QMainWindow):
             f"Auto pre-invert range: previous/next {self._auto_preinvert_radius}"
         )
         self._schedule_nearby_preinvert()
+
+    def set_roll_session_autosave(self, enabled: bool) -> None:
+        self._roll_session_autosave = bool(enabled)
+        status = "enabled" if self._roll_session_autosave else "disabled"
+        self.statusBar().showMessage(f"Roll session autosave {status}")
 
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1852,6 +1875,7 @@ class MainWindow(QMainWindow):
             )
         )
         if self._apply_gpu_display_adjustment(previous):
+            self._schedule_roll_session_save()
             return
         if self.negative_preview_active:
             if self._render_in_progress:
@@ -1862,6 +1886,7 @@ class MainWindow(QMainWindow):
                 else FINAL_RENDER_DEBOUNCE_MS
             )
             self.preview_refresh_timer.start()
+        self._schedule_roll_session_save()
 
     def _apply_gpu_display_adjustment(self, previous: AdjustmentParams) -> bool:
         del previous
@@ -1969,6 +1994,7 @@ class MainWindow(QMainWindow):
             if output.quality == INTERACTIVE_RENDER_QUALITY
             else "Inverted preview ready"
         )
+        self._schedule_roll_session_save()
 
     def _start_pending_preview_before_switch(self) -> None:
         if not self.preview_refresh_timer.isActive():
@@ -2008,6 +2034,7 @@ class MainWindow(QMainWindow):
             self._pixmap_from_rgb8(output.result.display_rgb8),
         )
         self.statusBar().showMessage(f"Background preview cached: {output.path.name}")
+        self._autosave_roll_session()
 
     def _preview_render_failed(self, job_id: int, message: str, show_errors: bool) -> None:
         if job_id != self._render_job_id:
@@ -2615,6 +2642,22 @@ class MainWindow(QMainWindow):
             preview_flip_vertical=self._preview_flip_vertical,
             preview_rotation_quarters=self._preview_rotation_quarters,
         )
+        self._autosave_roll_session()
+
+    def _schedule_roll_session_save(self) -> None:
+        if not self._roll_session_autosave:
+            return
+        if self.current_path is None:
+            return
+        self.roll_session_save_timer.start()
+
+    def save_roll_session_now(self) -> None:
+        if self.current_path is not None:
+            self._save_current_state()
+        elif self._roll_session_folder is None:
+            self.statusBar().showMessage("Open a folder before saving a roll session")
+            return
+        self._write_roll_session(show_status=True)
 
     def _restore_state_for_path(self, path: Path) -> bool:
         state = self.image_states.get(path)
@@ -2888,11 +2931,43 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Confirmed: {self.current_path.name}")
         self.go_next_file()
 
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.roll_session_save_timer.stop()
+        self._save_current_state()
+        super().closeEvent(event)
+
     def _set_folder_sequence(self, path: Path) -> None:
+        if self.current_path is not None:
+            self._save_current_state()
         self._preinvert_queue = []
         self.folder_files = list_supported_files(path.parent)
+        self._roll_session_folder = path.parent
+        restored = load_roll_session(path.parent, self.folder_files)
+        if restored:
+            self.image_states.update(restored)
         self._sync_sequence_position(path)
         self.filmstrip.set_files(self.folder_files, path)
+        if restored:
+            self.statusBar().showMessage(
+                f"Loaded roll session: {len(restored)} saved images"
+            )
+
+    def _autosave_roll_session(self) -> None:
+        if not self._roll_session_autosave:
+            return
+        self._write_roll_session(show_status=False)
+
+    def _write_roll_session(self, *, show_status: bool) -> None:
+        folder = self._roll_session_folder or (self.current_path.parent if self.current_path else None)
+        if folder is None:
+            return
+        try:
+            save_roll_session(folder, self.image_states, self.folder_files)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Roll session save failed: {exc}")
+            return
+        if show_status:
+            self.statusBar().showMessage(f"Saved roll session: {session_path_for_folder(folder)}")
 
     def _sync_sequence_position(self, path: Path) -> None:
         try:
