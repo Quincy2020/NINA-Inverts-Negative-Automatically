@@ -155,7 +155,7 @@ MainWindow 保留：
 - 中低。
 - 注意不要改 `_process_export()` 算法，只搬 task 和 helper。
 
-### Step 4: `ui/preview_cache.py`
+### Step 4: `ui/preview_cache.py` - done
 
 搬出内容：
 
@@ -193,7 +193,7 @@ MainWindow 保留：
 - 中。
 - cache key 是 preview 丢失和错图复用的关键，需要只搬不改。
 
-### Step 5: `ui/preview_tasks.py`
+### Step 5: `ui/preview_tasks.py` - done
 
 搬出内容：
 
