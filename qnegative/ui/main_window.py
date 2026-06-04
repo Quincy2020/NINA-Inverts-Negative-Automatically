@@ -8,12 +8,10 @@ from time import perf_counter
 
 import numpy as np
 from PySide6.QtCore import Qt, QThreadPool, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QImage, QPixmap
+from PySide6.QtGui import QAction, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
     QComboBox,
     QDialog,
-    QDockWidget,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -58,11 +56,9 @@ from qnegative.core.pipeline import (
     PipelineError,
     build_negative_base_preview,
     build_density_preview_analysis,
-    log_print_curve_engine,
     set_log_print_curve_engine,
     suggest_global_balance_from_neutral,
 )
-from qnegative.core.pipeline import LOG_PRINT_CURVE_DIRECT, LOG_PRINT_CURVE_LUT_4096, LOG_PRINT_CURVE_LUT_8192
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview
 from qnegative.core.session import load_roll_session, save_roll_session, session_path_for_folder
 from qnegative.ui.control_panel import ControlPanel
@@ -77,6 +73,7 @@ from qnegative.ui.export_tasks import (
 from qnegative.ui.folder_filmstrip import FolderFilmstrip
 from qnegative.ui.gl_preview_view import OpenGLPreviewView
 from qnegative.ui.image_view import ImageView
+from qnegative.ui.menus import build_main_menus
 from qnegative.ui.preview_cache import (
     CachedPreviewResult,
     CachedRawPreview,
@@ -206,7 +203,7 @@ class MainWindow(QMainWindow):
         self.preview_refresh_timer.setInterval(FINAL_RENDER_DEBOUNCE_MS)
 
         self._build_layout()
-        self._build_menus()
+        build_main_menus(self)
         self._connect()
         self._shortcuts = install_main_window_shortcuts(self)
         self._apply_style()
@@ -251,150 +248,6 @@ class MainWindow(QMainWindow):
         splitter.setSizes([420, 980])
 
         self.setCentralWidget(splitter)
-
-    def _build_menus(self) -> None:
-        file_menu = self.menuBar().addMenu("File")
-        open_action = QAction("Open RAW / TIFF...", self)
-        open_action.triggered.connect(self.open_file)
-        file_menu.addAction(open_action)
-
-        open_folder_action = QAction("Open Folder...", self)
-        open_folder_action.triggered.connect(self.open_folder)
-        file_menu.addAction(open_folder_action)
-        file_menu.addSeparator()
-
-        export_action = QAction("Export Image...", self)
-        export_action.triggered.connect(self.export_current)
-        file_menu.addAction(export_action)
-
-        export_completed_action = QAction("Export Completed Images...", self)
-        export_completed_action.triggered.connect(self.export_completed)
-        file_menu.addAction(export_completed_action)
-
-        export_dir_action = QAction("Set Default Export Directory...", self)
-        export_dir_action.triggered.connect(self.set_default_export_directory)
-        file_menu.addAction(export_dir_action)
-        file_menu.addSeparator()
-
-        save_session_action = QAction("Save Roll Session", self)
-        save_session_action.triggered.connect(self.save_roll_session_now)
-        file_menu.addAction(save_session_action)
-        file_menu.addSeparator()
-
-        exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(QApplication.quit)
-        file_menu.addAction(exit_action)
-
-        edit_menu = self.menuBar().addMenu("Edit")
-        invert_action = QAction("Invert Preview", self)
-        invert_action.triggered.connect(self.preview_inversion)
-        edit_menu.addAction(invert_action)
-
-        reset_action = QAction("Reset Current Image", self)
-        reset_action.triggered.connect(self.reset_workspace)
-        edit_menu.addAction(reset_action)
-
-        view_menu = self.menuBar().addMenu("View")
-        origin_action = QAction("Origin", self)
-        origin_action.triggered.connect(lambda: self.preview_tabs.setCurrentWidget(self.origin_view))
-        view_menu.addAction(origin_action)
-        preview_action = QAction("Preview", self)
-        preview_action.triggered.connect(lambda: self.preview_tabs.setCurrentWidget(self.preview_view))
-        view_menu.addAction(preview_action)
-
-        settings_menu = self.menuBar().addMenu("Settings")
-        self.gpu_preview_action = QAction("GPU Preview Acceleration", self)
-        self.gpu_preview_action.setCheckable(True)
-        self.gpu_preview_action.setChecked(True)
-        self.gpu_preview_action.toggled.connect(self.set_gpu_preview_enabled)
-        settings_menu.addAction(self.gpu_preview_action)
-
-        self.auto_invert_after_frame_action = QAction("Auto Invert After Frame Change", self)
-        self.auto_invert_after_frame_action.setCheckable(True)
-        self.auto_invert_after_frame_action.setChecked(True)
-        self.auto_invert_after_frame_action.toggled.connect(self.set_auto_invert_after_frame_change)
-        settings_menu.addAction(self.auto_invert_after_frame_action)
-
-        self.auto_frame_new_negatives_action = QAction("Auto Frame New Negatives", self)
-        self.auto_frame_new_negatives_action.setCheckable(True)
-        self.auto_frame_new_negatives_action.setChecked(True)
-        self.auto_frame_new_negatives_action.toggled.connect(self.set_auto_frame_new_negatives)
-        settings_menu.addAction(self.auto_frame_new_negatives_action)
-
-        self.auto_preinvert_nearby_action = QAction("Auto Pre-Invert Nearby Frames", self)
-        self.auto_preinvert_nearby_action.setCheckable(True)
-        self.auto_preinvert_nearby_action.setChecked(True)
-        self.auto_preinvert_nearby_action.toggled.connect(self.set_auto_preinvert_nearby_frames)
-        settings_menu.addAction(self.auto_preinvert_nearby_action)
-
-        self.roll_session_autosave_action = QAction("Auto Save Roll Session", self)
-        self.roll_session_autosave_action.setCheckable(True)
-        self.roll_session_autosave_action.setChecked(True)
-        self.roll_session_autosave_action.toggled.connect(self.set_roll_session_autosave)
-        settings_menu.addAction(self.roll_session_autosave_action)
-
-        preinvert_radius_menu = settings_menu.addMenu("Auto Pre-Invert Range")
-        self.preinvert_radius_group = QActionGroup(self)
-        self.preinvert_radius_group.setExclusive(True)
-        for radius in (1, 2, 3, 5):
-            action = QAction(f"Previous/Next {radius}", self)
-            action.setCheckable(True)
-            action.setData(radius)
-            action.setChecked(radius == self._auto_preinvert_radius)
-            self.preinvert_radius_group.addAction(action)
-            preinvert_radius_menu.addAction(action)
-        self.preinvert_radius_group.triggered.connect(self.set_auto_preinvert_radius)
-        settings_menu.addSeparator()
-
-        developer_menu = settings_menu.addMenu("Developer")
-
-        self.density_matrix_dock = QDockWidget("Density Matrix", self)
-        self.density_matrix_dock.setObjectName("densityMatrixDock")
-        self.density_matrix_dock.setWidget(self.control_panel.density_matrix_panel)
-        self.density_matrix_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.density_matrix_dock)
-        self.density_matrix_dock.hide()
-
-        density_action = QAction("Density Matrix", self)
-        density_action.setCheckable(True)
-        density_action.toggled.connect(self.density_matrix_dock.setVisible)
-        self.density_matrix_dock.visibilityChanged.connect(density_action.setChecked)
-        developer_menu.addAction(density_action)
-
-        self.camera_color_dock = QDockWidget("Camera Color", self)
-        self.camera_color_dock.setObjectName("cameraColorDock")
-        self.camera_color_dock.setWidget(self.control_panel.camera_color_panel)
-        self.camera_color_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.camera_color_dock)
-        self.camera_color_dock.hide()
-
-        camera_color_action = QAction("Camera Color", self)
-        camera_color_action.setCheckable(True)
-        camera_color_action.toggled.connect(self.camera_color_dock.setVisible)
-        self.camera_color_dock.visibilityChanged.connect(camera_color_action.setChecked)
-        developer_menu.addAction(camera_color_action)
-
-        base_picker_action = QAction("Base Picker Tool", self)
-        base_picker_action.triggered.connect(lambda: self.set_tool_mode(ToolMode.MASK_PICKER))
-        developer_menu.addAction(base_picker_action)
-
-        developer_menu.addSeparator()
-        export_advanced_menu = developer_menu.addMenu("Export Advanced")
-        print_curve_menu = export_advanced_menu.addMenu("Print Curve Engine")
-        self.print_curve_engine_group = QActionGroup(self)
-        self.print_curve_engine_group.setExclusive(True)
-        for label, engine in (
-            ("LUT 8192", LOG_PRINT_CURVE_LUT_8192),
-            ("LUT 4096", LOG_PRINT_CURVE_LUT_4096),
-            ("Direct Reference", LOG_PRINT_CURVE_DIRECT),
-        ):
-            action = QAction(label, self)
-            action.setCheckable(True)
-            action.setData(engine)
-            action.setChecked(engine == log_print_curve_engine())
-            self.print_curve_engine_group.addAction(action)
-            print_curve_menu.addAction(action)
-        self.print_curve_engine_group.triggered.connect(self.set_print_curve_engine)
 
     def set_print_curve_engine(self, action: QAction) -> None:
         engine = str(action.data())

@@ -232,7 +232,7 @@ MainWindow 保留：
 - 这里最容易碰到 stale job、job_id、缓存归属问题。
 - 必须保留当前 job_id 检查逻辑。
 
-### Step 6: `ui/menus.py`
+### Step 6: `ui/menus.py` - done
 
 搬出内容：
 
