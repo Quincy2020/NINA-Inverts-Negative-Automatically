@@ -105,6 +105,13 @@ PREVIEW_RESULT_CACHE_LIMIT = 16
 RAW_PREVIEW_CACHE_LIMIT = 16
 
 
+def invert_mode_label(mode: str) -> str:
+    labels = {
+        InvertMode.LAB_PRINT.value: "Lab Print",
+    }
+    return labels.get(mode, mode)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
