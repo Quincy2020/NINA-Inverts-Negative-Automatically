@@ -84,7 +84,7 @@ self._shortcuts = install_main_window_shortcuts(self)
 - 低。
 - 这是最适合第一步做的拆分。
 
-### Step 2: `ui/export_dialogs.py`
+### Step 2: `ui/export_dialogs.py` - done
 
 搬出内容：
 
