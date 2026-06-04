@@ -108,7 +108,7 @@ MainWindow 保留：
 - 低。
 - 基本是纯 UI 搬家。
 
-### Step 3: `ui/export_tasks.py`
+### Step 3: `ui/export_tasks.py` - done
 
 搬出内容：
 
