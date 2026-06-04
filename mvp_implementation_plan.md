@@ -1,8 +1,8 @@
-# QNegativeLab MVP 实现流程
+# NINA MVP 实现流程
 
 ## 1. MVP 核心目标
 
-QNegativeLab 的 MVP 不是先做一个孤立的命令行算法，而是先做一个能真实辅助判断的可视化负片反转工作台。
+NINA 的 MVP 不是先做一个孤立的命令行算法，而是先做一个能真实辅助判断的可视化负片反转工作台。
 
 第一版最重要的闭环：
 
@@ -258,13 +258,14 @@ RAW 线性读取
 
 先支持：
 
-1. 16-bit TIFF。
-2. 高质量 JPEG。
+1. TIFF 16-bit / 8-bit。
+2. PNG 16-bit / 8-bit。
+3. JPEG 8-bit。
 
 完成标准：
 
 - 导出图与预览色彩趋势一致。
-- TIFF 可以被常见图像软件打开。
+- TIFF / PNG / JPEG 可以被常见图像软件打开。
 - 导出时有忙碌状态或进度提示。
 
 ### 阶段 7：自动辅助
@@ -326,7 +327,7 @@ highlight的滑块会导致某个点开始反向
 
 ## 9. 当前实现状态
 
-截至 `28f071b Improve export path and GPU preview layer`，MVP 主流程已经基本成型。
+截至 2026-06-04，MVP 主流程已经基本成型。当前方向从“继续堆功能”转为“收敛旧分支、提高代码可维护性、稳定快捷键和预览状态”。
 
 ### 已实现
 
@@ -335,12 +336,13 @@ highlight的滑块会导致某个点开始反向
 - [x] RAW/ARW 读取与线性预览链路。
 - [x] 普通图片/RAW 文件打开入口。
 - [x] 文件夹序列读取、底部胶片条、左右切换同文件夹图片。
-- [x] 片基点选工具。
+- [x] 片基点选工具保留为开发/高级工具；默认 Lab Print 工作流不再强制依赖片基点。
 - [x] 可旋转底片区域框选，支持拖动、缩放边、旋转角、右键重置。
 - [x] 旋转框接入 pipeline，支持 warp 裁切。
 - [x] 每张图片单独缓存处理状态，切图后参数不会互相污染。
 - [x] 反转预览入口和自动触发预览。
-- [x] Lab Print 反转模型：RAW linear / camera-WB raw -> density/log control -> levels -> print curve -> color/WB -> display。
+- [x] Lab Print 反转模型：RAW linear / camera-WB raw -> Lab Print base -> levels -> print curve -> color/WB -> display。
+- [x] 用户可见 InvertMode 收敛为 Lab Print only；Density / Log Bounds / Simple 从 UI 和启动入口隐藏，后续逐步删除无用代码。
 - [x] 直方图黑点、白点、中性点滑块。
 - [x] 自动黑白中性点。
 - [x] 自动白平衡与手动白平衡控制。
@@ -353,19 +355,59 @@ highlight的滑块会导致某个点开始反向
 - [x] 分段 preview cache：negative / levels / color / display。
 - [x] 拖动策略：拖动中低分辨率交互预览，松手后最终预览。
 - [x] 2K OpenGL Preview Display Layer。
-- [x] 16-bit TIFF 导出。
+- [x] TIFF/JPEG/PNG 导出，支持 TIFF 16-bit/8-bit、PNG 16-bit/8-bit、JPEG 8-bit。
 - [x] Export 进度条。
+- [x] 批量导出队列窗口、暂停/继续/取消。
 - [x] Export 快路径：跳过不必要的 display transform，Lab Print 导出走分段处理，导出专用 linear result。
+- [x] 文件夹级 roll session 缓存，每张图保存 frame、调整参数、CMY auto WB offset、预览状态等。
+- [x] Lens Correction 初版：Radial correction、Flat-frame profile、强度控制、Apply All / Unprocessed / Completed。
+- [x] NINA 品牌 UI：深色/琥珀色系、Banner、启动 splash。
 
 ### MVP 仍需完成或确认
 
-- [ ] 高质量 JPEG 导出。
 - [ ] Vibrance 滑块。
 - [ ] 更温和、可解释的 contrast 曲线，避免线性后期 contrast 过暴力。
 - [ ] Auto WB 继续优化：避开暗部、高光、大面积蓝黑区域，优先中间亮度低饱和候选。
 - [ ] 自动亮度/自动 levels 继续调教，尤其是黑点 buffer、视觉中灰和 print curve 后的目标亮度。
 - [ ] 色彩 preset / 胶片 look 的 MVP 级保存与载入。
 - [ ] 最终导出与预览色彩趋势再做更多样片校验。
+
+### 当前维护方向
+
+详细拆分步骤见 `architecture_refactor_plan.md`。这里保留方向性摘要。
+
+- [ ] 拆分 `qnegative/ui/main_window.py`：
+  - export dialogs / export workers；
+  - preview render workers；
+  - session/state controller；
+  - shortcut registration；
+  - menu/options setup。
+- [ ] 保持 ControlPanel 高内聚：
+  - Basic / White Balance / Lens Correction / Output 各自面板化；
+  - 参数只向外发结构化 values，不直接操纵 MainWindow 状态。
+- [ ] 快捷键改用窗口级 `QShortcut`，减少焦点落在控件/画布/filmstrip 时快捷键失效。
+- [ ] 逐步删除 Density / Log Bounds / Simple 的 UI、菜单、启动参数和无用分支；核心 pipeline 内部代码可等 Lab Print 稳定后再安全移除。
+- [ ] 排查偶发 preview 丢失：切图、自动框线、后台预反转、缓存恢复之间需要更清晰的状态机。
+
+### 未来方向
+
+1. 暗角 / Lens Correction
+   - Flat-frame profile 需要继续优化，目标接近 Lightroom 的平滑校正效果。
+   - 重点处理边缘低对比度、高噪点、强度感不稳定的问题。
+   - 研究 raw black level、per-channel shading map、gain cap、blur radius、中心/边缘归一化策略。
+2. 高光调整
+   - 当前高光滑块仍需要确认是否真正恢复/压缩高光，而不是简单改变白色区域灰度。
+3. 曲线调节
+   - 增加用户可控的 curve smoothing。
+   - 可以分别 smooth 右半部分高光 roll-off 和左半部分阴影 toe。
+4. 色彩调节
+   - 增加更完整的 saturation / vibrance / color balance / preset 保存。
+   - 继续调教 Auto WB 和 CMY 自动偏移。
+5. 自动框线
+   - 当前自动框线仍会被翻拍台、相邻底片、复杂边缘干扰。
+   - 继续优化中心发散、边缘候选、format 先验和轻量 ranker。
+6. Preview 稳定性
+   - 仍存在偶发 preview 丢失或状态恢复不完整，需要作为架构清理的一部分处理。
 
 ### 后续 Export 优化记录
 
@@ -403,11 +445,11 @@ Base:
   - `qnegative/core/pipeline.py::build_negative_base_preview()` 在 `mask_point is None` 时使用 `[1.0, 1.0, 1.0]` 作为占位 base。
   - 这个 fallback 只应该视为“无片基占位”，不是实际采样到的片基。
   - UI 状态会显示 `Base fallback: none`，避免误认为已经采样到片基 RGB。
-- [x] 非 Lab Print 模式继续要求片基。
-  - `Density`、`Simple`、`Log Bounds` 仍然依赖 `raw / base` 或类似逻辑，所以 UI 会阻止无片基预览/导出。
-  - 维护时不要把这个限制去掉，除非这些模式也设计了独立的无片基算法。
-- [x] Lab Print TIFF 导出也允许无片基。
-  - 导出检查逻辑与预览一致：Lab Print 只要求有效 frame；其他模式仍要求 frame + base。
+- [x] 用户可见工作流收敛为 Lab Print only。
+  - `Density`、`Simple`、`Log Bounds` 不再作为用户可选模式出现。
+  - 旧模式代码如仍存在，只视为待清理的历史实现，不应继续接入 UI 或默认流程。
+- [x] Lab Print 导出也允许无片基。
+  - 导出检查逻辑与预览一致：只要求有效 frame。
 - [x] 新增 `qnegative/core/frame_ranker.py`。
   - 作用：加载轻量 frame ranker 模型，为自动框线提供候选排序。
   - 默认模型搜索顺序：
@@ -509,16 +551,13 @@ Lab Print:
   frame 有效即可预览/导出
   mask_point 可选
   无 mask_point 时显示 Base fallback: none
-
-Density / Simple / Log Bounds:
-  frame + mask_point 必须存在
 ```
 
 原因：
 
 - 当前默认 Lab Print 主要依据 frame 内部的 log bounds、levels、print curve 和 WB 流程工作。
 - 它本身已有 `LAB_PRINT_ANALYSIS_INSET = 0.05`，会在分析黑白中性点时避开裁切边缘 5%，降低边框/片基污染直方图的概率。
-- Density/Simple 仍然更接近 `raw / base` 模型，无片基会改变算法语义。
+- Density / Simple / Log Bounds 已经从用户可见工作流隐藏；未来应逐步删除，而不是继续维护它们的片基分支。
 
 未来自动片基 scorer 建议：
 
@@ -536,7 +575,7 @@ Density / Simple / Log Bounds:
    - 多个候选 patch 的 RGB 中位数一致。
 5. 如果找不到可信片基：
    - Lab Print：继续使用无片基 fallback。
-   - 其他模式：提示用户手动点选片基。
+   - UI 文案继续区分 `Base fallback: none` 和真实 `Base RGB ...`。
 
 ### 自动框线后续维护建议
 

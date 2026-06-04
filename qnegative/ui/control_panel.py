@@ -53,7 +53,6 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("controlPanel")
         self.setMinimumWidth(340)
-        self._developer_invert_mode: str | None = None
         self._slider_value_labels: dict[QSlider, QLabel] = {}
 
         self.file_label = QLabel("No file open")
@@ -83,9 +82,6 @@ class ControlPanel(QWidget):
         self.invert_button = QPushButton("Invert Preview")
         self.invert_button.setEnabled(False)
         self.reset_button = QPushButton("Reset")
-        self.invert_mode_combo = QComboBox()
-        self.invert_mode_combo.addItem("Lab Print", InvertMode.LAB_PRINT.value)
-        self.invert_mode_combo.addItem("Log Bounds", InvertMode.LOG_BOUNDS.value)
         self.print_curve_combo = QComboBox()
         self.print_curve_combo.addItem("Linear", PrintCurveMode.LINEAR.value)
         self.print_curve_combo.addItem("Soft Print", PrintCurveMode.SOFT.value)
@@ -93,7 +89,6 @@ class ControlPanel(QWidget):
         self.print_curve_combo.addItem("Contrast Print", PrintCurveMode.CONTRAST.value)
         self.print_curve_combo.setCurrentIndex(2)
         self.print_curve_widget = PrintCurveWidget()
-        self._style_combo_popup(self.invert_mode_combo)
         self._style_combo_popup(self.print_curve_combo)
 
         self.tool_group = QButtonGroup(self)
@@ -214,12 +209,6 @@ class ControlPanel(QWidget):
         format_row.addWidget(QLabel("Format"))
         format_row.addWidget(self.auto_format_combo, 1)
         layout.addLayout(format_row)
-
-        mode_row = QHBoxLayout()
-        mode_label = QLabel("Invert Model")
-        mode_row.addWidget(mode_label)
-        mode_row.addWidget(self.invert_mode_combo, 1)
-        layout.addLayout(mode_row)
 
         return group
 
@@ -405,7 +394,6 @@ class ControlPanel(QWidget):
         self.reset_button.clicked.connect(self.resetRequested.emit)
         self.auto_frame_button.clicked.connect(lambda: self.autoDetectRequested.emit("frame_base"))
         self.tool_group.idClicked.connect(self._emit_tool_mode)
-        self.invert_mode_combo.currentIndexChanged.connect(self._invert_mode_combo_changed)
         self.print_curve_combo.currentIndexChanged.connect(self._print_curve_changed)
 
         for slider in (
@@ -510,7 +498,7 @@ class ControlPanel(QWidget):
                     flat_strength=self.lens_flat_strength_slider.value(),
                 ),
                 "analysis_inset_percent": self.analysis_inset_spin.value(),
-                "invert_mode": self._current_invert_mode(),
+                "invert_mode": InvertMode.LAB_PRINT.value,
                 "print_curve": self.print_curve_combo.currentData(),
                 **self.histogram_levels.levels(),
                 **self.density_matrix_panel.values(),
@@ -521,15 +509,6 @@ class ControlPanel(QWidget):
     def _print_curve_changed(self) -> None:
         self.print_curve_widget.set_curve_mode(self.print_curve_combo.currentData())
         self._emit_adjustments()
-
-    def _invert_mode_combo_changed(self) -> None:
-        self._developer_invert_mode = None
-        self._emit_adjustments()
-
-    def _current_invert_mode(self) -> str:
-        if self._developer_invert_mode is not None:
-            return self._developer_invert_mode
-        return str(self.invert_mode_combo.currentData() or InvertMode.LAB_PRINT.value)
 
     def _make_slider(self, minimum: int, maximum: int, value: int) -> QSlider:
         slider = QSlider(Qt.Horizontal)
@@ -699,7 +678,6 @@ class ControlPanel(QWidget):
             self.histogram_levels,
             self.density_matrix_panel,
             self.white_balance_panel,
-            self.invert_mode_combo,
             self.print_curve_combo,
         )
         for widget in widgets:
@@ -734,9 +712,6 @@ class ControlPanel(QWidget):
                 lens_mode == "flat_frame" and bool(self._flat_profile_path)
             )
             self.analysis_inset_spin.setValue(adjustments.analysis_inset_percent)
-            index = self.invert_mode_combo.findData(adjustments.invert_mode)
-            self._developer_invert_mode = adjustments.invert_mode if index < 0 else None
-            self.invert_mode_combo.setCurrentIndex(0 if index < 0 else index)
             curve_index = self.print_curve_combo.findData(adjustments.print_curve)
             self.print_curve_combo.setCurrentIndex(2 if curve_index < 0 else curve_index)
             self.print_curve_widget.set_curve_mode(self.print_curve_combo.currentData())

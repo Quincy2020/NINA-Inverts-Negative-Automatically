@@ -13,6 +13,7 @@ from qnegative.core.models import (
     ImagePoint,
     ImageProcessingState,
     ImageRect,
+    InvertMode,
     LensCorrectionParams,
     TonalBalance,
 )
@@ -163,6 +164,7 @@ def _float_list_from_payload(payload: Any, *, length: int) -> list[float] | None
 def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     allowed = {item.name for item in fields(AdjustmentParams)}
     values = {key: payload[key] for key in payload if key in allowed}
+    values["invert_mode"] = InvertMode.LAB_PRINT.value
     values["color_balance"] = _color_balance_from_dict(payload.get("color_balance") or {})
     values["density_matrix"] = _density_matrix_from_dict(payload.get("density_matrix") or {})
     values["lens_correction"] = _lens_correction_from_dict(payload.get("lens_correction") or {})

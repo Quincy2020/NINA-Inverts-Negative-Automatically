@@ -8,7 +8,6 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QProgressBar, QSplashScreen
 
-from qnegative.core.models import InvertMode
 from qnegative.resources import resource_path
 
 
@@ -50,18 +49,7 @@ def _create_splash() -> tuple[QSplashScreen, QProgressBar]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="NINA - NINA Inverts Negative Automatically")
-    parser.add_argument(
-        "--invert-mode",
-        choices=[
-            InvertMode.DENSITY.value,
-            InvertMode.LAB_PRINT.value,
-            InvertMode.LOG_BOUNDS.value,
-            InvertMode.SIMPLE.value,
-        ],
-        default=InvertMode.LAB_PRINT.value,
-        help="Default inversion model for new images.",
-    )
-    args, qt_args = parser.parse_known_args(sys.argv[1:])
+    _, qt_args = parser.parse_known_args(sys.argv[1:])
 
     app = QApplication([sys.argv[0], *qt_args])
     app.setApplicationName("NINA")
@@ -82,7 +70,7 @@ def main() -> int:
     splash_bar.setValue(70)
     splash.showMessage("Building main window...", Qt.AlignBottom | Qt.AlignHCenter, QColor("#D8D0C2"))
     app.processEvents()
-    window = MainWindow(default_invert_mode=args.invert_mode)
+    window = MainWindow()
     window.resize(1320, 860)
     splash_bar.setValue(95)
     splash.showMessage("Ready", Qt.AlignBottom | Qt.AlignHCenter, QColor("#D8D0C2"))

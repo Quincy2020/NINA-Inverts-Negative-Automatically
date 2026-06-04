@@ -8,7 +8,7 @@ from time import perf_counter
 
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -79,7 +79,6 @@ from qnegative.core.pipeline import (
     build_negative_base_preview,
     build_density_preview_analysis,
     log_print_curve_engine,
-    process_negative_base_preview,
     analysis_inset_from_adjustments,
     analysis_inset_crop,
     set_log_print_curve_engine,
@@ -94,6 +93,7 @@ from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.folder_filmstrip import FolderFilmstrip
 from qnegative.ui.gl_preview_view import OpenGLPreviewView
 from qnegative.ui.image_view import ImageView
+from qnegative.ui.shortcuts import install_main_window_shortcuts
 
 
 class PreviewRenderSignals(QObject):
@@ -739,9 +739,7 @@ def preview_result_cache_key_for(
         image_point_key(mask_point),
         image_rect_key(film_rect),
         adjustments_preview_cache_key(adjustments),
-        lab_print_engine_key()
-        if adjustments.invert_mode in {InvertMode.LAB_PRINT.value, InvertMode.LOG_BOUNDS.value}
-        else None,
+        lab_print_engine_key(),
         cmy_offsets_key(lab_print_cmy_offsets) if adjustments.auto_wb else None,
     )
 
@@ -835,9 +833,6 @@ def lab_print_display_key(color_key: tuple, adjustments: AdjustmentParams) -> tu
 def invert_mode_label(mode: str) -> str:
     labels = {
         InvertMode.LAB_PRINT.value: "Lab Print",
-        InvertMode.DENSITY.value: "Density",
-        InvertMode.LOG_BOUNDS.value: "Log Bounds",
-        InvertMode.SIMPLE.value: "Simple",
     }
     return labels.get(mode, mode)
 
@@ -1080,22 +1075,7 @@ class PreviewRenderTask(QRunnable):
         try:
             base_key = base_stage_key(self.preview, self.mask_point, self.film_rect, self.adjustments)
             base = self._base_stage(base_key)
-            if self.adjustments.invert_mode == InvertMode.LAB_PRINT.value:
-                output = self._lab_print_output(base_key, base)
-            else:
-                result = process_negative_base_preview(base, self.adjustments)
-                output = PreviewRenderOutput(
-                    path=self.preview.path,
-                    result=result,
-                    cache=PreviewStageCache(base_key=base_key, base=base),
-                    quality=self.quality,
-                    cache_key=self._result_cache_key(self.adjustments),
-                    mask_point=self.mask_point,
-                    film_rect=self.film_rect,
-                    adjustments=deepcopy(self.adjustments),
-                    lab_print_cmy_offsets=None,
-                    applied_auto_levels=False,
-                )
+            output = self._lab_print_output(base_key, base)
         except Exception as exc:
             self.signals.failed.emit(self.job_id, str(exc), self.show_errors)
             return
@@ -1368,16 +1348,6 @@ class TiffExportTask(QRunnable):
         return f"{current} ({elapsed})"
 
     def _process_export(self, base: NegativeBasePreview) -> np.ndarray:
-        if self.adjustments.invert_mode != InvertMode.LAB_PRINT.value:
-            result = process_negative_base_preview(base, self.adjustments)
-            if self.auto_levels_pending:
-                adjusted = deepcopy(self.adjustments)
-                adjusted.black_point = result.auto_levels["black_point"]
-                adjusted.mid_point = result.auto_levels["mid_point"]
-                adjusted.white_point = result.auto_levels["white_point"]
-                result = process_negative_base_preview(base, adjusted)
-            return result.processed_linear_rgb
-
         negative_stage = build_lab_print_negative_stage(
             base,
             include_histogram=False,
@@ -1516,10 +1486,9 @@ def _cmy_offsets_to_state(offsets: np.ndarray | list[float] | None) -> list[floa
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, *, default_invert_mode: str = InvertMode.LAB_PRINT.value) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("NINA")
-        self.default_invert_mode = default_invert_mode
         self.current_path: Path | None = None
         self.current_preview: RawPreview | None = None
         self.folder_files: list[Path] = []
@@ -1616,7 +1585,7 @@ class MainWindow(QMainWindow):
         self._build_layout()
         self._build_menus()
         self._connect()
-        self._build_shortcuts()
+        self._shortcuts = install_main_window_shortcuts(self)
         self._apply_style()
         self.control_panel.set_adjustments(self.adjustments, emit=False)
         self.set_tool_mode(ToolMode.FILM_RECT)
@@ -1782,15 +1751,6 @@ class MainWindow(QMainWindow):
         self.camera_color_dock.visibilityChanged.connect(camera_color_action.setChecked)
         developer_menu.addAction(camera_color_action)
 
-        developer_menu.addSeparator()
-        density_mode_action = QAction("Use Density Mode", self)
-        density_mode_action.triggered.connect(lambda: self._set_developer_invert_mode(InvertMode.DENSITY.value))
-        developer_menu.addAction(density_mode_action)
-
-        simple_mode_action = QAction("Use Simple Mode", self)
-        simple_mode_action.triggered.connect(lambda: self._set_developer_invert_mode(InvertMode.SIMPLE.value))
-        developer_menu.addAction(simple_mode_action)
-
         base_picker_action = QAction("Base Picker Tool", self)
         base_picker_action.triggered.connect(lambda: self.set_tool_mode(ToolMode.MASK_PICKER))
         developer_menu.addAction(base_picker_action)
@@ -1812,12 +1772,6 @@ class MainWindow(QMainWindow):
             self.print_curve_engine_group.addAction(action)
             print_curve_menu.addAction(action)
         self.print_curve_engine_group.triggered.connect(self.set_print_curve_engine)
-
-    def _set_developer_invert_mode(self, mode: str) -> None:
-        updated = deepcopy(self.adjustments)
-        updated.invert_mode = mode
-        self.control_panel.set_adjustments(updated, emit=True)
-        self.statusBar().showMessage(f"Developer invert mode: {invert_mode_label(mode)}")
 
     def set_print_curve_engine(self, action: QAction) -> None:
         engine = str(action.data())
@@ -1869,33 +1823,6 @@ class MainWindow(QMainWindow):
         self.filmstrip.nextRequested.connect(self.go_next_file)
         self.preview_refresh_timer.timeout.connect(self.preview_refresh_timeout)
         self.roll_session_save_timer.timeout.connect(self._save_current_state)
-
-    def _build_shortcuts(self) -> None:
-        self._shortcuts: list[QShortcut] = []
-
-        tab_shortcut = QShortcut(QKeySequence(Qt.Key_Tab), self)
-        tab_shortcut.activated.connect(self.toggle_preview_tab)
-        self._shortcuts.append(tab_shortcut)
-
-        invert_shortcut = QShortcut(QKeySequence(Qt.Key_I), self)
-        invert_shortcut.activated.connect(self.preview_inversion)
-        self._shortcuts.append(invert_shortcut)
-
-        auto_frame_shortcut = QShortcut(QKeySequence(Qt.Key_K), self)
-        auto_frame_shortcut.activated.connect(lambda: self.auto_detect_current("frame_base"))
-        self._shortcuts.append(auto_frame_shortcut)
-
-        undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
-        undo_shortcut.activated.connect(self.undo_adjustments)
-        self._shortcuts.append(undo_shortcut)
-
-        redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
-        redo_shortcut.activated.connect(self.redo_adjustments)
-        self._shortcuts.append(redo_shortcut)
-
-        redo_shift_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
-        redo_shift_shortcut.activated.connect(self.redo_adjustments)
-        self._shortcuts.append(redo_shift_shortcut)
 
     def set_gpu_preview_enabled(self, enabled: bool) -> None:
         self._gpu_preview_enabled = bool(enabled)
@@ -2551,6 +2478,7 @@ class MainWindow(QMainWindow):
 
     def adjustments_changed(self, values: dict) -> None:
         previous = self.adjustments
+        values["invert_mode"] = InvertMode.LAB_PRINT.value
         self.adjustments = AdjustmentParams(**values)
         if not self._applying_history and previous != self.adjustments:
             self._undo_stack.append(deepcopy(previous))
@@ -2816,7 +2744,7 @@ class MainWindow(QMainWindow):
         self.preview_refresh_timer.start()
 
     def _film_base_required_for_current_mode(self) -> bool:
-        return self.adjustments.invert_mode != InvertMode.LAB_PRINT.value
+        return False
 
     def _preview_for_render(self, *, interactive: bool) -> RawPreview:
         if self.current_preview is None:
@@ -2984,12 +2912,7 @@ class MainWindow(QMainWindow):
             mask_rgb = ", ".join(f"{value:.4f}" for value in result.mask_rgb)
             base_text = f"Base RGB {mask_rgb}"
         wb_gains = ", ".join(f"{value:.3f}" for value in displayed_result.wb_gains)
-        wb_label = (
-            "WB CMY offset"
-            if self.adjustments.invert_mode
-            in (InvertMode.LOG_BOUNDS.value, InvertMode.LAB_PRINT.value)
-            else "WB gain"
-        )
+        wb_label = "WB CMY offset"
         self.control_panel.set_image_status(
             f"Positive preview {displayed_result.width} x {displayed_result.height}\n"
             f"Mode {invert_mode_label(self.adjustments.invert_mode)}\n"
@@ -3278,7 +3201,7 @@ class MainWindow(QMainWindow):
         return path.with_name(f"{stem}_{int(perf_counter() * 1000)}{suffix}")
 
     def _preview_cmy_offsets_for_path(self, path: Path, state: ImageProcessingState) -> np.ndarray | None:
-        if state.adjustments.invert_mode != InvertMode.LAB_PRINT.value or not state.adjustments.auto_wb:
+        if not state.adjustments.auto_wb:
             return None
         if state.lab_print_cmy_offsets is not None:
             return np.asarray(state.lab_print_cmy_offsets, dtype=np.float32).copy()
@@ -3393,7 +3316,7 @@ class MainWindow(QMainWindow):
     def _current_preview_cmy_offsets_for_export(self) -> np.ndarray | None:
         if self.current_path is None:
             return None
-        if self.adjustments.invert_mode != InvertMode.LAB_PRINT.value or not self.adjustments.auto_wb:
+        if not self.adjustments.auto_wb:
             return None
         if self.auto_levels_pending:
             return None
@@ -3570,9 +3493,7 @@ class MainWindow(QMainWindow):
             white_balance_point=self.white_balance_point,
             adjustments=deepcopy(self.adjustments),
             lab_print_cmy_offsets=(
-                deepcopy(self.lab_print_cmy_offsets)
-                if self.adjustments.invert_mode == InvertMode.LAB_PRINT.value and self.adjustments.auto_wb
-                else None
+                deepcopy(self.lab_print_cmy_offsets) if self.adjustments.auto_wb else None
             ),
             negative_preview_active=self.negative_preview_active,
             auto_levels_pending=self.auto_levels_pending,
@@ -3619,11 +3540,9 @@ class MainWindow(QMainWindow):
         self.film_rect = state.film_rect
         self.white_balance_point = state.white_balance_point
         self.lab_print_cmy_offsets = (
-            deepcopy(state.lab_print_cmy_offsets)
-            if state.adjustments.invert_mode == InvertMode.LAB_PRINT.value and state.adjustments.auto_wb
-            else None
+            deepcopy(state.lab_print_cmy_offsets) if state.adjustments.auto_wb else None
         )
-        self.adjustments = deepcopy(state.adjustments)
+        self.adjustments = self._lab_print_adjustments(state.adjustments)
         self.negative_preview_active = False
         self.auto_levels_pending = state.auto_levels_pending
         self._preview_flip_horizontal = state.preview_flip_horizontal
@@ -3798,7 +3717,13 @@ class MainWindow(QMainWindow):
         return None
 
     def _default_adjustments(self) -> AdjustmentParams:
-        return AdjustmentParams(invert_mode=self.default_invert_mode)
+        return AdjustmentParams(invert_mode=InvertMode.LAB_PRINT.value)
+
+    @staticmethod
+    def _lab_print_adjustments(adjustments: AdjustmentParams) -> AdjustmentParams:
+        normalized = deepcopy(adjustments)
+        normalized.invert_mode = InvertMode.LAB_PRINT.value
+        return normalized
 
     def select_sequence_file(self, path: Path) -> None:
         self.load_path(path, refresh_sequence=False)
@@ -3816,52 +3741,7 @@ class MainWindow(QMainWindow):
         self.load_path(self.folder_files[next_index], refresh_sequence=False)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.modifiers() & Qt.ControlModifier:
-            if event.key() == Qt.Key_Z:
-                if event.modifiers() & Qt.ShiftModifier:
-                    self.redo_adjustments()
-                else:
-                    self.undo_adjustments()
-                return
-            if event.key() == Qt.Key_Y:
-                self.redo_adjustments()
-                return
-        if self._handle_color_timing_shortcut(event):
-            return
-        if event.key() == Qt.Key_Left:
-            self.go_previous_file()
-            return
-        if event.key() == Qt.Key_Right:
-            self.go_next_file()
-            return
-        if event.key() in {Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter}:
-            self.confirm_current_and_go_next()
-            return
         super().keyPressEvent(event)
-
-    def _handle_color_timing_shortcut(self, event) -> bool:
-        modifiers = event.modifiers()
-        if modifiers not in (Qt.NoModifier, Qt.ShiftModifier):
-            return False
-        key = event.key()
-        step = 5 if event.modifiers() & Qt.ShiftModifier else 20
-        if key in {Qt.Key_Q, Qt.Key_A}:
-            self._nudge_global_balance("blue_yellow", -step if key == Qt.Key_Q else step)
-            return True
-        if key in {Qt.Key_W, Qt.Key_S}:
-            self._nudge_global_balance("green_magenta", -step if key == Qt.Key_W else step)
-            return True
-        if key in {Qt.Key_E, Qt.Key_D}:
-            self._nudge_global_balance("red_cyan", -step if key == Qt.Key_E else step)
-            return True
-        if key in {Qt.Key_R, Qt.Key_F}:
-            self._nudge_exposure(step if key == Qt.Key_R else -step)
-            return True
-        if key in {Qt.Key_BracketLeft, Qt.Key_BracketRight}:
-            mid_step = 1 if event.modifiers() & Qt.ShiftModifier else 5
-            self._nudge_mid_point(-mid_step if key == Qt.Key_BracketLeft else mid_step)
-            return True
-        return False
 
     def _nudge_global_balance(self, axis_name: str, delta: int) -> None:
         updated = deepcopy(self.adjustments)
