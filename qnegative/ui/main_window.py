@@ -1209,16 +1209,6 @@ class MainWindow(QMainWindow):
         self._preview_stage_caches[output.quality] = output.cache
         result = output.result
 
-        if self._render_pending:
-            pending_show_errors = self._render_pending_show_errors
-            self._render_pending = False
-            self._render_pending_show_errors = False
-            self._queue_negative_render(
-                show_errors=pending_show_errors,
-                interactive=self._interactive_adjustment_active and not pending_show_errors,
-            )
-            return
-
         if self.auto_levels_pending and output.applied_auto_levels:
             self._apply_auto_levels(result.auto_levels)
             self.auto_levels_pending = False
@@ -1250,6 +1240,15 @@ class MainWindow(QMainWindow):
             else "Inverted preview ready"
         )
         self._schedule_roll_session_save()
+
+        if self._render_pending:
+            pending_show_errors = self._render_pending_show_errors
+            self._render_pending = False
+            self._render_pending_show_errors = False
+            self._queue_negative_render(
+                show_errors=pending_show_errors,
+                interactive=self._interactive_adjustment_active and not pending_show_errors,
+            )
 
     def _start_pending_preview_before_switch(self) -> None:
         if not self.preview_refresh_timer.isActive():
@@ -2383,8 +2382,20 @@ class MainWindow(QMainWindow):
         self.go_next_file()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.preview_refresh_timer.stop()
         self.roll_session_save_timer.stop()
+        self._cancel_preview_render()
+        self._cancel_raw_preview()
+        self._cancel_auto_detect()
+        self._preinvert_queue = []
+        self._preinvert_in_progress.clear()
+        self._preinvert_paths.clear()
+        self._batch_export_queue = []
+        self._batch_export_cancel_requested = True
+        if self._export_cancel_event is not None:
+            self._export_cancel_event.set()
         self._save_current_state()
+        self._thread_pool.waitForDone(1500)
         super().closeEvent(event)
 
     def _set_folder_sequence(self, path: Path) -> None:
