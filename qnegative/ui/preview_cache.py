@@ -44,6 +44,7 @@ class PreviewRenderOutput:
     result: NegativePreviewResult
     cache: PreviewStageCache
     quality: str
+    render_token: int = 0
     cache_key: tuple | None = None
     mask_point: ImagePoint | None = None
     film_rect: ImageRect | None = None

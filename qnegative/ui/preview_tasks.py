@@ -294,6 +294,7 @@ class PreviewRenderTask(QRunnable):
         self,
         *,
         job_id: int,
+        render_token: int,
         preview: RawPreview,
         mask_point: ImagePoint | None,
         film_rect: ImageRect | None,
@@ -309,6 +310,7 @@ class PreviewRenderTask(QRunnable):
     ) -> None:
         super().__init__()
         self.job_id = job_id
+        self.render_token = int(render_token)
         self.preview = preview
         self.mask_point = mask_point
         self.film_rect = film_rect
@@ -455,6 +457,7 @@ class PreviewRenderTask(QRunnable):
                 display_result=result,
             ),
             quality=self.quality,
+            render_token=self.render_token,
             cache_key=self._result_cache_key(
                 effective_adjustments,
                 lab_print_cmy_offsets=lab_print_cmy_offsets,
