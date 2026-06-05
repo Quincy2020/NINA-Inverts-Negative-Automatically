@@ -1134,6 +1134,8 @@ class MainWindow(QMainWindow):
         return False
 
     def preview_inversion(self) -> None:
+        if self._manual_levels_present():
+            self.auto_levels_pending = False
         self._queue_negative_render(show_errors=True, interactive=False)
 
     def _queue_negative_render(self, *, show_errors: bool, interactive: bool = False) -> bool:
@@ -1153,6 +1155,9 @@ class MainWindow(QMainWindow):
         interactive = bool(interactive and not show_errors and not self.auto_levels_pending)
         quality = INTERACTIVE_RENDER_QUALITY if interactive else FINAL_RENDER_QUALITY
         render_preview = self._preview_for_render(interactive=interactive)
+        auto_levels_pending = self.auto_levels_pending and not self._manual_levels_present()
+        if self.auto_levels_pending and not auto_levels_pending:
+            self.auto_levels_pending = False
 
         if self._render_in_progress:
             self._render_pending = True
@@ -1168,7 +1173,7 @@ class MainWindow(QMainWindow):
             mask_point=self.mask_point,
             film_rect=self.film_rect,
             adjustments=self.adjustments,
-            auto_levels_pending=self.auto_levels_pending,
+            auto_levels_pending=auto_levels_pending,
             show_errors=show_errors,
             quality=quality,
             file_key=self._file_key_for_path(render_preview.path),
@@ -1325,6 +1330,13 @@ class MainWindow(QMainWindow):
 
     def _film_base_required_for_current_mode(self) -> bool:
         return False
+
+    def _manual_levels_present(self) -> bool:
+        return (
+            self.adjustments.black_point != 0
+            or self.adjustments.mid_point != 50
+            or self.adjustments.white_point != 100
+        )
 
     def _preview_for_render(self, *, interactive: bool) -> RawPreview:
         if self.current_preview is None:
@@ -2082,6 +2094,11 @@ class MainWindow(QMainWindow):
     def _save_current_state(self) -> None:
         if self.current_path is None:
             return
+        has_positive_result = (
+            self.negative_preview_active
+            or self._last_untransformed_negative_result is not None
+            or self.last_negative_result is not None
+        )
         self.image_states[self.current_path] = ImageProcessingState(
             mask_point=self.mask_point,
             film_rect=self.film_rect,
@@ -2095,8 +2112,10 @@ class MainWindow(QMainWindow):
                 if self.current_path in self.image_states
                 else None
             ),
-            negative_preview_active=self.negative_preview_active,
-            auto_levels_pending=self.auto_levels_pending,
+            negative_preview_active=has_positive_result,
+            auto_levels_pending=(
+                False if has_positive_result or self._manual_levels_present() else self.auto_levels_pending
+            ),
             preview_flip_horizontal=self._preview_flip_horizontal,
             preview_flip_vertical=self._preview_flip_vertical,
             preview_rotation_quarters=self._preview_rotation_quarters,
@@ -2166,7 +2185,12 @@ class MainWindow(QMainWindow):
             film_rect=self.film_rect,
         )
 
-        if state.negative_preview_active and not self._restore_cached_preview_result():
+        should_restore_positive = state.negative_preview_active or (
+            self.film_rect is not None and self.film_rect.is_valid() and self._manual_levels_present()
+        )
+        if should_restore_positive and not self._restore_cached_preview_result():
+            if self._manual_levels_present():
+                self.auto_levels_pending = False
             self._queue_negative_render(show_errors=False)
         return True
 
