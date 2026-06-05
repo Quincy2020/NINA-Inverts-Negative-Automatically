@@ -28,6 +28,10 @@ LAB_PRINT_AUTO_WB_STRENGTH = 0.45
 LAB_PRINT_AUTO_WB_MAX_OFFSET = 0.04
 LAB_PRINT_COLOR_SEPARATION_STRENGTH = 0.45
 LAB_PRINT_AUTO_EXPOSURE_SAMPLE_LIMIT = 180_000
+TONE_MID_ANCHOR_SAMPLE_LIMIT = 180_000
+TONE_MID_ANCHOR_PERCENTILE = 55.0
+TONE_MID_ANCHOR_MIN = 0.32
+TONE_MID_ANCHOR_MAX = 0.62
 LAB_PRINT_AUTO_BLACK_PERCENTILE = 0.25
 LAB_PRINT_AUTO_WHITE_PERCENTILE = 99.75
 LAB_PRINT_AUTO_BLACK_PADDING = 0.060
@@ -40,6 +44,7 @@ LAB_PRINT_ANALYSIS_INSET = 0.05
 GLOBAL_BALANCE_SCALE = 55.0
 TONAL_BALANCE_SCALE = 75.0
 FILMIC_LUT_SIZE = 4096
+TONE_MODIFIER_LUT_SIZE = 4096
 LOG_PRINT_CURVE_LUT_4096 = "lut_4096"
 LOG_PRINT_CURVE_LUT_8192 = "lut_8192"
 LOG_PRINT_CURVE_DIRECT = "direct"
@@ -63,6 +68,7 @@ FILMIC_CURVE_PRESETS: dict[str, tuple[tuple[float, float], tuple[float, float]]]
 }
 _FILMIC_CURVE_LUTS: dict[str, np.ndarray] = {}
 _LOG_PRINT_CURVE_LUTS: dict[tuple, np.ndarray] = {}
+_TONE_MODIFIER_LUTS: dict[tuple[int, int, int, int], np.ndarray] = {}
 
 LOG_COLOR_SEPARATION_MATRIX = np.array(
     [
@@ -1367,65 +1373,112 @@ def apply_highlight_shadow_adjustments(image: np.ndarray, adjustments: Adjustmen
     if adjustments.highlights == 0 and adjustments.shadows == 0:
         return image
 
-    adjusted = np.maximum(image.astype(np.float32, copy=True), 0.0)
+    adjusted = np.maximum(image.astype(np.float32, copy=False), 0.0)
     luminance = np.maximum(rgb_luminance(adjusted), 0.0)
-    target_luminance = luminance.copy()
-    shadow_ratio_limit: float | None = None
-
-    if adjustments.shadows != 0:
-        shadow_amount = float(np.clip(adjustments.shadows / 100.0, -1.0, 1.0))
-        shadow_pivot = 0.44
-        shadow_norm = np.clip(luminance / shadow_pivot, 0.0, 1.0)
-        shadow_weight = 1.0 - smoothstep(0.18, 1.0, shadow_norm)
-
-        if shadow_amount > 0:
-            gamma = 1.0 / (1.0 + 2.6 * shadow_amount)
-            lifted = shadow_pivot * np.power(shadow_norm, gamma)
-            black_anchor = smoothstep(0.0, 0.035, luminance)
-            mix = np.clip(shadow_amount * 0.95 * shadow_weight * black_anchor, 0.0, 1.0)
-            target_luminance = target_luminance * (1.0 - mix) + lifted * mix
-            shadow_ratio_limit = 1.0 + 4.5 * shadow_amount
-        else:
-            amount = abs(shadow_amount)
-            gamma = 1.0 + 2.2 * amount
-            crushed = shadow_pivot * np.power(shadow_norm, gamma)
-            mix = np.clip(amount * 0.90 * shadow_weight, 0.0, 1.0)
-            target_luminance = target_luminance * (1.0 - mix) + crushed * mix
-
-    if adjustments.highlights != 0:
-        highlight_amount = float(np.clip(adjustments.highlights / 65.0, -1.0, 1.0))
-        if highlight_amount > 0:
-            highlight_weight = smoothstep(0.36, 0.92, luminance)
-            boosted = target_luminance + (1.0 - np.clip(target_luminance, 0.0, 1.0)) * 0.75
-            target_luminance += (boosted - target_luminance) * highlight_amount * highlight_weight
-        else:
-            amount = abs(highlight_amount)
-            pivot = 0.46
-            highlight_sample = luminance[luminance > pivot]
-            if highlight_sample.size:
-                upper = float(np.percentile(highlight_sample, 99.2))
-            else:
-                upper = 1.0
-            upper = max(1.0, upper, pivot + 1e-4)
-            span = upper - pivot
-
-            highlight_weight = smoothstep(0.34, min(upper, 1.0), luminance)
-            highlight_norm = np.maximum(target_luminance - pivot, 0.0) / span
-            compression = 1.0 + amount * 1.25 * highlight_norm
-            compressed = pivot + span * (highlight_norm / compression)
-            compressed = np.minimum(compressed, target_luminance)
-            mix = highlight_weight * amount
-            target_luminance = target_luminance * (1.0 - mix) + compressed * mix
-
+    mid_anchor = estimate_tone_mid_anchor(luminance)
+    tone_lut = highlight_shadow_tone_lut(adjustments, mid_anchor=mid_anchor)
+    highlight_recovery = max(0.0, float(-adjustments.highlights) / 100.0)
+    headroom_slope = 1.0 if highlight_recovery <= 0.0 else max(0.18, 0.55 * (1.0 - highlight_recovery))
+    target_luminance = apply_tone_lut_to_luminance(
+        luminance,
+        tone_lut,
+        headroom_slope=headroom_slope,
+    )
     ratio = np.divide(
         target_luminance,
         luminance,
         out=np.ones_like(target_luminance, dtype=np.float32),
         where=luminance > 1e-5,
     )
-    if shadow_ratio_limit is not None:
-        ratio = np.minimum(ratio, shadow_ratio_limit)
-    return (adjusted * ratio[:, :, None]).astype(np.float32, copy=False)
+    if adjustments.shadows > 0:
+        ratio = np.minimum(ratio, 1.0 + 2.8 * float(np.clip(adjustments.shadows / 100.0, 0.0, 1.0)))
+    processed = adjusted * ratio[:, :, None]
+    return np.nan_to_num(processed, nan=0.0, posinf=1.0e6, neginf=0.0).astype(np.float32, copy=False)
+
+
+def highlight_shadow_tone_lut(
+    adjustments: AdjustmentParams,
+    *,
+    mid_anchor: float = 0.46,
+    lut_size: int = TONE_MODIFIER_LUT_SIZE,
+) -> np.ndarray:
+    mid_anchor = float(np.clip(mid_anchor, TONE_MID_ANCHOR_MIN, TONE_MID_ANCHOR_MAX))
+    key = (
+        int(lut_size),
+        int(adjustments.highlights),
+        int(adjustments.shadows),
+        int(round(mid_anchor * 1000.0)),
+    )
+    cached = _TONE_MODIFIER_LUTS.get(key)
+    if cached is not None:
+        return cached
+
+    x = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
+    y = x.copy()
+
+    shadow_amount = float(np.clip(adjustments.shadows / 100.0, -1.0, 1.0))
+    if shadow_amount != 0.0:
+        amount = abs(shadow_amount)
+        shadow_t = np.clip(x / mid_anchor, 0.0, 1.0)
+        shadow_bump = np.sin(np.pi * shadow_t)
+        shadow_bump = np.where(x <= mid_anchor, shadow_bump, 0.0)
+        shadow_delta = amount * 0.135 * shadow_bump
+        if shadow_amount > 0.0:
+            y = y + shadow_delta
+        else:
+            y = y - shadow_delta * (0.85 + 0.15 * shadow_t)
+
+    highlight_amount = float(np.clip(adjustments.highlights / 100.0, -1.0, 1.0))
+    if highlight_amount != 0.0:
+        amount = abs(highlight_amount)
+        highlight_t = np.clip((x - mid_anchor) / max(1.0 - mid_anchor, 1e-5), 0.0, 1.0)
+        highlight_bump = np.sin(np.pi * highlight_t)
+        highlight_bump = np.where(x >= mid_anchor, highlight_bump, 0.0)
+        if highlight_amount > 0.0:
+            y = y + amount * 0.145 * highlight_bump
+        else:
+            y = y - amount * 0.155 * highlight_bump
+
+    y = np.maximum.accumulate(np.clip(y, 0.0, 1.0)).astype(np.float32, copy=False)
+    y[0] = 0.0
+    y[-1] = 1.0
+    _TONE_MODIFIER_LUTS[key] = y
+    while len(_TONE_MODIFIER_LUTS) > 48:
+        oldest_key = next(iter(_TONE_MODIFIER_LUTS))
+        _TONE_MODIFIER_LUTS.pop(oldest_key, None)
+    return y
+
+
+def estimate_tone_mid_anchor(luminance: np.ndarray) -> float:
+    flat = np.asarray(luminance, dtype=np.float32).reshape(-1)
+    if flat.size == 0:
+        return 0.46
+    stride = max(1, flat.size // TONE_MID_ANCHOR_SAMPLE_LIMIT)
+    sample = flat[::stride]
+    sample = sample[np.isfinite(sample)]
+    if sample.size == 0:
+        return 0.46
+    mid = float(np.percentile(sample, TONE_MID_ANCHOR_PERCENTILE))
+    return float(np.clip(mid, TONE_MID_ANCHOR_MIN, TONE_MID_ANCHOR_MAX))
+
+
+def apply_tone_lut_to_luminance(
+    luminance: np.ndarray,
+    lut: np.ndarray,
+    *,
+    headroom_slope: float = 1.0,
+) -> np.ndarray:
+    clipped = np.clip(luminance, 0.0, 1.0).astype(np.float32, copy=False)
+    lut_size = int(len(lut))
+    scaled = clipped * np.float32(lut_size - 1)
+    index = np.floor(scaled).astype(np.int32)
+    index = np.clip(index, 0, lut_size - 2)
+    fraction = scaled - index
+    target = lut[index] * (1.0 - fraction) + lut[index + 1] * fraction
+    # Above display white, preserve headroom for normal edits but compress that
+    # headroom when the highlight slider is pulled down for recovery.
+    target = target + np.maximum(luminance - clipped, 0.0) * float(np.clip(headroom_slope, 0.0, 1.0))
+    return target.astype(np.float32, copy=False)
 
 
 def apply_soft_tone_adjustments(image: np.ndarray, adjustments: AdjustmentParams) -> np.ndarray:
