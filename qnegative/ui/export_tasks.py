@@ -195,6 +195,7 @@ class ImageExportTask(QRunnable):
             levels_stage,
             effective,
             cmy_offsets=self.preview_cmy_offsets if effective.auto_wb else None,
+            stage_timings=timings,
         )
         timings["Lab color print"] = perf_counter() - stage_start
 

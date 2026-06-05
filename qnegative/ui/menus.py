@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QDockWidget
 from qnegative.core.models import ToolMode
 from qnegative.core.pipeline import (
     LOG_PRINT_CURVE_DIRECT,
+    LOG_PRINT_CURVE_LUT_DIRECT_16384,
     LOG_PRINT_CURVE_LUT_4096,
     LOG_PRINT_CURVE_LUT_8192,
     log_print_curve_engine,
@@ -145,6 +146,7 @@ def build_main_menus(window) -> None:
     window.print_curve_engine_group = QActionGroup(window)
     window.print_curve_engine_group.setExclusive(True)
     for label, engine in (
+        ("LUT 16384 Direct", LOG_PRINT_CURVE_LUT_DIRECT_16384),
         ("LUT 8192", LOG_PRINT_CURVE_LUT_8192),
         ("LUT 4096", LOG_PRINT_CURVE_LUT_4096),
         ("Direct Reference", LOG_PRINT_CURVE_DIRECT),

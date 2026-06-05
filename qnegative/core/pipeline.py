@@ -50,11 +50,13 @@ FILMIC_LUT_SIZE = 4096
 TONE_MODIFIER_LUT_SIZE = 16384
 LOG_PRINT_CURVE_LUT_4096 = "lut_4096"
 LOG_PRINT_CURVE_LUT_8192 = "lut_8192"
+LOG_PRINT_CURVE_LUT_DIRECT_16384 = "lut_direct_16384"
 LOG_PRINT_CURVE_DIRECT = "direct"
-LOG_PRINT_CURVE_ENGINE = LOG_PRINT_CURVE_LUT_8192
+LOG_PRINT_CURVE_ENGINE = LOG_PRINT_CURVE_LUT_DIRECT_16384
 LOG_PRINT_CURVE_LUT_SIZES = {
     LOG_PRINT_CURVE_LUT_4096: 4096,
     LOG_PRINT_CURVE_LUT_8192: 8192,
+    LOG_PRINT_CURVE_LUT_DIRECT_16384: 16384,
 }
 GAMUT_EPSILON = 1e-6
 GAMUT_LOWER_MARGIN = 1e-5
@@ -507,9 +509,11 @@ def build_lab_print_color_stage(
     adjustments: AdjustmentParams,
     *,
     cmy_offsets: np.ndarray | None = None,
+    stage_timings: dict[str, float] | None = None,
 ) -> LabPrintColorStage:
     normalized_for_print = levels_stage.normalized_for_print
 
+    stage_start = perf_counter()
     if cmy_offsets is not None:
         cmy_offsets = np.asarray(cmy_offsets, dtype=np.float32)
     elif adjustments.auto_wb:
@@ -518,22 +522,39 @@ def build_lab_print_color_stage(
     else:
         cmy_offsets = np.zeros(3, dtype=np.float32)
         cmy_offsets = effective_lab_print_cmy_offsets(cmy_offsets, adjustments)
+    if stage_timings is not None:
+        stage_timings["Lab color CMY"] = perf_counter() - stage_start
 
+    stage_start = perf_counter()
     processed = apply_log_hd_print_curve(
         normalized_for_print,
         adjustments,
         cmy_offsets=cmy_offsets,
     )
+    if stage_timings is not None:
+        stage_timings["Lab color print curve"] = perf_counter() - stage_start
+
+    stage_start = perf_counter()
     processed = apply_output_color_transform(
         processed,
         levels_stage.camera_to_srgb_matrix,
         adjustments.camera_color_strength,
     )
+    if stage_timings is not None:
+        stage_timings["Lab color camera transform"] = perf_counter() - stage_start
+
+    stage_start = perf_counter()
     processed = apply_log_color_separation(
         processed,
         strength=LAB_PRINT_COLOR_SEPARATION_STRENGTH,
     )
+    if stage_timings is not None:
+        stage_timings["Lab color separation"] = perf_counter() - stage_start
+
+    stage_start = perf_counter()
     processed = apply_color_balance(processed, adjustments.color_balance)
+    if stage_timings is not None:
+        stage_timings["Lab color balance"] = perf_counter() - stage_start
 
     return LabPrintColorStage(
         color_linear_rgb=processed,
@@ -764,6 +785,13 @@ def apply_log_hd_print_curve(
     # reference path while avoiding that cost on full-resolution exports.
     if LOG_PRINT_CURVE_ENGINE == LOG_PRINT_CURVE_DIRECT:
         return log_hd_print_response(normalized_log, adjustments, cmy_offsets=cmy_offsets)
+    if LOG_PRINT_CURVE_ENGINE == LOG_PRINT_CURVE_LUT_DIRECT_16384:
+        return log_hd_print_response_lut_direct(
+            normalized_log,
+            adjustments,
+            cmy_offsets=cmy_offsets,
+            lut_size=LOG_PRINT_CURVE_LUT_SIZES[LOG_PRINT_CURVE_LUT_DIRECT_16384],
+        )
     return log_hd_print_response_lut(
         normalized_log,
         adjustments,
@@ -777,6 +805,7 @@ def set_log_print_curve_engine(engine: str) -> None:
     if engine not in {
         LOG_PRINT_CURVE_LUT_4096,
         LOG_PRINT_CURVE_LUT_8192,
+        LOG_PRINT_CURVE_LUT_DIRECT_16384,
         LOG_PRINT_CURVE_DIRECT,
     }:
         raise ValueError(f"Unknown print curve engine: {engine}")
@@ -785,6 +814,23 @@ def set_log_print_curve_engine(engine: str) -> None:
 
 def log_print_curve_engine() -> str:
     return LOG_PRINT_CURVE_ENGINE
+
+
+def log_hd_print_response_lut_direct(
+    normalized_log: np.ndarray,
+    adjustments: AdjustmentParams,
+    *,
+    cmy_offsets: np.ndarray,
+    lut_size: int,
+) -> np.ndarray:
+    clipped = np.clip(normalized_log, 0.0, 1.0).astype(np.float32, copy=False)
+    lut = log_hd_print_curve_lut(adjustments, cmy_offsets=cmy_offsets, lut_size=lut_size)
+    out = np.empty_like(clipped, dtype=np.float32)
+    for channel in range(3):
+        index = np.rint(clipped[:, :, channel] * np.float32(lut_size - 1)).astype(np.int32)
+        index = np.clip(index, 0, lut_size - 1)
+        out[:, :, channel] = lut[channel][index]
+    return out
 
 
 def log_hd_print_response_lut(
