@@ -1415,29 +1415,17 @@ def highlight_shadow_tone_lut(
 
     x = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
     y = x.copy()
+    shadow_controls, highlight_controls = highlight_shadow_segment_control_points(adjustments, mid_anchor)
 
-    shadow_amount = float(np.clip(adjustments.shadows / 100.0, -1.0, 1.0))
-    if shadow_amount != 0.0:
-        amount = abs(shadow_amount)
-        shadow_t = np.clip(x / mid_anchor, 0.0, 1.0)
-        shadow_bump = np.sin(np.pi * shadow_t)
-        shadow_bump = np.where(x <= mid_anchor, shadow_bump, 0.0)
-        shadow_delta = amount * 0.135 * shadow_bump
-        if shadow_amount > 0.0:
-            y = y + shadow_delta
-        else:
-            y = y - shadow_delta * (0.85 + 0.15 * shadow_t)
+    if shadow_controls is not None:
+        control_x, control_y = shadow_controls
+        shadow_mask = x <= mid_anchor
+        y[shadow_mask] = fritsch_carlson_values(control_x, control_y, x[shadow_mask])
 
-    highlight_amount = float(np.clip(adjustments.highlights / 100.0, -1.0, 1.0))
-    if highlight_amount != 0.0:
-        amount = abs(highlight_amount)
-        highlight_t = np.clip((x - mid_anchor) / max(1.0 - mid_anchor, 1e-5), 0.0, 1.0)
-        highlight_bump = np.sin(np.pi * highlight_t)
-        highlight_bump = np.where(x >= mid_anchor, highlight_bump, 0.0)
-        if highlight_amount > 0.0:
-            y = y + amount * 0.145 * highlight_bump
-        else:
-            y = y - amount * 0.155 * highlight_bump
+    if highlight_controls is not None:
+        control_x, control_y = highlight_controls
+        highlight_mask = x >= mid_anchor
+        y[highlight_mask] = fritsch_carlson_values(control_x, control_y, x[highlight_mask])
 
     y = np.maximum.accumulate(np.clip(y, 0.0, 1.0)).astype(np.float32, copy=False)
     y[0] = 0.0
@@ -1447,6 +1435,128 @@ def highlight_shadow_tone_lut(
         oldest_key = next(iter(_TONE_MODIFIER_LUTS))
         _TONE_MODIFIER_LUTS.pop(oldest_key, None)
     return y
+
+
+def highlight_shadow_segment_control_points(
+    adjustments: AdjustmentParams,
+    mid_anchor: float,
+) -> tuple[tuple[np.ndarray, np.ndarray] | None, tuple[np.ndarray, np.ndarray] | None]:
+    mid_anchor = float(np.clip(mid_anchor, TONE_MID_ANCHOR_MIN, TONE_MID_ANCHOR_MAX))
+    shadow_controls: tuple[np.ndarray, np.ndarray] | None = None
+    highlight_controls: tuple[np.ndarray, np.ndarray] | None = None
+
+    shadow_amount = float(np.clip(adjustments.shadows / 100.0, -1.0, 1.0))
+    if shadow_amount != 0.0:
+        amount = abs(shadow_amount)
+        shadow_x = mid_anchor * 0.35
+        shadow_delta = mid_anchor * 0.26 * amount
+        if shadow_amount > 0.0:
+            shadow_y = min(mid_anchor - 1e-4, shadow_x + shadow_delta)
+        else:
+            shadow_y = max(1e-5, shadow_x - min(shadow_delta, shadow_x * 0.92))
+        shadow_controls = (
+            np.array([0.0, shadow_x, mid_anchor], dtype=np.float32),
+            np.array([0.0, shadow_y, mid_anchor], dtype=np.float32),
+        )
+
+    highlight_amount = float(np.clip(adjustments.highlights / 100.0, -1.0, 1.0))
+    if highlight_amount != 0.0:
+        amount = abs(highlight_amount)
+        highlight_span = max(1.0 - mid_anchor, 1e-5)
+        highlight_x = mid_anchor + highlight_span * 0.62
+        highlight_delta = highlight_span * 0.29 * amount
+        if highlight_amount > 0.0:
+            highlight_y = min(1.0 - 1e-5, highlight_x + highlight_delta)
+        else:
+            highlight_y = max(mid_anchor + 1e-4, highlight_x - highlight_delta)
+        highlight_controls = (
+            np.array([mid_anchor, highlight_x, 1.0], dtype=np.float32),
+            np.array([mid_anchor, highlight_y, 1.0], dtype=np.float32),
+        )
+
+    return shadow_controls, highlight_controls
+
+
+def highlight_shadow_control_points(
+    adjustments: AdjustmentParams,
+    mid_anchor: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    mid_anchor = float(np.clip(mid_anchor, TONE_MID_ANCHOR_MIN, TONE_MID_ANCHOR_MAX))
+    shadow_controls, highlight_controls = highlight_shadow_segment_control_points(adjustments, mid_anchor)
+    points: list[tuple[float, float]] = [(0.0, 0.0)]
+    if shadow_controls is not None:
+        points.append((float(shadow_controls[0][1]), float(shadow_controls[1][1])))
+
+    points.append((mid_anchor, mid_anchor))
+    if highlight_controls is not None:
+        points.append((float(highlight_controls[0][1]), float(highlight_controls[1][1])))
+
+    points.append((1.0, 1.0))
+    points.sort(key=lambda item: item[0])
+    control_x = np.array([point[0] for point in points], dtype=np.float32)
+    control_y = np.array([point[1] for point in points], dtype=np.float32)
+    return control_x, control_y
+
+
+def fritsch_carlson_values(
+    control_x: np.ndarray,
+    control_y: np.ndarray,
+    samples: np.ndarray,
+) -> np.ndarray:
+    x = np.asarray(control_x, dtype=np.float32)
+    y = np.asarray(control_y, dtype=np.float32)
+    if x.size < 2 or y.size != x.size:
+        return np.asarray(samples, dtype=np.float32)
+
+    dx = np.diff(x)
+    dy = np.diff(y)
+    valid = dx > 1e-6
+    if not bool(np.all(valid)):
+        return np.asarray(samples, dtype=np.float32)
+
+    slopes = dy / dx
+    tangents = np.empty_like(y, dtype=np.float32)
+    tangents[0] = slopes[0]
+    tangents[-1] = slopes[-1]
+    if y.size > 2:
+        tangents[1:-1] = (slopes[:-1] + slopes[1:]) * 0.5
+
+    for index, slope in enumerate(slopes):
+        if slope <= 1e-8:
+            tangents[index] = 0.0
+            tangents[index + 1] = 0.0
+            continue
+        tangents[index] = max(0.0, float(tangents[index]))
+        tangents[index + 1] = max(0.0, float(tangents[index + 1]))
+        alpha = tangents[index] / slope
+        beta = tangents[index + 1] / slope
+        radius = alpha * alpha + beta * beta
+        if radius > 9.0:
+            scale = 3.0 / np.sqrt(radius)
+            tangents[index] = scale * alpha * slope
+            tangents[index + 1] = scale * beta * slope
+
+    samples = np.asarray(samples, dtype=np.float32)
+    indices = np.searchsorted(x, samples, side="right") - 1
+    indices = np.clip(indices, 0, x.size - 2)
+
+    x0 = x[indices]
+    x1 = x[indices + 1]
+    y0 = y[indices]
+    y1 = y[indices + 1]
+    m0 = tangents[indices]
+    m1 = tangents[indices + 1]
+    h = x1 - x0
+    t = np.divide(samples - x0, h, out=np.zeros_like(samples), where=h > 1e-6)
+    t2 = t * t
+    t3 = t2 * t
+
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h10 = t3 - 2.0 * t2 + t
+    h01 = -2.0 * t3 + 3.0 * t2
+    h11 = t3 - t2
+    values = h00 * y0 + h10 * h * m0 + h01 * y1 + h11 * h * m1
+    return values.astype(np.float32, copy=False)
 
 
 def estimate_tone_mid_anchor(luminance: np.ndarray) -> float:
