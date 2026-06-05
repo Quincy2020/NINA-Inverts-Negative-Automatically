@@ -56,6 +56,11 @@ def state_from_json_dict(payload: dict[str, Any], source_path: Path) -> ImagePro
                 None if migrated_printer_balance else payload.get("lab_print_cmy_offsets"),
                 length=3,
             ),
+            tone_mid_anchor=(
+                float(payload["tone_mid_anchor"])
+                if payload.get("tone_mid_anchor") is not None
+                else None
+            ),
             roll_color_frame=payload.get("roll_color_frame") if isinstance(payload.get("roll_color_frame"), dict) else None,
             negative_preview_active=bool(payload.get("negative_preview_active", False)),
             auto_levels_pending=bool(payload.get("auto_levels_pending", True)),

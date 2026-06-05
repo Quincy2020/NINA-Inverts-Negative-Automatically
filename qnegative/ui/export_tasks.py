@@ -49,6 +49,7 @@ class ImageExportTask(QRunnable):
         auto_levels_pending: bool,
         export_format: str | None = None,
         preview_cmy_offsets: np.ndarray | None = None,
+        preview_tone_mid_anchor: float | None = None,
         roll_color_result: dict | None = None,
         roll_color_frame: dict | None = None,
         cancel_event: Event | None = None,
@@ -67,6 +68,11 @@ class ImageExportTask(QRunnable):
         self.preview_cmy_offsets = (
             np.asarray(preview_cmy_offsets, dtype=np.float32).copy()
             if preview_cmy_offsets is not None
+            else None
+        )
+        self.preview_tone_mid_anchor = (
+            float(preview_tone_mid_anchor)
+            if preview_tone_mid_anchor is not None
             else None
         )
         self.roll_color_result = deepcopy(roll_color_result)
@@ -197,6 +203,7 @@ class ImageExportTask(QRunnable):
             effective,
             roll_color_result=self.roll_color_result,
             roll_color_frame=self.roll_color_frame,
+            tone_mid_anchor=self.preview_tone_mid_anchor,
             stage_timings=timings,
         )
 

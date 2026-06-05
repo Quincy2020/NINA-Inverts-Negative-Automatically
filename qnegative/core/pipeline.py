@@ -47,7 +47,7 @@ LAB_PRINT_ANALYSIS_INSET = 0.05
 GLOBAL_BALANCE_SCALE = 55.0
 TONAL_BALANCE_SCALE = 75.0
 FILMIC_LUT_SIZE = 4096
-TONE_MODIFIER_LUT_SIZE = 4096
+TONE_MODIFIER_LUT_SIZE = 16384
 LOG_PRINT_CURVE_LUT_4096 = "lut_4096"
 LOG_PRINT_CURVE_LUT_8192 = "lut_8192"
 LOG_PRINT_CURVE_DIRECT = "direct"
@@ -558,11 +558,13 @@ def build_lab_print_display_stage(
         frame_plan=roll_color_frame,
         settings=adjustments.color_correction,
     )
-    tone_mid_anchor = estimate_tone_mid_anchor(rgb_luminance(np.maximum(corrected, 0.0)))
+    tone_luminance = rgb_luminance(np.maximum(corrected, 0.0))
+    tone_mid_anchor = estimate_tone_mid_anchor(tone_luminance)
     processed = apply_highlight_shadow_adjustments(
         corrected,
         adjustments,
         mid_anchor=tone_mid_anchor,
+        luminance=tone_luminance,
     )
     color_balanced = processed
     processed = apply_saturation_adjustment(processed, adjustments)
@@ -587,6 +589,7 @@ def build_lab_print_export_linear(
     *,
     roll_color_result: dict | None = None,
     roll_color_frame: dict | None = None,
+    tone_mid_anchor: float | None = None,
     stage_timings: dict[str, float] | None = None,
 ) -> np.ndarray:
     stage_start = perf_counter()
@@ -600,12 +603,20 @@ def build_lab_print_export_linear(
         stage_timings["Lab roll color"] = perf_counter() - stage_start
 
     stage_start = perf_counter()
-    tone_mid_anchor = estimate_tone_mid_anchor(rgb_luminance(np.maximum(corrected, 0.0)))
-    processed = apply_highlight_shadow_adjustments(
-        corrected,
-        adjustments,
-        mid_anchor=tone_mid_anchor,
-    )
+    tone_active = adjustments.highlights != 0 or adjustments.shadows != 0
+    tone_luminance = None
+    if tone_active:
+        tone_luminance = rgb_luminance(np.maximum(corrected, 0.0))
+        if tone_mid_anchor is None:
+            tone_mid_anchor = estimate_tone_mid_anchor(tone_luminance)
+        processed = apply_highlight_shadow_adjustments(
+            corrected,
+            adjustments,
+            mid_anchor=tone_mid_anchor,
+            luminance=tone_luminance,
+        )
+    else:
+        processed = corrected
     if stage_timings is not None:
         stage_timings["Lab tone modifier"] = perf_counter() - stage_start
 
@@ -1483,12 +1494,15 @@ def apply_highlight_shadow_adjustments(
     adjustments: AdjustmentParams,
     *,
     mid_anchor: float | None = None,
+    luminance: np.ndarray | None = None,
 ) -> np.ndarray:
     if adjustments.highlights == 0 and adjustments.shadows == 0:
         return image
 
     adjusted = np.maximum(image.astype(np.float32, copy=False), 0.0)
-    luminance = np.maximum(rgb_luminance(adjusted), 0.0)
+    if luminance is None:
+        luminance = rgb_luminance(adjusted)
+    luminance = np.maximum(luminance.astype(np.float32, copy=False), 0.0)
     if mid_anchor is None:
         mid_anchor = estimate_tone_mid_anchor(luminance)
     tone_lut = highlight_shadow_tone_lut(adjustments, mid_anchor=mid_anchor)
@@ -1695,11 +1709,9 @@ def apply_tone_lut_to_luminance(
 ) -> np.ndarray:
     clipped = np.clip(luminance, 0.0, 1.0).astype(np.float32, copy=False)
     lut_size = int(len(lut))
-    scaled = clipped * np.float32(lut_size - 1)
-    index = np.floor(scaled).astype(np.int32)
-    index = np.clip(index, 0, lut_size - 2)
-    fraction = scaled - index
-    target = lut[index] * (1.0 - fraction) + lut[index + 1] * fraction
+    index = np.rint(clipped * np.float32(lut_size - 1)).astype(np.int32)
+    index = np.clip(index, 0, lut_size - 1)
+    target = lut[index]
     # Above display white, preserve headroom for normal edits but compress that
     # headroom when the highlight slider is pulled down for recovery.
     target = target + np.maximum(luminance - clipped, 0.0) * float(np.clip(headroom_slope, 0.0, 1.0))

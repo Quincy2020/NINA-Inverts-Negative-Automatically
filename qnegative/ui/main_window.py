@@ -1377,6 +1377,7 @@ class MainWindow(QMainWindow):
             white_balance_point=existing.white_balance_point if existing else None,
             adjustments=deepcopy(output.adjustments) if output.adjustments is not None else (deepcopy(existing.adjustments) if existing else self._default_adjustments()),
             lab_print_cmy_offsets=output.lab_print_cmy_offsets if output.lab_print_cmy_offsets is not None else (existing.lab_print_cmy_offsets if existing else None),
+            tone_mid_anchor=output.result.tone_mid_anchor,
             roll_color_frame=output.roll_color_frame if output.roll_color_frame is not None else (existing.roll_color_frame if existing else None),
             negative_preview_active=True,
             auto_levels_pending=False,
@@ -1760,6 +1761,7 @@ class MainWindow(QMainWindow):
             auto_levels_pending=self.auto_levels_pending,
             export_format=export_format,
             preview_cmy_offsets=self._current_preview_cmy_offsets_for_export(),
+            preview_tone_mid_anchor=self._current_preview_tone_mid_anchor_for_export(),
             roll_color_result=self._roll_color_result,
             roll_color_frame=self._roll_color_frame_for_path(self.current_path),
             cancel_event=self._export_cancel_event,
@@ -1860,6 +1862,7 @@ class MainWindow(QMainWindow):
                     "auto_levels_pending": state.auto_levels_pending,
                     "export_format": settings.export_format,
                     "preview_cmy_offsets": self._preview_cmy_offsets_for_path(path, state),
+                    "preview_tone_mid_anchor": self._preview_tone_mid_anchor_for_path(path, state),
                     "roll_color_result": self._roll_color_result,
                     "roll_color_frame": deepcopy(state.roll_color_frame),
                 }
@@ -1910,6 +1913,14 @@ class MainWindow(QMainWindow):
         if cached is None:
             return None
         return np.asarray(cached.result.wb_gains, dtype=np.float32).copy()
+
+    def _preview_tone_mid_anchor_for_path(self, path: Path, state: ImageProcessingState) -> float | None:
+        if state.tone_mid_anchor is not None:
+            return float(state.tone_mid_anchor)
+        cached = self.preview_result_cache.get(path)
+        if cached is None:
+            return None
+        return float(cached.result.tone_mid_anchor)
 
     def _start_next_batch_export(self) -> None:
         if self._batch_export_cancel_requested:
@@ -2032,6 +2043,18 @@ class MainWindow(QMainWindow):
         if cached is None or key is None or cached.key != key:
             return None
         return np.asarray(cached.result.wb_gains, dtype=np.float32).copy()
+
+    def _current_preview_tone_mid_anchor_for_export(self) -> float | None:
+        if self.current_path is None or self.auto_levels_pending:
+            return None
+        if self._last_untransformed_negative_result is not None:
+            return float(self._last_untransformed_negative_result.tone_mid_anchor)
+
+        cached = self.preview_result_cache.get(self.current_path)
+        key = self._preview_result_cache_key()
+        if cached is None or key is None or cached.key != key:
+            return None
+        return float(cached.result.tone_mid_anchor)
 
     def _export_progress_updated(self, value: int, text: str) -> None:
         if self._batch_export_active and self._batch_export_total:
@@ -2204,6 +2227,11 @@ class MainWindow(QMainWindow):
             adjustments=deepcopy(self.adjustments),
             lab_print_cmy_offsets=(
                 deepcopy(self.lab_print_cmy_offsets) if self.adjustments.auto_wb else None
+            ),
+            tone_mid_anchor=(
+                float(self._last_untransformed_negative_result.tone_mid_anchor)
+                if self._last_untransformed_negative_result is not None
+                else None
             ),
             roll_color_frame=(
                 deepcopy(self.image_states[self.current_path].roll_color_frame)
@@ -2402,6 +2430,7 @@ class MainWindow(QMainWindow):
             white_balance_point=None,
             adjustments=deepcopy(output.adjustments),
             lab_print_cmy_offsets=output.lab_print_cmy_offsets,
+            tone_mid_anchor=output.result.tone_mid_anchor,
             roll_color_frame=None,
             negative_preview_active=True,
             auto_levels_pending=False,

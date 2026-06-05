@@ -160,6 +160,7 @@ class ImageProcessingState:
     white_balance_point: ImagePoint | None = None
     adjustments: AdjustmentParams = field(default_factory=AdjustmentParams)
     lab_print_cmy_offsets: list[float] | None = None
+    tone_mid_anchor: float | None = None
     roll_color_frame: dict | None = None
     negative_preview_active: bool = False
     auto_levels_pending: bool = True

@@ -706,3 +706,33 @@ qnegative/core/stitching.py
    - 继续优化中心发散、边缘候选、format 先验和轻量 ranker。
 6. Preview 稳定性
    - 仍存在偶发 preview 丢失或状态恢复不完整，需要作为架构清理的一部分处理。
+
+优化目标：
+Lab color print
+里面主要是 print curve LUT、color separation、color balance。
+
+WB/color balance
+这里有明显优化空间：即使白平衡滑块全是默认值，现在也会做全图 copy/clip、identity multiply、luminance、clip。
+
+Tone modifier
+新的高光/阴影曲线手感不错，但 full-res 下也要 2.8s 左右，主要是 luminance、LUT lookup、ratio、RGB multiply。
+
+Lab negative / levels
+各 1.7-2.2s，也有全图数组 pass，但不是第一优先级。
+
+### 2026-06-05 Tone Modifier 优化进度
+
+已完成：
+- 导出复用 preview 的 `tone_mid_anchor`，避免每次 export 都重新估计视觉中灰 anchor。
+- `apply_highlight_shadow_adjustments()` 支持外部传入 luminance，避免同一张 full-res 图重复计算亮度。
+- 当 `highlights == 0 and shadows == 0` 时，Tone Modifier 完全跳过，避免无意义的 full-res luminance pass。
+- Tone Modifier LUT 从 `4096 + linear interpolation` 改为 `16384 direct LUT`。
+
+实测结果：
+- canon 测试图 `_MG_1853.CR3`，高光/阴影启用时，Tone Modifier 从约 `2.60s` 降到约 `2.0-2.13s`。
+- canon 测试图 `_MG_1873.CR3`，高光/阴影为 0 时，Tone Modifier 为 `0.000s`。
+- old interpolated vs new direct LUT 差异极小：`max_abs_8bit = 1`，`mean_abs_8bit = 0.012`，未观察到明显断层。
+
+后续仍可优化：
+- 当前大头仍是 full-res luminance / LUT lookup / ratio / RGB multiply。
+- 若继续追求速度，可考虑 Numba / C++ / GPU kernel，把逐像素 tone mapping 合并成单 pass。
