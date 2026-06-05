@@ -20,7 +20,7 @@ from qnegative.core.pipeline import (
     build_negative_base_preview,
     suggest_lab_print_luminance_levels,
 )
-from qnegative.core.raw_loader import load_source_rgb16
+from qnegative.core.raw_loader import load_raw_rgb16
 
 
 class ExportSignals(QObject):
@@ -75,14 +75,14 @@ class ImageExportTask(QRunnable):
         stage_start = perf_counter()
         try:
             self._raise_if_cancelled()
-            self.signals.progress.emit(5, "Loading source")
+            self.signals.progress.emit(5, "Loading RAW")
             needs_camera_transform = self.adjustments.camera_color_strength > 0
-            raw_image = load_source_rgb16(
+            raw_image = load_raw_rgb16(
                 self.source_path,
                 half_size=False,
                 include_display_transform=needs_camera_transform,
             )
-            timings["Source decode"] = perf_counter() - stage_start
+            timings["RAW decode"] = perf_counter() - stage_start
             self._raise_if_cancelled()
             self.signals.progress.emit(30, self._timed_progress_text("Building base", timings))
 

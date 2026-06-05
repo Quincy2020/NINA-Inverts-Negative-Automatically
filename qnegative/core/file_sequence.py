@@ -4,10 +4,8 @@ from pathlib import Path
 
 
 RAW_EXTENSIONS = {".arw", ".raw", ".dng", ".cr2", ".cr3", ".nef", ".raf", ".orf", ".rw2"}
-TIFF_EXTENSIONS = {".tif", ".tiff"}
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-DEFAULT_SEQUENCE_IMAGE_EXTENSIONS = TIFF_EXTENSIONS
-SOURCE_EXTENSIONS = RAW_EXTENSIONS | TIFF_EXTENSIONS
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+SOURCE_EXTENSIONS = RAW_EXTENSIONS
 SUPPORTED_EXTENSIONS = RAW_EXTENSIONS | IMAGE_EXTENSIONS
 DEFAULT_SEQUENCE_EXTENSIONS = SOURCE_EXTENSIONS
 EXCLUDED_OUTPUT_STEM_SUFFIXES = ("_positive", "-positive", " positive")

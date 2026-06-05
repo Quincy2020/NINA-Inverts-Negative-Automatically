@@ -6,9 +6,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from qnegative.core.file_sequence import RAW_EXTENSIONS, TIFF_EXTENSIONS
 from qnegative.core.models import ImageSize
-from qnegative.core.raw_loader import load_raw_rgb16, load_source_rgb16
+from qnegative.core.raw_loader import load_raw_rgb16
 
 
 DEFAULT_PREVIEW_MAX_EDGE = 1080
@@ -56,34 +55,6 @@ def make_raw_preview(path: str | Path, *, max_size: int = DEFAULT_PREVIEW_MAX_ED
         preview_camera_wb_linear_rgb=np.ascontiguousarray(preview_camera_wb_linear),
         display_rgb8=display_rgb8,
         camera_to_srgb_matrix=raw_image.camera_to_srgb_matrix,
-    )
-
-
-def make_source_preview(path: str | Path, *, max_size: int = DEFAULT_PREVIEW_MAX_EDGE) -> RawPreview:
-    suffix = Path(path).suffix.lower()
-    if suffix in RAW_EXTENSIONS:
-        return make_raw_preview(path, max_size=max_size)
-    if suffix in TIFF_EXTENSIONS:
-        return make_tiff_preview(path, max_size=max_size)
-    raise ValueError(f"Unsupported source file type: {suffix or 'unknown'}")
-
-
-def make_tiff_preview(path: str | Path, *, max_size: int = DEFAULT_PREVIEW_MAX_EDGE) -> RawPreview:
-    image = load_source_rgb16(path, half_size=False)
-    preview_linear = resize_long_edge(image.as_float32(), max_size=max_size)
-    preview_camera_wb_linear = resize_long_edge(image.camera_wb_as_float32(), max_size=max_size)
-    display_linear = resize_long_edge(image.display_as_float32(), max_size=max_size)
-    display_rgb8 = linear_to_display_rgb8(display_linear)
-    height, width = preview_linear.shape[:2]
-
-    return RawPreview(
-        path=Path(path),
-        source_size=image.source_size,
-        preview_size=ImageSize(width=width, height=height),
-        preview_linear_rgb=np.ascontiguousarray(preview_linear),
-        preview_camera_wb_linear_rgb=np.ascontiguousarray(preview_camera_wb_linear),
-        display_rgb8=display_rgb8,
-        camera_to_srgb_matrix=image.camera_to_srgb_matrix,
     )
 
 

@@ -101,7 +101,7 @@ class ImageView(QWidget):
         self._pixmap = None
         self._source_path = Path(path)
         self._source_size = None
-        self._placeholder = f"Source preview pending: {self._source_path.name}"
+        self._placeholder = f"RAW preview pending: {self._source_path.name}"
         self._reset_navigation()
         self.clear_selections()
         self.update()

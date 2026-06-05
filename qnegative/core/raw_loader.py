@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import rawpy
 
-from qnegative.core.file_sequence import RAW_EXTENSIONS, TIFF_EXTENSIONS
 from qnegative.core.models import ImageSize
 
 
@@ -87,92 +86,6 @@ def load_raw_rgb16(
         display_rgb16=np.ascontiguousarray(display_rgb16) if display_rgb16 is not None else None,
         camera_to_srgb_matrix=camera_to_srgb_matrix,
     )
-
-
-def load_tiff_rgb16(path: str | Path) -> RawRgbImage:
-    import tifffile
-
-    source_path = Path(path)
-    image = tifffile.imread(str(source_path))
-    rgb16 = _coerce_tiff_to_rgb16(image)
-    height, width = rgb16.shape[:2]
-    source_size = ImageSize(width=width, height=height)
-    identity = np.eye(3, dtype=np.float32)
-
-    return RawRgbImage(
-        path=source_path,
-        source_size=source_size,
-        rgb16=np.ascontiguousarray(rgb16),
-        camera_wb_rgb16=np.ascontiguousarray(rgb16),
-        display_rgb16=np.ascontiguousarray(rgb16),
-        camera_to_srgb_matrix=identity,
-    )
-
-
-def load_source_rgb16(
-    path: str | Path,
-    *,
-    half_size: bool = False,
-    include_display_transform: bool = True,
-) -> RawRgbImage:
-    suffix = Path(path).suffix.lower()
-    if suffix in RAW_EXTENSIONS:
-        return load_raw_rgb16(
-            path,
-            half_size=half_size,
-            include_display_transform=include_display_transform,
-        )
-    if suffix in TIFF_EXTENSIONS:
-        return load_tiff_rgb16(path)
-    raise ValueError(f"Unsupported source file type: {suffix or 'unknown'}")
-
-
-def _coerce_tiff_to_rgb16(image: np.ndarray) -> np.ndarray:
-    array = np.asarray(image)
-    array = np.squeeze(array)
-    while array.ndim > 3:
-        array = array[0]
-
-    if array.ndim == 2:
-        array = np.repeat(array[:, :, None], 3, axis=2)
-    elif array.ndim == 3:
-        if array.shape[-1] in {3, 4}:
-            array = array[:, :, :3]
-        elif array.shape[0] in {3, 4}:
-            array = np.moveaxis(array[:3], 0, -1)
-        else:
-            array = np.repeat(array[0, :, :, None], 3, axis=2)
-    else:
-        raise ValueError("TIFF image must be a 2D grayscale or 3-channel RGB image.")
-
-    return _normalize_to_uint16(array)
-
-
-def _normalize_to_uint16(array: np.ndarray) -> np.ndarray:
-    if array.dtype == np.uint16:
-        return array
-    if array.dtype == np.uint8:
-        return (array.astype(np.uint16) * 257).astype(np.uint16, copy=False)
-
-    if np.issubdtype(array.dtype, np.floating):
-        values = np.nan_to_num(array.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
-        if values.size and float(np.nanmax(values)) > 1.0:
-            max_value = max(float(np.nanmax(values)), 1.0)
-            values = values / max_value
-        return np.ascontiguousarray((np.clip(values, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16))
-
-    if np.issubdtype(array.dtype, np.integer):
-        info = np.iinfo(array.dtype)
-        values = array.astype(np.float32)
-        if info.min < 0:
-            values = values - float(info.min)
-            denominator = float(info.max - info.min)
-        else:
-            denominator = float(info.max)
-        values = values / max(denominator, 1.0)
-        return np.ascontiguousarray((np.clip(values, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16))
-
-    raise ValueError(f"Unsupported TIFF dtype: {array.dtype}")
 
 
 def fit_camera_to_srgb_matrix(camera_rgb16: np.ndarray, srgb_rgb16: np.ndarray) -> np.ndarray:

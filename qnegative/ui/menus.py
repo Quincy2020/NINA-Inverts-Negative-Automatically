@@ -15,7 +15,7 @@ from qnegative.core.pipeline import (
 
 def build_main_menus(window) -> None:
     file_menu = window.file_menu = window.menuBar().addMenu("File")
-    open_action = QAction("Open RAW / TIFF...", window)
+    open_action = QAction("Open RAW / DNG...", window)
     open_action.triggered.connect(window.open_file)
     file_menu.addAction(open_action)
 
