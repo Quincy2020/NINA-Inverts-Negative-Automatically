@@ -1531,6 +1531,7 @@ class MainWindow(QMainWindow):
             base_text = f"Base RGB {mask_rgb}"
         wb_gains = ", ".join(f"{value:.3f}" for value in displayed_result.wb_gains)
         wb_label = "WB CMY offset"
+        self.control_panel.set_tone_mid_anchor(result.tone_mid_anchor)
         self.control_panel.set_image_status(
             f"Positive preview {displayed_result.width} x {displayed_result.height}\n"
             f"Mode {invert_mode_label(self.adjustments.invert_mode)}\n"

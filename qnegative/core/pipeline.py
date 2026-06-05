@@ -122,6 +122,7 @@ class NegativePreviewResult:
     wb_gains: np.ndarray
     mask_rgb: np.ndarray
     film_rect_preview: ImageRect
+    tone_mid_anchor: float = 0.46
 
     @property
     def width(self) -> int:
@@ -552,9 +553,11 @@ def build_lab_print_display_stage(
         frame_plan=roll_color_frame,
         settings=adjustments.color_correction,
     )
+    tone_mid_anchor = estimate_tone_mid_anchor(rgb_luminance(np.maximum(corrected, 0.0)))
     processed = apply_highlight_shadow_adjustments(
         corrected,
         adjustments,
+        mid_anchor=tone_mid_anchor,
     )
     color_balanced = processed
     processed = apply_saturation_adjustment(processed, adjustments)
@@ -569,6 +572,7 @@ def build_lab_print_display_stage(
         wb_gains=color_stage.wb_gains,
         mask_rgb=color_stage.mask_rgb,
         film_rect_preview=color_stage.film_rect_preview,
+        tone_mid_anchor=tone_mid_anchor,
     )
 
 
@@ -585,9 +589,11 @@ def build_lab_print_export_linear(
         frame_plan=roll_color_frame,
         settings=adjustments.color_correction,
     )
+    tone_mid_anchor = estimate_tone_mid_anchor(rgb_luminance(np.maximum(corrected, 0.0)))
     processed = apply_highlight_shadow_adjustments(
         corrected,
         adjustments,
+        mid_anchor=tone_mid_anchor,
     )
     processed = apply_saturation_adjustment(processed, adjustments)
     return processed.astype(np.float32, copy=False)
@@ -1369,13 +1375,19 @@ def apply_saturation_adjustment(image: np.ndarray, adjustments: AdjustmentParams
     return compress_rgb_gamut(saturated)
 
 
-def apply_highlight_shadow_adjustments(image: np.ndarray, adjustments: AdjustmentParams) -> np.ndarray:
+def apply_highlight_shadow_adjustments(
+    image: np.ndarray,
+    adjustments: AdjustmentParams,
+    *,
+    mid_anchor: float | None = None,
+) -> np.ndarray:
     if adjustments.highlights == 0 and adjustments.shadows == 0:
         return image
 
     adjusted = np.maximum(image.astype(np.float32, copy=False), 0.0)
     luminance = np.maximum(rgb_luminance(adjusted), 0.0)
-    mid_anchor = estimate_tone_mid_anchor(luminance)
+    if mid_anchor is None:
+        mid_anchor = estimate_tone_mid_anchor(luminance)
     tone_lut = highlight_shadow_tone_lut(adjustments, mid_anchor=mid_anchor)
     highlight_recovery = max(0.0, float(-adjustments.highlights) / 100.0)
     headroom_slope = 1.0 if highlight_recovery <= 0.0 else max(0.18, 0.55 * (1.0 - highlight_recovery))

@@ -29,6 +29,7 @@ from qnegative.ui.color_correction_panel import ColorCorrectionPanel
 from qnegative.ui.density_matrix_panel import DensityMatrixPanel
 from qnegative.ui.histogram_levels import HistogramLevelsWidget
 from qnegative.ui.print_curve_widget import PrintCurveWidget
+from qnegative.ui.tone_curve_widget import ToneCurveWidget
 from qnegative.ui.white_balance_panel import WhiteBalancePanel
 
 
@@ -91,6 +92,8 @@ class ControlPanel(QWidget):
         self.print_curve_combo.addItem("Contrast Print", PrintCurveMode.CONTRAST.value)
         self.print_curve_combo.setCurrentIndex(2)
         self.print_curve_widget = PrintCurveWidget()
+        self.tone_curve_widget = ToneCurveWidget()
+        self._tone_mid_anchor = 0.46
         self._style_combo_popup(self.print_curve_combo)
 
         self.tool_group = QButtonGroup(self)
@@ -222,6 +225,7 @@ class ControlPanel(QWidget):
         layout.addLayout(self._slider_row("Exposure", self.exposure_slider, "-1", "+1"))
         layout.addLayout(self._slider_row("Highlights", self.highlights_slider, "-1", "+1"))
         layout.addLayout(self._slider_row("Shadows", self.shadows_slider, "-1", "+1"))
+        layout.addWidget(self.tone_curve_widget)
         layout.addLayout(self._slider_row("Contrast", self.contrast_slider, "-1", "+1"))
         layout.addLayout(self._slider_row("Saturation", self.saturation_slider, "-1", "+1"))
 
@@ -488,39 +492,53 @@ class ControlPanel(QWidget):
 
     def _emit_adjustments(self) -> None:
         lens_mode = self._current_lens_mode()
-        self.adjustmentsChanged.emit(
-            {
-                "exposure": self.exposure_slider.value(),
-                "highlights": self.highlights_slider.value(),
-                "shadows": self.shadows_slider.value(),
-                "contrast": self.contrast_slider.value(),
-                "saturation": self.saturation_slider.value(),
-                "camera_color_strength": self.camera_color_slider.value(),
-                "lens_correction": LensCorrectionParams(
-                    enabled=lens_mode != "off",
-                    mode=lens_mode,
-                    strength=self.lens_strength_slider.value(),
-                    radius=self.lens_radius_slider.value(),
-                    center_x=self.lens_center_x_slider.value(),
-                    center_y=self.lens_center_y_slider.value(),
-                    smoothness=self.lens_smoothness_slider.value(),
-                    max_gain=self.lens_max_gain_slider.value(),
-                    flat_profile_path=self._flat_profile_path,
-                    flat_strength=self.lens_flat_strength_slider.value(),
-                ),
-                "analysis_inset_percent": self.analysis_inset_spin.value(),
-                "invert_mode": InvertMode.LAB_PRINT.value,
-                "print_curve": self.print_curve_combo.currentData(),
-                **self.histogram_levels.levels(),
-                **self.density_matrix_panel.values(),
-                **self.white_balance_panel.values(),
-                **self.color_correction_panel.values(),
-            }
-        )
+        values = {
+            "exposure": self.exposure_slider.value(),
+            "highlights": self.highlights_slider.value(),
+            "shadows": self.shadows_slider.value(),
+            "contrast": self.contrast_slider.value(),
+            "saturation": self.saturation_slider.value(),
+            "camera_color_strength": self.camera_color_slider.value(),
+            "lens_correction": LensCorrectionParams(
+                enabled=lens_mode != "off",
+                mode=lens_mode,
+                strength=self.lens_strength_slider.value(),
+                radius=self.lens_radius_slider.value(),
+                center_x=self.lens_center_x_slider.value(),
+                center_y=self.lens_center_y_slider.value(),
+                smoothness=self.lens_smoothness_slider.value(),
+                max_gain=self.lens_max_gain_slider.value(),
+                flat_profile_path=self._flat_profile_path,
+                flat_strength=self.lens_flat_strength_slider.value(),
+            ),
+            "analysis_inset_percent": self.analysis_inset_spin.value(),
+            "invert_mode": InvertMode.LAB_PRINT.value,
+            "print_curve": self.print_curve_combo.currentData(),
+            **self.histogram_levels.levels(),
+            **self.density_matrix_panel.values(),
+            **self.white_balance_panel.values(),
+            **self.color_correction_panel.values(),
+        }
+        self._refresh_tone_curve_widget(values)
+        self.adjustmentsChanged.emit(values)
 
     def _print_curve_changed(self) -> None:
         self.print_curve_widget.set_curve_mode(self.print_curve_combo.currentData())
         self._emit_adjustments()
+
+    def _refresh_tone_curve_widget(self, values: dict | None = None) -> None:
+        if values is None:
+            values = {
+                "highlights": self.highlights_slider.value(),
+                "shadows": self.shadows_slider.value(),
+            }
+        self.tone_curve_widget.set_tone(
+            adjustments=AdjustmentParams(
+                highlights=int(values.get("highlights", 0)),
+                shadows=int(values.get("shadows", 0)),
+            ),
+            mid_anchor=self._tone_mid_anchor,
+        )
 
     def _make_slider(self, minimum: int, maximum: int, value: int) -> QSlider:
         slider = QSlider(Qt.Horizontal)
@@ -645,6 +663,10 @@ class ControlPanel(QWidget):
     def set_levels(self, black: int, mid: int, white: int, *, emit: bool = False) -> None:
         self.histogram_levels.set_levels(black, mid, white, emit=emit)
 
+    def set_tone_mid_anchor(self, mid_anchor: float) -> None:
+        self._tone_mid_anchor = float(mid_anchor)
+        self._refresh_tone_curve_widget()
+
     def set_export_progress(self, active: bool, *, value: int = 0, text: str = "Exporting...") -> None:
         self.export_progress.setVisible(active)
         if active:
@@ -734,6 +756,12 @@ class ControlPanel(QWidget):
             curve_index = self.print_curve_combo.findData(adjustments.print_curve)
             self.print_curve_combo.setCurrentIndex(2 if curve_index < 0 else curve_index)
             self.print_curve_widget.set_curve_mode(self.print_curve_combo.currentData())
+            self._refresh_tone_curve_widget(
+                {
+                    "highlights": adjustments.highlights,
+                    "shadows": adjustments.shadows,
+                }
+            )
             self.histogram_levels.set_levels(
                 adjustments.black_point,
                 adjustments.mid_point,
