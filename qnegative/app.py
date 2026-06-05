@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QProgressBar, QSplashScreen
 
@@ -50,6 +50,8 @@ def _create_splash() -> tuple[QSplashScreen, QProgressBar]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="NINA - NINA Inverts Negative Automatically")
     _, qt_args = parser.parse_known_args(sys.argv[1:])
+
+    QImageReader.setAllocationLimit(0)
 
     app = QApplication([sys.argv[0], *qt_args])
     app.setApplicationName("NINA")

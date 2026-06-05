@@ -29,7 +29,7 @@ from qnegative.core.pipeline import (
     build_negative_base_preview,
     suggest_lab_print_luminance_levels,
 )
-from qnegative.core.preview import RawPreview, make_raw_preview, resize_long_edge
+from qnegative.core.preview import RawPreview, make_source_preview, resize_long_edge
 from qnegative.ui.preview_cache import (
     PreviewRenderOutput,
     PreviewStageCache,
@@ -99,7 +99,7 @@ class RawPreviewTask(QRunnable):
 
     def run(self) -> None:
         try:
-            preview = make_raw_preview(self.path, max_size=self.max_size)
+            preview = make_source_preview(self.path, max_size=self.max_size)
         except Exception as exc:
             self.signals.failed.emit(self.job_id, self.path, str(exc))
             return
@@ -131,7 +131,7 @@ class PreInvertTask(QRunnable):
 
     def run(self) -> None:
         try:
-            preview = make_raw_preview(self.path, max_size=self.max_size)
+            preview = make_source_preview(self.path, max_size=self.max_size)
             detected = detect_frame_and_base(
                 preview.preview_linear_rgb,
                 preview_size=preview.preview_size,

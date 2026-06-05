@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from qnegative.core.file_sequence import IMAGE_EXTENSIONS, RAW_EXTENSIONS, list_supported_files
+from qnegative.core.file_sequence import IMAGE_EXTENSIONS, SOURCE_EXTENSIONS, list_supported_files
 from qnegative.core.lens_profiles import (
     create_flat_frame_profile,
     default_lens_profile_dir,
@@ -527,7 +527,7 @@ class MainWindow(QMainWindow):
         paths = [
             path
             for path in (self.folder_files or ([self.current_path] if self.current_path else []))
-            if path is not None and path.suffix.lower() in RAW_EXTENSIONS
+            if path is not None and path.suffix.lower() in SOURCE_EXTENSIONS
         ]
         if scope == "all":
             return paths
@@ -598,6 +598,12 @@ class MainWindow(QMainWindow):
         self.control_panel.set_file_status(path.name)
         self.filmstrip.set_current(path)
 
+        if extension in SOURCE_EXTENSIONS:
+            if self._restore_cached_raw_preview(path):
+                return
+            self.load_raw_preview(path)
+            return
+
         if extension in IMAGE_EXTENSIONS:
             loaded = self.image_view.load_image(path)
             self.control_panel.set_image_loaded(loaded)
@@ -607,21 +613,15 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Opened: {path.name}")
             return
 
-        if extension in RAW_EXTENSIONS:
-            if self._restore_cached_raw_preview(path):
-                return
-            self.load_raw_preview(path)
-            return
-
         self.image_view.set_placeholder(f"Unsupported file type: {extension or 'unknown'}")
         self.control_panel.set_image_loaded(False)
         self.control_panel.set_image_status("Unsupported file type")
         self.control_panel.set_histogram(None)
 
     def load_raw_preview(self, path: Path) -> None:
-        self.statusBar().showMessage(f"Generating RAW {DEFAULT_PREVIEW_MAX_EDGE} preview...")
+        self.statusBar().showMessage(f"Generating source {DEFAULT_PREVIEW_MAX_EDGE} preview...")
         self.control_panel.set_image_loaded(False)
-        self.control_panel.set_image_status("Decoding RAW...")
+        self.control_panel.set_image_status("Decoding source...")
 
         self._raw_preview_job_id += 1
         job_id = self._raw_preview_job_id
@@ -646,7 +646,7 @@ class MainWindow(QMainWindow):
         if self.negative_preview_active:
             self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
         else:
-            self.statusBar().showMessage(f"RAW preview ready: {path.name}")
+            self.statusBar().showMessage(f"Source preview ready: {path.name}")
 
     def _raw_preview_failed(self, job_id: int, path: Path, message: str) -> None:
         if job_id != self._raw_preview_job_id or path != self.current_path:
@@ -655,9 +655,9 @@ class MainWindow(QMainWindow):
         self._refresh_activity_progress()
         self.image_view.set_raw_placeholder(path)
         self.control_panel.set_image_loaded(False)
-        self.control_panel.set_image_status("RAW preview failed")
-        QMessageBox.warning(self, "RAW Preview Failed", message)
-        self.statusBar().showMessage("RAW preview failed")
+        self.control_panel.set_image_status("Source preview failed")
+        QMessageBox.warning(self, "Source Preview Failed", message)
+        self.statusBar().showMessage("Source preview failed")
 
     def _show_raw_preview(self, path: Path, preview: RawPreview) -> None:
         self.current_preview = preview
@@ -707,7 +707,7 @@ class MainWindow(QMainWindow):
         if self.negative_preview_active:
             self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
         else:
-            self.statusBar().showMessage(f"Cached RAW preview restored: {path.name}")
+            self.statusBar().showMessage(f"Cached source preview restored: {path.name}")
         return True
 
     def set_tool_mode(self, mode: ToolMode) -> None:
@@ -794,7 +794,7 @@ class MainWindow(QMainWindow):
     def auto_detect_current(self, mode: str, *, auto_preview: bool = False) -> None:
         if self.current_preview is None:
             if not auto_preview:
-                QMessageBox.information(self, "Auto Detect", "Open a RAW file before auto detection.")
+                QMessageBox.information(self, "Auto Detect", "Open a RAW/TIFF source before auto detection.")
             return
         if self._auto_detect_in_progress:
             self.statusBar().showMessage("Auto detect already running...")
@@ -1044,7 +1044,7 @@ class MainWindow(QMainWindow):
     def _queue_negative_render(self, *, show_errors: bool, interactive: bool = False) -> bool:
         if self.current_preview is None:
             if show_errors:
-                QMessageBox.information(self, "Invert Preview", "Open a RAW file and generate a linear preview first.")
+                QMessageBox.information(self, "Invert Preview", "Open a RAW/TIFF source and generate a linear preview first.")
             return False
         if self.film_rect is None or not self.film_rect.is_valid():
             if show_errors:
@@ -1231,7 +1231,7 @@ class MainWindow(QMainWindow):
 
     def _preview_for_render(self, *, interactive: bool) -> RawPreview:
         if self.current_preview is None:
-            raise PipelineError("Open a RAW file and generate a linear preview first.")
+            raise PipelineError("Open a RAW/TIFF source and generate a linear preview first.")
         if not interactive:
             return self.current_preview
 
@@ -1419,7 +1419,7 @@ class MainWindow(QMainWindow):
 
     def _negative_base_for_current(self) -> NegativeBasePreview:
         if self.current_preview is None:
-            raise PipelineError("Open a RAW file and generate a linear preview first.")
+            raise PipelineError("Open a RAW/TIFF source and generate a linear preview first.")
 
         key: tuple[object, ...] = (
             self.current_preview.path,
@@ -1500,8 +1500,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Export already in progress")
             return
 
-        if self.current_path is None or self.current_path.suffix.lower() not in RAW_EXTENSIONS:
-            QMessageBox.information(self, "Export Image", "Open a RAW file before exporting.")
+        if self.current_path is None or self.current_path.suffix.lower() not in SOURCE_EXTENSIONS:
+            QMessageBox.information(self, "Export Image", "Open a RAW/TIFF source before exporting.")
             return
         if self._film_base_required_for_current_mode() and self.mask_point is None:
             QMessageBox.information(self, "Export Image", "Pick the film base before exporting.")
@@ -1620,7 +1620,7 @@ class MainWindow(QMainWindow):
             state = self.image_states.get(path)
             if state is None or not state.negative_preview_active:
                 continue
-            if path.suffix.lower() not in RAW_EXTENSIONS:
+            if path.suffix.lower() not in SOURCE_EXTENSIONS:
                 continue
             if state.film_rect is None or not state.film_rect.is_valid():
                 continue
@@ -1939,7 +1939,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_activity_progress(self) -> None:
         if self._raw_preview_in_progress:
-            self.control_panel.set_activity_progress(True, text="Loading RAW preview...")
+            self.control_panel.set_activity_progress(True, text="Loading source preview...")
         elif self._auto_detect_in_progress:
             self.control_panel.set_activity_progress(True, text="Finding frame...")
         elif self._preinvert_in_progress:
@@ -2058,7 +2058,7 @@ class MainWindow(QMainWindow):
             return
         if self.current_preview is None or self.current_path is None:
             return
-        if self.current_path.suffix.lower() not in RAW_EXTENSIONS:
+        if self.current_path.suffix.lower() not in SOURCE_EXTENSIONS:
             return
         if self.film_rect is not None or self.negative_preview_active:
             return
@@ -2089,7 +2089,7 @@ class MainWindow(QMainWindow):
     def _should_preinvert_path(self, path: Path) -> bool:
         if path == self.current_path:
             return False
-        if path.suffix.lower() not in RAW_EXTENSIONS:
+        if path.suffix.lower() not in SOURCE_EXTENSIONS:
             return False
         if path in self._preinvert_paths or path in self.image_states:
             return False
