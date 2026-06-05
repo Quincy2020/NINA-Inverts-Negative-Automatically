@@ -110,7 +110,7 @@ class ImageExportTask(QRunnable):
             self.signals.progress.emit(55, self._timed_progress_text(positive_text, timings))
 
             stage_start = perf_counter()
-            export_linear_rgb = self._process_export(base)
+            export_linear_rgb = self._process_export(base, timings)
             timings["Lab Print"] = perf_counter() - stage_start
             self._raise_if_cancelled()
 
@@ -151,14 +151,18 @@ class ImageExportTask(QRunnable):
         elapsed = ", ".join(f"{name} {seconds:.1f}s" for name, seconds in timings.items())
         return f"{current} ({elapsed})"
 
-    def _process_export(self, base: NegativeBasePreview) -> np.ndarray:
+    def _process_export(self, base: NegativeBasePreview, timings: dict[str, float]) -> np.ndarray:
+        stage_start = perf_counter()
         negative_stage = build_lab_print_negative_stage(
             base,
             include_histogram=False,
             analysis_inset=analysis_inset_from_adjustments(self.adjustments),
         )
+        timings["Lab negative"] = perf_counter() - stage_start
+
         effective = deepcopy(self.adjustments)
         if self.auto_levels_pending:
+            stage_start = perf_counter()
             auto_levels = suggest_lab_print_luminance_levels(
                 analysis_inset_crop(negative_stage.normalized_log, negative_stage.analysis_inset),
                 effective,
@@ -167,24 +171,33 @@ class ImageExportTask(QRunnable):
             effective.black_point = auto_levels["black_point"]
             effective.mid_point = auto_levels["mid_point"]
             effective.white_point = auto_levels["white_point"]
+            timings["Lab auto levels"] = perf_counter() - stage_start
         else:
             auto_levels = _current_levels(effective)
+            timings["Lab auto levels"] = 0.0
 
+        stage_start = perf_counter()
         levels_stage = build_lab_print_levels_stage(
             negative_stage,
             effective,
             auto_levels=auto_levels,
         )
+        timings["Lab levels"] = perf_counter() - stage_start
+
+        stage_start = perf_counter()
         color_stage = build_lab_print_color_stage(
             levels_stage,
             effective,
             cmy_offsets=self.preview_cmy_offsets if effective.auto_wb else None,
         )
+        timings["Lab color print"] = perf_counter() - stage_start
+
         return build_lab_print_export_linear(
             color_stage,
             effective,
             roll_color_result=self.roll_color_result,
             roll_color_frame=self.roll_color_frame,
+            stage_timings=timings,
         )
 
 

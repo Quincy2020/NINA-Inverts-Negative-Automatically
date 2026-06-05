@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -582,20 +583,32 @@ def build_lab_print_export_linear(
     *,
     roll_color_result: dict | None = None,
     roll_color_frame: dict | None = None,
+    stage_timings: dict[str, float] | None = None,
 ) -> np.ndarray:
+    stage_start = perf_counter()
     corrected = apply_roll_color_to_linear_rgb(
         color_stage.color_linear_rgb,
         roll_result=roll_color_result,
         frame_plan=roll_color_frame,
         settings=adjustments.color_correction,
     )
+    if stage_timings is not None:
+        stage_timings["Lab roll color"] = perf_counter() - stage_start
+
+    stage_start = perf_counter()
     tone_mid_anchor = estimate_tone_mid_anchor(rgb_luminance(np.maximum(corrected, 0.0)))
     processed = apply_highlight_shadow_adjustments(
         corrected,
         adjustments,
         mid_anchor=tone_mid_anchor,
     )
+    if stage_timings is not None:
+        stage_timings["Lab tone modifier"] = perf_counter() - stage_start
+
+    stage_start = perf_counter()
     processed = apply_saturation_adjustment(processed, adjustments)
+    if stage_timings is not None:
+        stage_timings["Lab saturation"] = perf_counter() - stage_start
     return processed.astype(np.float32, copy=False)
 
 
@@ -1692,14 +1705,50 @@ def select_auto_wb_sample(image: np.ndarray) -> np.ndarray:
 
 
 def apply_color_balance(image: np.ndarray, params: ColorBalanceParams) -> np.ndarray:
-    balanced = np.clip(image, 0.0, 1.0).astype(np.float32, copy=True)
-    balanced = apply_global_balance(balanced, params.global_balance)
+    active_tonal = [
+        ("shadows", params.shadows),
+        ("midtones", params.midtones),
+        ("highlights", params.highlights),
+    ]
+    active_tonal = [
+        (tonal, balance, axis_to_gains(balance, scale=TONAL_BALANCE_SCALE))
+        for tonal, balance in active_tonal
+        if not balance_axis_is_neutral(balance)
+    ]
+    global_gains = axis_to_gains(params.global_balance, scale=GLOBAL_BALANCE_SCALE)
+    global_is_neutral = balance_axis_is_neutral(params.global_balance)
 
-    luminance = rgb_luminance(np.clip(balanced, 0.0, 1.0))
-    balanced = apply_tonal_balance(balanced, luminance, params.shadows, tonal="shadows")
-    balanced = apply_tonal_balance(balanced, luminance, params.midtones, tonal="midtones")
-    balanced = apply_tonal_balance(balanced, luminance, params.highlights, tonal="highlights")
-    return np.clip(balanced, 0.0, 1.0)
+    if global_is_neutral and not active_tonal:
+        # Lab Print already feeds this stage bounded float32 data. Returning
+        # directly avoids a full-resolution clip/copy when WB sliders are zero.
+        return image.astype(np.float32, copy=False)
+
+    clipped = np.clip(image, 0.0, 1.0).astype(np.float32, copy=False)
+    if not active_tonal:
+        balanced = clipped * global_gains.reshape(1, 1, 3)
+        np.clip(balanced, 0.0, 1.0, out=balanced)
+        return balanced.astype(np.float32, copy=False)
+
+    if global_is_neutral:
+        balanced = clipped.astype(np.float32, copy=True)
+    else:
+        balanced = clipped * global_gains.reshape(1, 1, 3)
+
+    luminance = rgb_luminance(clipped)
+    for tonal, balance, gains in active_tonal:
+        weight = tonal_weight(luminance, balance.tonal_range, tonal=tonal).astype(np.float32, copy=False)
+        log_delta = np.log(np.maximum(gains, 1e-6)).astype(np.float32, copy=False)
+        changed_channels = np.flatnonzero(np.abs(log_delta) > 1e-6)
+        for channel in changed_channels:
+            channel_gain = np.exp(weight * log_delta[channel])
+            balanced[:, :, channel] *= channel_gain
+
+    np.clip(balanced, 0.0, 1.0, out=balanced)
+    return balanced.astype(np.float32, copy=False)
+
+
+def balance_axis_is_neutral(axis: BalanceAxis) -> bool:
+    return axis.red_cyan == 0 and axis.green_magenta == 0 and axis.blue_yellow == 0
 
 
 def suggest_global_balance_from_neutral(
