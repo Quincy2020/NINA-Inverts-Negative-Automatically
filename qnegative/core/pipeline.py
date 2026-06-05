@@ -27,6 +27,8 @@ LOG_AUTO_WB_MAX_OFFSET = 0.025
 LAB_PRINT_LOG_PERCENTILE_CLIP = 0.02
 LAB_PRINT_AUTO_WB_STRENGTH = 0.45
 LAB_PRINT_AUTO_WB_MAX_OFFSET = 0.04
+LAB_PRINT_MANUAL_CMY_OFFSET_SCALE = 0.0009
+LAB_PRINT_MANUAL_CMY_MAX_OFFSET = 0.09
 LAB_PRINT_COLOR_SEPARATION_STRENGTH = 0.45
 LAB_PRINT_AUTO_EXPOSURE_SAMPLE_LIMIT = 180_000
 TONE_MID_ANCHOR_SAMPLE_LIMIT = 180_000
@@ -512,8 +514,10 @@ def build_lab_print_color_stage(
         cmy_offsets = np.asarray(cmy_offsets, dtype=np.float32)
     elif adjustments.auto_wb:
         cmy_offsets = estimate_lab_print_auto_cmy_offsets(normalized_for_print)
+        cmy_offsets = effective_lab_print_cmy_offsets(cmy_offsets, adjustments)
     else:
         cmy_offsets = np.zeros(3, dtype=np.float32)
+        cmy_offsets = effective_lab_print_cmy_offsets(cmy_offsets, adjustments)
 
     processed = apply_log_hd_print_curve(
         normalized_for_print,
@@ -999,6 +1003,92 @@ def estimate_lab_print_auto_cmy_offsets(
     offsets = np.mean(median_log, dtype=np.float32) - median_log
     offsets *= float(np.clip(strength, 0.0, 1.0))
     return np.clip(offsets, -LAB_PRINT_AUTO_WB_MAX_OFFSET, LAB_PRINT_AUTO_WB_MAX_OFFSET).astype(np.float32, copy=False)
+
+
+def manual_printer_balance_offsets(axis: BalanceAxis) -> np.ndarray:
+    rgb_direction = np.array(
+        [axis.red_cyan, axis.green_magenta, axis.blue_yellow],
+        dtype=np.float32,
+    )
+    offsets = -rgb_direction * np.float32(LAB_PRINT_MANUAL_CMY_OFFSET_SCALE)
+    return np.clip(
+        offsets,
+        -LAB_PRINT_MANUAL_CMY_MAX_OFFSET,
+        LAB_PRINT_MANUAL_CMY_MAX_OFFSET,
+    ).astype(np.float32, copy=False)
+
+
+def suggest_printer_balance_from_log_sample(
+    normalized_log: np.ndarray,
+    point: ImagePoint,
+    *,
+    base_cmy_offsets: np.ndarray | list[float] | None = None,
+    radius: int = 14,
+    strength: float = 1.0,
+) -> tuple[BalanceAxis, np.ndarray, np.ndarray]:
+    sample = sample_log_at_point(normalized_log, point, radius=radius)
+    median_log = np.median(sample, axis=0).astype(np.float32)
+    offset_delta = (np.mean(median_log, dtype=np.float32) - median_log) * float(np.clip(strength, 0.0, 1.0))
+    offset_delta = np.clip(
+        offset_delta,
+        -LAB_PRINT_MANUAL_CMY_MAX_OFFSET,
+        LAB_PRINT_MANUAL_CMY_MAX_OFFSET,
+    ).astype(np.float32, copy=False)
+    base = (
+        np.asarray(base_cmy_offsets, dtype=np.float32).reshape(3)
+        if base_cmy_offsets is not None
+        else np.zeros(3, dtype=np.float32)
+    )
+    manual_offsets = np.clip(
+        offset_delta - base,
+        -LAB_PRINT_MANUAL_CMY_MAX_OFFSET,
+        LAB_PRINT_MANUAL_CMY_MAX_OFFSET,
+    )
+    slider_values = np.rint(-manual_offsets / LAB_PRINT_MANUAL_CMY_OFFSET_SCALE).astype(np.int32)
+
+    return (
+        BalanceAxis(
+            red_cyan=clamp_balance_value(int(slider_values[0])),
+            green_magenta=clamp_balance_value(int(slider_values[1])),
+            blue_yellow=clamp_balance_value(int(slider_values[2])),
+        ),
+        median_log,
+        offset_delta.astype(np.float32, copy=False),
+    )
+
+
+def sample_log_at_point(image: np.ndarray, point: ImagePoint, *, radius: int) -> np.ndarray:
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise PipelineError("Printer balance picker needs a log RGB image.")
+
+    height, width, _channels = image.shape
+    if width <= 0 or height <= 0:
+        raise PipelineError("Printer balance sample image is empty.")
+
+    x = min(max(0, int(point.x)), width - 1)
+    y = min(max(0, int(point.y)), height - 1)
+    x0 = max(0, x - radius)
+    y0 = max(0, y - radius)
+    x1 = min(width, x + radius + 1)
+    y1 = min(height, y + radius + 1)
+    sample = np.clip(image[y0:y1, x0:x1].reshape(-1, 3), 0.0, 1.0)
+    if sample.size == 0:
+        raise PipelineError("Printer balance sample area is empty.")
+    return sample.astype(np.float32, copy=False)
+
+
+def effective_lab_print_cmy_offsets(
+    auto_cmy_offsets: np.ndarray | list[float] | None,
+    adjustments: AdjustmentParams,
+) -> np.ndarray:
+    base = (
+        np.asarray(auto_cmy_offsets, dtype=np.float32).reshape(3)
+        if auto_cmy_offsets is not None
+        else np.zeros(3, dtype=np.float32)
+    )
+    manual = manual_printer_balance_offsets(adjustments.printer_balance)
+    limit = LAB_PRINT_AUTO_WB_MAX_OFFSET + LAB_PRINT_MANUAL_CMY_MAX_OFFSET
+    return np.clip(base + manual, -limit, limit).astype(np.float32, copy=False)
 
 
 def select_lab_print_log_wb_sample(normalized_log: np.ndarray) -> np.ndarray:
@@ -2067,6 +2157,7 @@ def lab_print_visual_brightness_score(
         cmy_offsets = estimate_lab_print_auto_cmy_offsets(normalized_for_print)
     else:
         cmy_offsets = np.zeros(3, dtype=np.float32)
+    cmy_offsets = effective_lab_print_cmy_offsets(cmy_offsets, adjustments)
 
     processed = apply_log_hd_print_curve(
         normalized_for_print,

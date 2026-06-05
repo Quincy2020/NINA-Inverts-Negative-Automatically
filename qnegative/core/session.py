@@ -45,13 +45,15 @@ def state_from_json_dict(payload: dict[str, Any], source_path: Path) -> ImagePro
         return None
 
     try:
+        adjustments_payload = payload.get("adjustments") or {}
+        migrated_printer_balance = _uses_legacy_global_balance(adjustments_payload)
         return ImageProcessingState(
             mask_point=_point_from_dict(payload.get("mask_point")),
             film_rect=_rect_from_dict(payload.get("film_rect")),
             white_balance_point=_point_from_dict(payload.get("white_balance_point")),
-            adjustments=_adjustments_from_dict(payload.get("adjustments") or {}),
+            adjustments=_adjustments_from_dict(adjustments_payload),
             lab_print_cmy_offsets=_float_list_from_payload(
-                payload.get("lab_print_cmy_offsets"),
+                None if migrated_printer_balance else payload.get("lab_print_cmy_offsets"),
                 length=3,
             ),
             roll_color_frame=payload.get("roll_color_frame") if isinstance(payload.get("roll_color_frame"), dict) else None,
@@ -188,11 +190,32 @@ def _float_list_from_payload(payload: Any, *, length: int) -> list[float] | None
     return [float(value) for value in payload]
 
 
+def _uses_legacy_global_balance(adjustments_payload: dict[str, Any]) -> bool:
+    if "printer_balance" in adjustments_payload:
+        return False
+    color_balance = adjustments_payload.get("color_balance")
+    if not isinstance(color_balance, dict):
+        return False
+    global_balance = color_balance.get("global_balance")
+    if not isinstance(global_balance, dict):
+        return False
+    return any(
+        int(global_balance.get(key, 0)) != 0
+        for key in ("red_cyan", "green_magenta", "blue_yellow")
+    )
+
+
 def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     allowed = {item.name for item in fields(AdjustmentParams)}
     values = {key: payload[key] for key in payload if key in allowed}
     values["invert_mode"] = InvertMode.LAB_PRINT.value
-    values["color_balance"] = _color_balance_from_dict(payload.get("color_balance") or {})
+    color_balance_payload = payload.get("color_balance") or {}
+    values["printer_balance"] = _balance_axis_from_dict(
+        payload.get("printer_balance")
+        or color_balance_payload.get("global_balance")
+        or {}
+    )
+    values["color_balance"] = _color_balance_from_dict(color_balance_payload)
     values["density_matrix"] = _density_matrix_from_dict(payload.get("density_matrix") or {})
     values["lens_correction"] = _lens_correction_from_dict(payload.get("lens_correction") or {})
     values["color_correction"] = _color_correction_from_dict(payload.get("color_correction") or {})
@@ -201,7 +224,7 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
 
 def _color_balance_from_dict(payload: dict[str, Any]) -> ColorBalanceParams:
     return ColorBalanceParams(
-        global_balance=_balance_axis_from_dict(payload.get("global_balance") or {}),
+        global_balance=BalanceAxis(),
         shadows=_tonal_balance_from_dict(payload.get("shadows") or {}),
         midtones=_tonal_balance_from_dict(payload.get("midtones") or {}),
         highlights=_tonal_balance_from_dict(payload.get("highlights") or {}),

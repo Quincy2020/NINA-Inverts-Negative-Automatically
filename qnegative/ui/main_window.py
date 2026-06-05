@@ -54,10 +54,15 @@ from qnegative.core.pipeline import (
     NegativeBasePreview,
     NegativePreviewResult,
     PipelineError,
+    build_lab_print_levels_stage,
+    build_lab_print_negative_stage,
     build_negative_base_preview,
     build_density_preview_analysis,
+    estimate_lab_print_auto_cmy_offsets,
+    manual_printer_balance_offsets,
+    analysis_inset_from_adjustments,
     set_log_print_curve_engine,
-    suggest_global_balance_from_neutral,
+    suggest_printer_balance_from_log_sample,
 )
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview
 from qnegative.core.roll_color_adapter import roll_color_result_summary
@@ -857,7 +862,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Frame reset")
 
     def white_balance_point_selected(self, point: ImagePoint) -> None:
-        if not self.negative_preview_active or self.last_negative_result is None:
+        if (
+            not self.negative_preview_active
+            or self.last_negative_result is None
+            or self._last_untransformed_negative_result is None
+        ):
             self.white_balance_point = None
             self.preview_view.restore_selections(
                 mask_point=None,
@@ -868,10 +877,19 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            global_balance, sample_rgb, gains = suggest_global_balance_from_neutral(
-                self.last_negative_result.color_balanced_linear_rgb,
+            log_point = self._inverse_preview_transform_point(
                 point,
-                self.adjustments.color_balance.global_balance,
+                source_size=ImageSize(
+                    width=self._last_untransformed_negative_result.width,
+                    height=self._last_untransformed_negative_result.height,
+                ),
+            )
+            normalized_for_print = self._current_normalized_for_print()
+            base_cmy_offsets = self._printer_picker_base_cmy_offsets(normalized_for_print)
+            printer_balance, median_log, offset_delta = suggest_printer_balance_from_log_sample(
+                normalized_for_print,
+                log_point,
+                base_cmy_offsets=base_cmy_offsets,
             )
         except PipelineError as exc:
             self.statusBar().showMessage(str(exc))
@@ -879,13 +897,72 @@ class MainWindow(QMainWindow):
 
         self.white_balance_point = point
         updated = deepcopy(self.adjustments)
-        updated.color_balance.global_balance = global_balance
+        updated.printer_balance = printer_balance
         self.control_panel.set_adjustments(updated, emit=True)
+        self.preview_view.set_tool_mode(ToolMode.PAN)
 
-        sample_text = ", ".join(f"{value:.3f}" for value in sample_rgb)
-        gain_text = ", ".join(f"{value:.3f}" for value in gains)
+        sample_text = ", ".join(f"{value:.3f}" for value in median_log)
+        offset_text = ", ".join(f"{value:+.4f}" for value in offset_delta)
         self.statusBar().showMessage(
-            f"WB picker: x={point.x}, y={point.y}, sample RGB {sample_text}, gains {gain_text}"
+            f"WB picker: x={point.x}, y={point.y}, median log {sample_text}, printer delta {offset_text}"
+        )
+
+    def _current_normalized_for_print(self) -> np.ndarray:
+        if self._last_untransformed_negative_result is None:
+            raise PipelineError("Generate a positive preview before using the WB picker.")
+
+        base = self._negative_base_for_current()
+        negative_stage = build_lab_print_negative_stage(
+            base,
+            include_histogram=False,
+            analysis_inset=analysis_inset_from_adjustments(self.adjustments),
+        )
+        levels_stage = build_lab_print_levels_stage(
+            negative_stage,
+            self.adjustments,
+            auto_levels=self._last_untransformed_negative_result.auto_levels,
+        )
+        return levels_stage.normalized_for_print
+
+    def _printer_picker_base_cmy_offsets(self, normalized_for_print: np.ndarray) -> np.ndarray:
+        if not self.adjustments.auto_wb:
+            return np.zeros(3, dtype=np.float32)
+
+        manual = manual_printer_balance_offsets(self.adjustments.printer_balance)
+        if self.lab_print_cmy_offsets is not None:
+            effective = np.asarray(self.lab_print_cmy_offsets, dtype=np.float32).reshape(3)
+            return (effective - manual).astype(np.float32, copy=False)
+
+        return estimate_lab_print_auto_cmy_offsets(normalized_for_print)
+
+    def _inverse_preview_transform_point(self, point: ImagePoint, *, source_size: ImageSize) -> ImagePoint:
+        width = max(1, int(source_size.width))
+        height = max(1, int(source_size.height))
+        x = int(point.x)
+        y = int(point.y)
+
+        rotation = self._preview_rotation_quarters % 4
+        if rotation == 1:
+            rotated_x = y
+            rotated_y = height - 1 - x
+        elif rotation == 2:
+            rotated_x = width - 1 - x
+            rotated_y = height - 1 - y
+        elif rotation == 3:
+            rotated_x = width - 1 - y
+            rotated_y = x
+        else:
+            rotated_x = x
+            rotated_y = y
+
+        if self._preview_flip_horizontal:
+            rotated_x = width - 1 - rotated_x
+        if self._preview_flip_vertical:
+            rotated_y = height - 1 - rotated_y
+
+        return ImagePoint(
+            x=max(0, min(width - 1, int(rotated_x))),
+            y=max(0, min(height - 1, int(rotated_y))),
         )
 
     def auto_detect_current(self, mode: str, *, auto_preview: bool = False) -> None:
@@ -1071,7 +1148,8 @@ class MainWindow(QMainWindow):
         if mode_changed:
             self.auto_levels_pending = True
             self.lab_print_cmy_offsets = None
-        if previous.auto_wb != self.adjustments.auto_wb:
+        printer_balance_changed = previous.printer_balance != self.adjustments.printer_balance
+        if previous.auto_wb != self.adjustments.auto_wb or printer_balance_changed:
             self.lab_print_cmy_offsets = None
             if self.current_path is not None:
                 self.preview_result_cache.pop(self.current_path, None)
@@ -1530,7 +1608,7 @@ class MainWindow(QMainWindow):
             mask_rgb = ", ".join(f"{value:.4f}" for value in result.mask_rgb)
             base_text = f"Base RGB {mask_rgb}"
         wb_gains = ", ".join(f"{value:.3f}" for value in displayed_result.wb_gains)
-        wb_label = "WB CMY offset"
+        wb_label = "Printer CMY"
         self.control_panel.set_tone_mid_anchor(result.tone_mid_anchor)
         self.control_panel.set_image_status(
             f"Positive preview {displayed_result.width} x {displayed_result.height}\n"
@@ -1541,9 +1619,9 @@ class MainWindow(QMainWindow):
         self._update_preview_status_overlay()
 
     def _update_preview_status_overlay(self) -> None:
-        axis = self.adjustments.color_balance.global_balance
+        axis = self.adjustments.printer_balance
         self.preview_view.set_status_overlay(
-            "WB  R/C {red:+d}  G/M {green:+d}  B/Y {blue:+d}\n"
+            "Printer  R/C {red:+d}  G/M {green:+d}  B/Y {blue:+d}\n"
             "Exp {exposure:+d}   Gray {mid}".format(
                 red=axis.red_cyan,
                 green=axis.green_magenta,
@@ -2390,11 +2468,11 @@ class MainWindow(QMainWindow):
 
     def _nudge_global_balance(self, axis_name: str, delta: int) -> None:
         updated = deepcopy(self.adjustments)
-        axis = updated.color_balance.global_balance
+        axis = updated.printer_balance
         current = int(getattr(axis, axis_name))
         setattr(axis, axis_name, self._clamp_adjustment(current + delta))
         self.control_panel.set_adjustments(updated, emit=True)
-        self.statusBar().showMessage(f"{axis_name.replace('_', ' ')} {getattr(axis, axis_name):+d}")
+        self.statusBar().showMessage(f"Printer {axis_name.replace('_', ' ')} {getattr(axis, axis_name):+d}")
 
     def _nudge_exposure(self, delta: int) -> None:
         updated = deepcopy(self.adjustments)

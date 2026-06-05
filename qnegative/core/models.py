@@ -134,6 +134,7 @@ class AdjustmentParams:
     invert_mode: str = InvertMode.LAB_PRINT.value
     print_curve: str = PrintCurveMode.STANDARD.value
     auto_wb: bool = True
+    printer_balance: BalanceAxis = field(default_factory=BalanceAxis)
     color_balance: ColorBalanceParams = field(default_factory=ColorBalanceParams)
     density_matrix: DensityMatrixParams = field(default_factory=DensityMatrixParams)
     lens_correction: LensCorrectionParams = field(default_factory=LensCorrectionParams)

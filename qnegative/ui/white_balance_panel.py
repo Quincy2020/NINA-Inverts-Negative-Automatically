@@ -166,18 +166,18 @@ class WhiteBalancePanel(QWidget):
         self.setObjectName("whiteBalancePanel")
         self._rows: dict[str, ColorSliderRow] = {}
 
-        self.auto_wb_checkbox = QCheckBox("Auto White Balance")
+        self.auto_wb_checkbox = QCheckBox("Auto CMY")
         self.auto_wb_checkbox.setChecked(True)
         self.auto_wb_checkbox.stateChanged.connect(lambda _state: self.balanceChanged.emit())
 
         self.pick_wb_button = QToolButton()
         self.pick_wb_button.setText("Pick WB")
-        self.pick_wb_button.setToolTip("Pick a neutral point from the positive preview")
+        self.pick_wb_button.setToolTip("Pick a neutral point and write it to printer CMY")
         self.pick_wb_button.clicked.connect(self.pickWhiteBalanceRequested.emit)
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("whiteBalanceTabs")
-        self.tabs.addTab(self._axis_widget("global"), "Global")
+        self.tabs.addTab(self._axis_widget("printer"), "Printer")
         self.tabs.addTab(self._tonal_widget("midtones"), "Mids")
         self.tabs.addTab(self._tonal_widget("highlights"), "Highs")
         self.tabs.addTab(self._tonal_widget("shadows"), "Shadows")
@@ -194,8 +194,9 @@ class WhiteBalancePanel(QWidget):
     def values(self) -> dict:
         return {
             "auto_wb": self.auto_wb_checkbox.isChecked(),
+            "printer_balance": self._axis_values("printer"),
             "color_balance": ColorBalanceParams(
-                global_balance=self._axis_values("global"),
+                global_balance=BalanceAxis(),
                 shadows=self._tonal_values("shadows"),
                 midtones=self._tonal_values("midtones"),
                 highlights=self._tonal_values("highlights"),
@@ -206,7 +207,7 @@ class WhiteBalancePanel(QWidget):
         previous = self.blockSignals(True)
         try:
             self.auto_wb_checkbox.setChecked(adjustments.auto_wb)
-            self._set_axis_values("global", adjustments.color_balance.global_balance)
+            self._set_axis_values("printer", adjustments.printer_balance)
             self._set_tonal_values("shadows", adjustments.color_balance.shadows)
             self._set_tonal_values("midtones", adjustments.color_balance.midtones)
             self._set_tonal_values("highlights", adjustments.color_balance.highlights)
@@ -221,7 +222,17 @@ class WhiteBalancePanel(QWidget):
         layout.addWidget(self._make_row("R / C", f"{prefix}.red_cyan", -100, 100, 0, "red_cyan"))
         layout.addWidget(self._make_row("G / M", f"{prefix}.green_magenta", -100, 100, 0, "green_magenta"))
         layout.addWidget(self._make_row("B / Y", f"{prefix}.blue_yellow", -100, 100, 0, "blue_yellow"))
+        if prefix == "printer":
+            reset_button = QToolButton()
+            reset_button.setText("Reset Printer")
+            reset_button.setToolTip("Reset manual printer CMY balance")
+            reset_button.clicked.connect(self.reset_printer_balance)
+            layout.addWidget(reset_button)
         return widget
+
+    def reset_printer_balance(self) -> None:
+        self._set_axis_values("printer", BalanceAxis())
+        self.balanceChanged.emit()
 
     def _tonal_widget(self, prefix: str) -> QWidget:
         widget = QWidget()
