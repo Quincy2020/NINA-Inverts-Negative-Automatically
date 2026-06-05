@@ -21,6 +21,7 @@ from qnegative.core.pipeline import (
     log_print_curve_engine,
 )
 from qnegative.core.preview import RawPreview
+from qnegative.core.roll_color_adapter import roll_color_frame_key
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class PreviewRenderOutput:
     film_rect: ImageRect | None = None
     adjustments: AdjustmentParams | None = None
     lab_print_cmy_offsets: list[float] | None = None
+    roll_color_frame: dict | None = None
     applied_auto_levels: bool = False
 
 
@@ -133,6 +135,17 @@ def color_balance_key(adjustments: AdjustmentParams) -> tuple:
     )
 
 
+def color_correction_key(adjustments: AdjustmentParams) -> tuple:
+    params = adjustments.color_correction
+    return (
+        params.enabled,
+        params.roll_strength,
+        params.frame_residual_strength,
+        params.tone_balance_strength,
+        params.exposure_match_strength,
+    )
+
+
 def density_matrix_params_key(matrix: DensityMatrixParams) -> tuple[float, ...]:
     return (
         round(float(matrix.m00), 7),
@@ -172,6 +185,7 @@ def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
         adjustments.print_curve,
         adjustments.auto_wb,
         color_balance_key(adjustments),
+        color_correction_key(adjustments),
         density_matrix_params_key(adjustments.density_matrix),
         lens_correction_key(adjustments.lens_correction),
         adjustments.exposure,
@@ -197,6 +211,7 @@ def preview_result_cache_key_for(
     film_rect: ImageRect | None,
     adjustments: AdjustmentParams,
     lab_print_cmy_offsets: list[float] | np.ndarray | None = None,
+    roll_color_frame: dict | None = None,
 ) -> tuple:
     return (
         file_key,
@@ -208,6 +223,7 @@ def preview_result_cache_key_for(
         adjustments_preview_cache_key(adjustments),
         lab_print_engine_key(),
         cmy_offsets_key(lab_print_cmy_offsets) if adjustments.auto_wb else None,
+        roll_color_frame_key(roll_color_frame) if adjustments.color_correction.enabled else None,
     )
 
 
@@ -287,10 +303,16 @@ def lab_print_color_key(
     )
 
 
-def lab_print_display_key(color_key: tuple, adjustments: AdjustmentParams) -> tuple:
+def lab_print_display_key(
+    color_key: tuple,
+    adjustments: AdjustmentParams,
+    roll_color_frame: dict | None = None,
+) -> tuple:
     return (
         "lab_print_display",
         color_key,
+        color_correction_key(adjustments),
+        roll_color_frame_key(roll_color_frame) if adjustments.color_correction.enabled else None,
         adjustments.highlights,
         adjustments.shadows,
         adjustments.saturation,

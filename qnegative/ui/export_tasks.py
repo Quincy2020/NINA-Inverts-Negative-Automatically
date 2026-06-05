@@ -49,6 +49,8 @@ class ImageExportTask(QRunnable):
         auto_levels_pending: bool,
         export_format: str | None = None,
         preview_cmy_offsets: np.ndarray | None = None,
+        roll_color_result: dict | None = None,
+        roll_color_frame: dict | None = None,
         cancel_event: Event | None = None,
     ) -> None:
         super().__init__()
@@ -67,6 +69,8 @@ class ImageExportTask(QRunnable):
             if preview_cmy_offsets is not None
             else None
         )
+        self.roll_color_result = deepcopy(roll_color_result)
+        self.roll_color_frame = deepcopy(roll_color_frame)
         self.cancel_event = cancel_event
         self.signals = ExportSignals()
 
@@ -176,7 +180,12 @@ class ImageExportTask(QRunnable):
             effective,
             cmy_offsets=self.preview_cmy_offsets if effective.auto_wb else None,
         )
-        return build_lab_print_export_linear(color_stage, effective)
+        return build_lab_print_export_linear(
+            color_stage,
+            effective,
+            roll_color_result=self.roll_color_result,
+            roll_color_frame=self.roll_color_frame,
+        )
 
 
 def _current_levels(adjustments: AdjustmentParams) -> dict[str, int]:

@@ -8,6 +8,7 @@ import numpy as np
 from qnegative.core.geometry import clamp_rect_to_image, scale_point, scale_rect, warp_rotated_rect
 from qnegative.core.lens_profiles import flat_frame_gain_for_size
 from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalanceParams, DensityMatrixParams, ImagePoint, ImageRect, ImageSize, InvertMode, LensCorrectionParams, PrintCurveMode, TonalBalance
+from qnegative.core.roll_color_adapter import apply_roll_color_to_linear_rgb
 
 
 DENSITY_REFERENCE = 2.046
@@ -535,9 +536,18 @@ def build_lab_print_color_stage(
 def build_lab_print_display_stage(
     color_stage: LabPrintColorStage,
     adjustments: AdjustmentParams,
+    *,
+    roll_color_result: dict | None = None,
+    roll_color_frame: dict | None = None,
 ) -> NegativePreviewResult:
-    processed = apply_highlight_shadow_adjustments(
+    corrected = apply_roll_color_to_linear_rgb(
         color_stage.color_linear_rgb,
+        roll_result=roll_color_result,
+        frame_plan=roll_color_frame,
+        settings=adjustments.color_correction,
+    )
+    processed = apply_highlight_shadow_adjustments(
+        corrected,
         adjustments,
     )
     color_balanced = processed
@@ -559,9 +569,18 @@ def build_lab_print_display_stage(
 def build_lab_print_export_linear(
     color_stage: LabPrintColorStage,
     adjustments: AdjustmentParams,
+    *,
+    roll_color_result: dict | None = None,
+    roll_color_frame: dict | None = None,
 ) -> np.ndarray:
-    processed = apply_highlight_shadow_adjustments(
+    corrected = apply_roll_color_to_linear_rgb(
         color_stage.color_linear_rgb,
+        roll_result=roll_color_result,
+        frame_plan=roll_color_frame,
+        settings=adjustments.color_correction,
+    )
+    processed = apply_highlight_shadow_adjustments(
+        corrected,
         adjustments,
     )
     processed = apply_saturation_adjustment(processed, adjustments)

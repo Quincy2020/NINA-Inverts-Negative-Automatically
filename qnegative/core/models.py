@@ -121,6 +121,15 @@ class LensCorrectionParams:
 
 
 @dataclass
+class ColorCorrectionParams:
+    enabled: bool = False
+    roll_strength: int = 100
+    frame_residual_strength: int = 80
+    tone_balance_strength: int = 100
+    exposure_match_strength: int = 0
+
+
+@dataclass
 class AdjustmentParams:
     invert_mode: str = InvertMode.LAB_PRINT.value
     print_curve: str = PrintCurveMode.STANDARD.value
@@ -128,6 +137,7 @@ class AdjustmentParams:
     color_balance: ColorBalanceParams = field(default_factory=ColorBalanceParams)
     density_matrix: DensityMatrixParams = field(default_factory=DensityMatrixParams)
     lens_correction: LensCorrectionParams = field(default_factory=LensCorrectionParams)
+    color_correction: ColorCorrectionParams = field(default_factory=ColorCorrectionParams)
     exposure: int = 0
     highlights: int = 0
     shadows: int = 0
@@ -149,6 +159,7 @@ class ImageProcessingState:
     white_balance_point: ImagePoint | None = None
     adjustments: AdjustmentParams = field(default_factory=AdjustmentParams)
     lab_print_cmy_offsets: list[float] | None = None
+    roll_color_frame: dict | None = None
     negative_preview_active: bool = False
     auto_levels_pending: bool = True
     preview_flip_horizontal: bool = False

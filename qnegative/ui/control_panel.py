@@ -25,6 +25,7 @@ from qnegative.core.models import InvertMode, LensCorrectionParams, PrintCurveMo
 from qnegative.core.models import AdjustmentParams
 from qnegative.resources import resource_path
 from qnegative.ui.collapsible_section import CollapsibleSection
+from qnegative.ui.color_correction_panel import ColorCorrectionPanel
 from qnegative.ui.density_matrix_panel import DensityMatrixPanel
 from qnegative.ui.histogram_levels import HistogramLevelsWidget
 from qnegative.ui.print_curve_widget import PrintCurveWidget
@@ -48,6 +49,7 @@ class ControlPanel(QWidget):
     lensApplyAllRequested = Signal()
     lensApplyUnprocessedRequested = Signal()
     lensApplyCompletedRequested = Signal()
+    rollColorAnalyzeRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -129,6 +131,7 @@ class ControlPanel(QWidget):
         self.density_matrix_panel = DensityMatrixPanel()
         self.camera_color_panel = self._camera_color_developer_panel()
         self.white_balance_panel = WhiteBalancePanel()
+        self.color_correction_panel = ColorCorrectionPanel()
 
         self._build_layout()
         self._connect()
@@ -168,6 +171,7 @@ class ControlPanel(QWidget):
         root.addWidget(self._histogram_section())
         root.addWidget(self._tools_section())
         root.addWidget(self._adjustment_section())
+        root.addWidget(self._color_correction_section())
         root.addWidget(self._white_balance_section())
         root.addWidget(self._lens_correction_section())
         root.addStretch(1)
@@ -323,6 +327,9 @@ class ControlPanel(QWidget):
     def _white_balance_section(self) -> CollapsibleSection:
         return CollapsibleSection("White Balance", self.white_balance_panel, expanded=False)
 
+    def _color_correction_section(self) -> CollapsibleSection:
+        return CollapsibleSection("Color Correction", self.color_correction_panel, expanded=False)
+
     def _output_section(self) -> QGroupBox:
         group = self._section("Output")
         layout = QVBoxLayout(group)
@@ -432,6 +439,10 @@ class ControlPanel(QWidget):
         self.histogram_levels.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
         self.histogram_levels.interactionFinished.connect(self.adjustmentInteractionFinished.emit)
         self.histogram_levels.levelsChanged.connect(lambda _levels: self._emit_adjustments())
+        self.color_correction_panel.correctionChanged.connect(self._emit_adjustments)
+        self.color_correction_panel.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
+        self.color_correction_panel.interactionFinished.connect(self.adjustmentInteractionFinished.emit)
+        self.color_correction_panel.analyzeRequested.connect(self.rollColorAnalyzeRequested.emit)
 
     def _make_tool_button(self, text: str, mode: ToolMode) -> QToolButton:
         button = QToolButton()
@@ -503,6 +514,7 @@ class ControlPanel(QWidget):
                 **self.histogram_levels.levels(),
                 **self.density_matrix_panel.values(),
                 **self.white_balance_panel.values(),
+                **self.color_correction_panel.values(),
             }
         )
 
@@ -648,6 +660,12 @@ class ControlPanel(QWidget):
         self.export_progress.setValue(max(0, min(100, value)))
         self.export_progress.setFormat(f"{text} %p%")
 
+    def set_roll_color_status(self, text: str) -> None:
+        self.color_correction_panel.set_status(text)
+
+    def set_roll_color_analyzing(self, analyzing: bool) -> None:
+        self.color_correction_panel.set_analyzing(analyzing)
+
     def set_activity_progress(self, active: bool, *, text: str = "Working...") -> None:
         self.activity_progress.setVisible(active)
         if active:
@@ -678,6 +696,7 @@ class ControlPanel(QWidget):
             self.histogram_levels,
             self.density_matrix_panel,
             self.white_balance_panel,
+            self.color_correction_panel,
             self.print_curve_combo,
         )
         for widget in widgets:
@@ -723,6 +742,7 @@ class ControlPanel(QWidget):
             )
             self.density_matrix_panel.set_adjustments(adjustments)
             self.white_balance_panel.set_adjustments(adjustments)
+            self.color_correction_panel.set_adjustments(adjustments)
             self._refresh_slider_value_labels()
         finally:
             for widget in widgets:

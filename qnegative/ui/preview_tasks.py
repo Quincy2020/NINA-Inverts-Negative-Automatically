@@ -303,6 +303,8 @@ class PreviewRenderTask(QRunnable):
         quality: str,
         file_key: tuple | None = None,
         lab_print_cmy_offsets: list[float] | None = None,
+        roll_color_result: dict | None = None,
+        roll_color_frame: dict | None = None,
         render_cache: PreviewStageCache | None = None,
     ) -> None:
         super().__init__()
@@ -320,6 +322,8 @@ class PreviewRenderTask(QRunnable):
             if adjustments.auto_wb
             else None
         )
+        self.roll_color_result = deepcopy(roll_color_result)
+        self.roll_color_frame = deepcopy(roll_color_frame)
         self.render_cache = render_cache or PreviewStageCache()
         self.signals = PreviewRenderSignals()
 
@@ -417,14 +421,23 @@ class PreviewRenderTask(QRunnable):
             color_stage.wb_gains if effective_adjustments.auto_wb else None
         )
 
-        display_key = lab_print_display_key(color_key, effective_adjustments)
+        display_key = lab_print_display_key(
+            color_key,
+            effective_adjustments,
+            roll_color_frame=self.roll_color_frame,
+        )
         if (
             self.render_cache.display_key == display_key
             and self.render_cache.display_result is not None
         ):
             result = self.render_cache.display_result
         else:
-            result = build_lab_print_display_stage(color_stage, effective_adjustments)
+            result = build_lab_print_display_stage(
+                color_stage,
+                effective_adjustments,
+                roll_color_result=self.roll_color_result,
+                roll_color_frame=self.roll_color_frame,
+            )
 
         return PreviewRenderOutput(
             path=self.preview.path,
@@ -450,6 +463,7 @@ class PreviewRenderTask(QRunnable):
             film_rect=self.film_rect,
             adjustments=deepcopy(effective_adjustments),
             lab_print_cmy_offsets=lab_print_cmy_offsets,
+            roll_color_frame=deepcopy(self.roll_color_frame),
             applied_auto_levels=applied_auto_levels,
         )
 
@@ -472,6 +486,7 @@ class PreviewRenderTask(QRunnable):
                 if lab_print_cmy_offsets is not None
                 else self.lab_print_cmy_offsets
             ),
+            roll_color_frame=self.roll_color_frame,
         )
 
 

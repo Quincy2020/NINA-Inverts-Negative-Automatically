@@ -60,7 +60,8 @@ from qnegative.core.pipeline import (
     suggest_global_balance_from_neutral,
 )
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview
-from qnegative.core.session import load_roll_session, save_roll_session, session_path_for_folder
+from qnegative.core.roll_color_adapter import roll_color_result_summary
+from qnegative.core.session import load_roll_color_result, load_roll_session, save_roll_session, session_path_for_folder
 from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.export_dialogs import BatchExportDialog, BatchExportSettings, BatchExportSettingsDialog
 from qnegative.ui.export_tasks import (
@@ -93,6 +94,7 @@ from qnegative.ui.preview_tasks import (
     RawPreviewTask,
     scaled_raw_preview,
 )
+from qnegative.ui.roll_color_tasks import RollColorAnalysisItem, RollColorAnalysisTask
 from qnegative.ui.shortcuts import install_main_window_shortcuts
 
 
@@ -179,6 +181,9 @@ class MainWindow(QMainWindow):
         self._auto_preinvert_radius = 1
         self._roll_session_folder: Path | None = None
         self._roll_session_autosave = True
+        self._roll_color_result: dict | None = None
+        self._roll_color_analysis_job_id = 0
+        self._roll_color_analysis_in_progress = False
         self._undo_stack: list[AdjustmentParams] = []
         self._redo_stack: list[AdjustmentParams] = []
         self._applying_history = False
@@ -288,6 +293,7 @@ class MainWindow(QMainWindow):
         self.control_panel.lensApplyCompletedRequested.connect(
             lambda: self.apply_lens_correction("completed")
         )
+        self.control_panel.rollColorAnalyzeRequested.connect(self.analyze_roll_color)
         self.open_empty_button.clicked.connect(self.open_folder)
 
         self.origin_view.maskPointSelected.connect(self.mask_point_selected)
@@ -544,6 +550,104 @@ class MainWindow(QMainWindow):
                 if not (self.image_states.get(path) is not None and self.image_states[path].negative_preview_active)
             ]
         return []
+
+    def analyze_roll_color(self) -> None:
+        if self._roll_color_analysis_in_progress:
+            self.statusBar().showMessage("Roll color analysis already in progress")
+            return
+        if self.current_path is not None:
+            self._save_current_state()
+
+        items = self._roll_color_analysis_items()
+        if not items:
+            QMessageBox.information(
+                self,
+                "Analyze Roll Color",
+                "Generate positive previews for at least two framed RAW images first.",
+            )
+            return
+
+        self._roll_color_analysis_job_id += 1
+        job_id = self._roll_color_analysis_job_id
+        task = RollColorAnalysisTask(job_id=job_id, items=items)
+        task.signals.progress.connect(self._roll_color_analysis_progress)
+        task.signals.finished.connect(self._roll_color_analysis_finished)
+        task.signals.failed.connect(self._roll_color_analysis_failed)
+        self._roll_color_analysis_in_progress = True
+        self.control_panel.set_roll_color_analyzing(True)
+        self.control_panel.set_roll_color_status(f"Analyzing {len(items)} positive frames...")
+        self._refresh_activity_progress()
+        self.statusBar().showMessage(f"Analyzing roll color for {len(items)} positives...")
+        self._thread_pool.start(task)
+
+    def _roll_color_analysis_items(self) -> list[RollColorAnalysisItem]:
+        ordered_paths = list(self.folder_files) if self.folder_files else list(self.image_states)
+        for path in self.image_states:
+            if path not in ordered_paths:
+                ordered_paths.append(path)
+
+        items: list[RollColorAnalysisItem] = []
+        for path in ordered_paths:
+            if path.suffix.lower() not in RAW_EXTENSIONS:
+                continue
+            state = self.image_states.get(path)
+            if state is None or not state.negative_preview_active:
+                continue
+            if state.film_rect is None or not state.film_rect.is_valid():
+                continue
+            items.append(RollColorAnalysisItem(path=path, state=deepcopy(state)))
+        return items
+
+    def _roll_color_analysis_progress(self, value: int, text: str) -> None:
+        self.control_panel.set_roll_color_status(text)
+        self.statusBar().showMessage(f"{text} ({value}%)")
+
+    def _roll_color_analysis_finished(self, job_id: int, output) -> None:
+        if job_id != self._roll_color_analysis_job_id:
+            return
+        self._roll_color_analysis_in_progress = False
+        self.control_panel.set_roll_color_analyzing(False)
+        self._refresh_activity_progress()
+
+        self._roll_color_result = output.result
+        updated_count = 0
+        for path_text, frame_plan in output.frames_by_path.items():
+            path = Path(path_text)
+            state = self.image_states.get(path)
+            if state is None:
+                continue
+            adjustments = deepcopy(state.adjustments)
+            adjustments.color_correction.enabled = True
+            self.image_states[path] = replace(
+                state,
+                adjustments=adjustments,
+                roll_color_frame=deepcopy(frame_plan),
+            )
+            self.preview_result_cache.pop(path, None)
+            updated_count += 1
+
+        if self.current_path is not None and self.current_path in self.image_states:
+            current = self.image_states[self.current_path]
+            self.adjustments = deepcopy(current.adjustments)
+            self.control_panel.set_adjustments(self.adjustments, emit=False)
+            self._reset_preview_stage_caches()
+            if self.negative_preview_active:
+                self._schedule_preview_if_ready(force=True)
+
+        summary = roll_color_result_summary(self._roll_color_result)
+        self.control_panel.set_roll_color_status(summary)
+        self._autosave_roll_session()
+        self.statusBar().showMessage(f"Roll color analysis ready: {updated_count} frames")
+
+    def _roll_color_analysis_failed(self, job_id: int, message: str) -> None:
+        if job_id != self._roll_color_analysis_job_id:
+            return
+        self._roll_color_analysis_in_progress = False
+        self.control_panel.set_roll_color_analyzing(False)
+        self.control_panel.set_roll_color_status("Analysis failed")
+        self._refresh_activity_progress()
+        QMessageBox.warning(self, "Analyze Roll Color", message)
+        self.statusBar().showMessage("Roll color analysis failed")
 
     def _start_frame_ranker_warmup(self) -> None:
         if self._model_warmup_in_progress:
@@ -1069,6 +1173,8 @@ class MainWindow(QMainWindow):
             quality=quality,
             file_key=self._file_key_for_path(render_preview.path),
             lab_print_cmy_offsets=self.lab_print_cmy_offsets,
+            roll_color_result=self._roll_color_result,
+            roll_color_frame=self._roll_color_frame_for_path(render_preview.path),
             render_cache=self._preview_stage_caches[quality],
         )
         task.signals.finished.connect(self._preview_render_finished)
@@ -1173,6 +1279,7 @@ class MainWindow(QMainWindow):
             white_balance_point=existing.white_balance_point if existing else None,
             adjustments=deepcopy(output.adjustments) if output.adjustments is not None else (deepcopy(existing.adjustments) if existing else self._default_adjustments()),
             lab_print_cmy_offsets=output.lab_print_cmy_offsets if output.lab_print_cmy_offsets is not None else (existing.lab_print_cmy_offsets if existing else None),
+            roll_color_frame=output.roll_color_frame if output.roll_color_frame is not None else (existing.roll_color_frame if existing else None),
             negative_preview_active=True,
             auto_levels_pending=False,
             preview_flip_horizontal=existing.preview_flip_horizontal if existing else False,
@@ -1336,7 +1443,16 @@ class MainWindow(QMainWindow):
             film_rect=self.film_rect,
             adjustments=self.adjustments,
             lab_print_cmy_offsets=self.lab_print_cmy_offsets,
+            roll_color_frame=self._roll_color_frame_for_path(self.current_path),
         )
+
+    def _roll_color_frame_for_path(self, path: Path | None) -> dict | None:
+        if path is None:
+            return None
+        state = self.image_states.get(path)
+        if state is not None and state.roll_color_frame is not None:
+            return deepcopy(state.roll_color_frame)
+        return None
 
     def _store_cached_preview_result(self, result: NegativePreviewResult) -> None:
         if self.current_path is None or self.auto_levels_pending:
@@ -1537,6 +1653,8 @@ class MainWindow(QMainWindow):
             auto_levels_pending=self.auto_levels_pending,
             export_format=export_format,
             preview_cmy_offsets=self._current_preview_cmy_offsets_for_export(),
+            roll_color_result=self._roll_color_result,
+            roll_color_frame=self._roll_color_frame_for_path(self.current_path),
             cancel_event=self._export_cancel_event,
         )
         task.signals.finished.connect(self._export_finished)
@@ -1635,6 +1753,8 @@ class MainWindow(QMainWindow):
                     "auto_levels_pending": state.auto_levels_pending,
                     "export_format": settings.export_format,
                     "preview_cmy_offsets": self._preview_cmy_offsets_for_path(path, state),
+                    "roll_color_result": self._roll_color_result,
+                    "roll_color_frame": deepcopy(state.roll_color_frame),
                 }
             )
         return items
@@ -1935,6 +2055,8 @@ class MainWindow(QMainWindow):
             self.control_panel.set_activity_progress(True, text="Finding frame...")
         elif self._preinvert_in_progress:
             self.control_panel.set_activity_progress(True, text="Pre-inverting nearby frames...")
+        elif self._roll_color_analysis_in_progress:
+            self.control_panel.set_activity_progress(True, text="Analyzing roll color...")
         elif self._model_warmup_in_progress:
             self.control_panel.set_activity_progress(True, text="Loading frame model...")
         else:
@@ -1968,6 +2090,11 @@ class MainWindow(QMainWindow):
             adjustments=deepcopy(self.adjustments),
             lab_print_cmy_offsets=(
                 deepcopy(self.lab_print_cmy_offsets) if self.adjustments.auto_wb else None
+            ),
+            roll_color_frame=(
+                deepcopy(self.image_states[self.current_path].roll_color_frame)
+                if self.current_path in self.image_states
+                else None
             ),
             negative_preview_active=self.negative_preview_active,
             auto_levels_pending=self.auto_levels_pending,
@@ -2154,6 +2281,7 @@ class MainWindow(QMainWindow):
             white_balance_point=None,
             adjustments=deepcopy(output.adjustments),
             lab_print_cmy_offsets=output.lab_print_cmy_offsets,
+            roll_color_frame=None,
             negative_preview_active=True,
             auto_levels_pending=False,
         )
@@ -2268,6 +2396,8 @@ class MainWindow(QMainWindow):
         restored = load_roll_session(path.parent, self.folder_files)
         if restored:
             self.image_states.update(restored)
+        self._roll_color_result = load_roll_color_result(path.parent)
+        self.control_panel.set_roll_color_status(roll_color_result_summary(self._roll_color_result))
         self._sync_sequence_position(path)
         self.filmstrip.set_files(self.folder_files, path)
         self._restore_filmstrip_session_badges()
@@ -2294,7 +2424,12 @@ class MainWindow(QMainWindow):
         if folder is None:
             return
         try:
-            save_roll_session(folder, self.image_states, self.folder_files)
+            save_roll_session(
+                folder,
+                self.image_states,
+                self.folder_files,
+                roll_color_result=self._roll_color_result,
+            )
         except OSError as exc:
             self.statusBar().showMessage(f"Roll session save failed: {exc}")
             return

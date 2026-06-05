@@ -9,6 +9,7 @@ from qnegative.core.models import (
     AdjustmentParams,
     BalanceAxis,
     ColorBalanceParams,
+    ColorCorrectionParams,
     DensityMatrixParams,
     ImagePoint,
     ImageProcessingState,
@@ -53,6 +54,7 @@ def state_from_json_dict(payload: dict[str, Any], source_path: Path) -> ImagePro
                 payload.get("lab_print_cmy_offsets"),
                 length=3,
             ),
+            roll_color_frame=payload.get("roll_color_frame") if isinstance(payload.get("roll_color_frame"), dict) else None,
             negative_preview_active=bool(payload.get("negative_preview_active", False)),
             auto_levels_pending=bool(payload.get("auto_levels_pending", True)),
             preview_flip_horizontal=bool(payload.get("preview_flip_horizontal", False)),
@@ -89,7 +91,30 @@ def load_roll_session(folder: Path, files: list[Path]) -> dict[Path, ImageProces
     return states
 
 
-def save_roll_session(folder: Path, states: dict[Path, ImageProcessingState], files: list[Path]) -> None:
+def load_roll_color_result(folder: Path) -> dict[str, Any] | None:
+    path = session_path_for_folder(folder)
+    if not path.exists():
+        return None
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if payload.get("schema_version") != SESSION_SCHEMA_VERSION:
+        return None
+    result = payload.get("roll_color_result")
+    return result if isinstance(result, dict) else None
+
+
+def save_roll_session(
+    folder: Path,
+    states: dict[Path, ImageProcessingState],
+    files: list[Path],
+    *,
+    roll_color_result: dict[str, Any] | None = None,
+) -> None:
     path = session_path_for_folder(folder)
     file_set = set(files)
     images: dict[str, dict[str, Any]] = {}
@@ -109,6 +134,8 @@ def save_roll_session(folder: Path, states: dict[Path, ImageProcessingState], fi
         "app": "NINA",
         "images": images,
     }
+    if roll_color_result is not None:
+        payload["roll_color_result"] = roll_color_result
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(".tmp")
@@ -168,6 +195,7 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     values["color_balance"] = _color_balance_from_dict(payload.get("color_balance") or {})
     values["density_matrix"] = _density_matrix_from_dict(payload.get("density_matrix") or {})
     values["lens_correction"] = _lens_correction_from_dict(payload.get("lens_correction") or {})
+    values["color_correction"] = _color_correction_from_dict(payload.get("color_correction") or {})
     return AdjustmentParams(**values)
 
 
@@ -217,4 +245,14 @@ def _lens_correction_from_dict(payload: dict[str, Any]) -> LensCorrectionParams:
         max_gain=int(payload.get("max_gain", 200)),
         flat_profile_path=payload.get("flat_profile_path"),
         flat_strength=int(payload.get("flat_strength", 100)),
+    )
+
+
+def _color_correction_from_dict(payload: dict[str, Any]) -> ColorCorrectionParams:
+    return ColorCorrectionParams(
+        enabled=bool(payload.get("enabled", False)),
+        roll_strength=int(payload.get("roll_strength", 100)),
+        frame_residual_strength=int(payload.get("frame_residual_strength", 80)),
+        tone_balance_strength=int(payload.get("tone_balance_strength", 100)),
+        exposure_match_strength=int(payload.get("exposure_match_strength", 0)),
     )
