@@ -391,23 +391,6 @@ highlight的滑块会导致某个点开始反向
 
 ### 未来方向
 
-1. 暗角 / Lens Correction
-   - Flat-frame profile 需要继续优化，目标接近 Lightroom 的平滑校正效果。
-   - 重点处理边缘低对比度、高噪点、强度感不稳定的问题。
-   - 研究 raw black level、per-channel shading map、gain cap、blur radius、中心/边缘归一化策略。
-2. 高光调整
-   - 当前高光滑块仍需要确认是否真正恢复/压缩高光，而不是简单改变白色区域灰度。
-3. 曲线调节
-   - 增加用户可控的 curve smoothing。
-   - 可以分别 smooth 右半部分高光 roll-off 和左半部分阴影 toe。
-4. 色彩调节
-   - 增加更完整的 saturation / vibrance / color balance / preset 保存。
-   - 继续调教 Auto WB 和 CMY 自动偏移。
-5. 自动框线
-   - 当前自动框线仍会被翻拍台、相邻底片、复杂边缘干扰。
-   - 继续优化中心发散、边缘候选、format 先验和轻量 ranker。
-6. Preview 稳定性
-   - 仍存在偶发 preview 丢失或状态恢复不完整，需要作为架构清理的一部分处理。
 
 ### 后续 Export 优化记录
 
@@ -617,3 +600,109 @@ Top oracle IoU >= 0.90 的比例 > 95%
 
 部分参数的 cache key 还可以更精细
 现在 display key 包含 highlights/shadows/saturation，color key 包含 exposure/contrast/curve/WB 等。下一步可以继续把“只影响显示层”的东西拆得更干净。
+
+## 11. Future Plan: Film Stitching Workflow
+
+### 背景
+
+部分 6x6 / 6x7 / 宽幅底片在翻拍时可能需要分两张或多张拍摄，再拼成一张完整底片。Lightroom 的 Pano DNG 可以完成拼接，但会生成 Linear/Pano DNG，当前 rawpy RAW pipeline 不能稳定处理。因此，未来 NINA 可以考虑内置一个“为底片翻拍准备的拼接 workflow”，避免依赖 Lightroom Pano DNG。
+
+### 为什么这比普通全景更简单
+
+底片拼接不是风景全景：
+
+- 目标通常是平面底片，而不是三维远景。
+- 图像数量少，多数是 2 张或 3 张。
+- 画幅比例有强先验，例如 6x6、6x7、645、135。
+- 翻拍台和相机通常固定，透视变化小。
+- 输出目标不是球面/柱面投影，而是一个平面矩形底片。
+
+因此第一版不需要完整 panorama engine，可以先做受约束的 planar stitch。
+
+### 建议 MVP 流程
+
+```text
+选择 2-3 张相邻 RAW
+-> 生成线性 preview
+-> 先做镜头暗角/flat-frame 校正
+-> 粗略自动找每张底片 frame
+-> 在 frame 内做特征匹配或相位相关
+-> RANSAC 求 homography / affine transform
+-> 将多张图 warp 到同一画布
+-> overlap 区域做亮度/颜色匹配
+-> feather / multiband blend
+-> 输出 stitched linear RAW-like buffer
+-> 进入现有 Lab Print pipeline
+```
+
+### 开源项目/库参考
+
+- OpenCV Stitcher / stitching detailed sample
+  - 可参考 feature detection、matching、homography、warper、seam finder、exposure compensator、blend 等模块。
+  - 优点：我们项目已经依赖 OpenCV，适合做内置 MVP。
+  - 风险：默认 panorama mode 偏向普通全景，需要禁用/简化球面投影、wave correction 等不适合平面底片的步骤。
+
+- Hugin / libpano13 / nona / enblend
+  - Hugin 是成熟开源全景工具链，可参考 control points、remap、blend 的整体工作流。
+  - `nona` 负责根据项目参数做 remap，`enblend` 负责 seam blending。
+  - 优点：质量成熟，命令行工具链可作为外部集成方向。
+  - 风险：依赖复杂、GPL 兼容性需要确认、和 NINA 的 RAW/linear pipeline 集成成本较高。
+
+- Autopano-sift-C / control point generators
+  - 可参考自动控制点生成思路。
+  - 作为历史/算法参考即可，不建议第一版直接依赖。
+
+### 第一版实现建议
+
+优先自研一个轻量模块，而不是直接接完整 Hugin：
+
+```text
+qnegative/core/stitching.py
+  detect_overlap_features()
+  match_pair()
+  estimate_pair_transform()
+  warp_pair_to_canvas()
+  blend_overlap()
+```
+
+第一版只支持两张水平/垂直拼接：
+
+- 用户选择两张 RAW。
+- 用户指定拼接方向：left-right / top-bottom。
+- 自动估计 overlap。
+- 失败时允许用户手动放 2-4 对控制点。
+- 输出一个 stitched preview，并允许用户继续进入 frame selection / Lab Print。
+
+### 关键注意点
+
+- 拼接应发生在反转前，最好在线性 RAW/camera RGB 或 camera-WB linear preview 上完成。
+- 必须先做 lens falloff / flat-frame 校正，否则 overlap 区域会出现亮度接缝。
+- 颜色和曝光匹配只应做局部 gain/offset，不应提前套 print curve。
+- 如果用于最终导出，必须保存每张源图的 transform，而不是只保存 stitched preview。
+- 不应将 Lightroom Pano DNG 作为主工作流依赖；它可以作为未来 fallback 输入，但不是当前主线。
+
+### 开发优先级
+
+当前不进入 MVP 主线，标记为未来增强：
+
+1. 先完成当前 RAW/DNG 普通输入、自动框线、颜色和导出稳定性。
+2. 再做两张图 planar stitch prototype。
+3. 最后再考虑多图、Hugin/enblend 外部工具链、Linear/Pano DNG fallback。
+
+1. 暗角 / Lens Correction
+   - Flat-frame profile 需要继续优化，目标接近 Lightroom 的平滑校正效果。
+   - 重点处理边缘低对比度、高噪点、强度感不稳定的问题。
+   - 研究 raw black level、per-channel shading map、gain cap、blur radius、中心/边缘归一化策略。
+2. 高光调整
+   - 当前高光滑块仍需要确认是否真正恢复/压缩高光，而不是简单改变白色区域灰度。
+3. 曲线调节
+   - 增加用户可控的 curve smoothing。
+   - 可以分别 smooth 右半部分高光 roll-off 和左半部分阴影 toe。
+4. 色彩调节
+   - 增加更完整的 saturation / vibrance / color balance / preset 保存。
+   - 继续调教 Auto WB 和 CMY 自动偏移。
+5. 自动框线
+   - 当前自动框线仍会被翻拍台、相邻底片、复杂边缘干扰。
+   - 继续优化中心发散、边缘候选、format 先验和轻量 ranker。
+6. Preview 稳定性
+   - 仍存在偶发 preview 丢失或状态恢复不完整，需要作为架构清理的一部分处理。
