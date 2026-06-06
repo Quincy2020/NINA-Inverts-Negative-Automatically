@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from qnegative.core.file_sequence import RAW_EXTENSIONS, list_supported_files
+from qnegative.core.file_sequence import RAW_EXTENSIONS
 from qnegative.core.lens_profiles import (
     create_flat_frame_profile,
     default_lens_profile_dir,
@@ -66,7 +66,6 @@ from qnegative.core.pipeline import (
 )
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview
 from qnegative.core.roll_color_adapter import roll_color_result_summary
-from qnegative.core.session import load_roll_color_result, load_roll_session, save_roll_session, session_path_for_folder
 from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.export_dialogs import BatchExportDialog, BatchExportSettings, BatchExportSettingsDialog
 from qnegative.ui.export_tasks import (
@@ -99,6 +98,7 @@ from qnegative.ui.preview_tasks import (
     RawPreviewTask,
     scaled_raw_preview,
 )
+from qnegative.ui.project_controller import ProjectController
 from qnegative.ui.roll_color_tasks import RollColorAnalysisItem, RollColorAnalysisTask
 from qnegative.ui.shortcuts import install_main_window_shortcuts
 from qnegative.ui.render_controller import PreviewRenderController
@@ -152,6 +152,7 @@ class MainWindow(QMainWindow):
         self.current_preview: RawPreview | None = None
         self.folder_files: list[Path] = []
         self.current_index: int = -1
+        self._project = ProjectController()
         self.image_states: dict[Path, ImageProcessingState] = {}
         self.raw_preview_cache: dict[Path, CachedRawPreview] = {}
         self.preview_result_cache: dict[Path, CachedPreviewResult] = {}
@@ -206,7 +207,6 @@ class MainWindow(QMainWindow):
         self._auto_frame_new_negatives = True
         self._auto_preinvert_nearby_frames = True
         self._auto_preinvert_radius = 1
-        self._roll_session_folder: Path | None = None
         self._roll_session_autosave = True
         self._roll_color_result: dict | None = None
         self._roll_color_analysis_job_id = 0
@@ -398,7 +398,7 @@ class MainWindow(QMainWindow):
         )
         if not folder:
             return
-        files = list_supported_files(Path(folder))
+        files = self._project.supported_files_for_folder(Path(folder))
         if not files:
             QMessageBox.information(self, "Open Folder", "No supported RAW files were found.")
             return
@@ -1897,11 +1897,7 @@ class MainWindow(QMainWindow):
         return items
 
     def _default_batch_prefix(self, default_dir: Path) -> str:
-        if self._roll_session_folder is not None and self._roll_session_folder.name:
-            return self._roll_session_folder.name
-        if self.current_path is not None and self.current_path.parent.name:
-            return self.current_path.parent.name
-        return default_dir.name or "scan"
+        return self._project.default_batch_prefix(default_dir, self.current_path)
 
     def _batch_export_output_path(
         self,
@@ -2277,7 +2273,7 @@ class MainWindow(QMainWindow):
     def save_roll_session_now(self) -> None:
         if self.current_path is not None:
             self._save_current_state()
-        elif self._roll_session_folder is None:
+        elif self._project.session_folder_for(self.current_path) is None:
             self.statusBar().showMessage("Open a folder before saving a roll session")
             return
         self._write_roll_session(show_status=True)
@@ -2551,27 +2547,24 @@ class MainWindow(QMainWindow):
         if self.current_path is not None:
             self._save_current_state()
         self._preinvert_queue = []
-        self.folder_files = list_supported_files(path.parent)
-        self._roll_session_folder = path.parent
-        restored = load_roll_session(path.parent, self.folder_files)
-        if restored:
-            self.image_states.update(restored)
-        self._roll_color_result = load_roll_color_result(path.parent)
+        result = self._project.load_folder(path, self.image_states)
+        self.folder_files = result.files
+        self.current_index = result.current_index
+        self._roll_color_result = result.roll_color_result
         self._update_roll_color_status()
         self._sync_sequence_position(path)
         self.filmstrip.set_files(self.folder_files, path)
         self._restore_filmstrip_session_badges()
-        if restored:
+        if result.restored_count:
             self.statusBar().showMessage(
-                f"Loaded roll session: {len(restored)} saved images"
+                f"Loaded roll session: {result.restored_count} saved images"
             )
 
     def _restore_filmstrip_session_badges(self) -> None:
-        for source_path in self.folder_files:
-            state = self.image_states.get(source_path)
+        for source_path, processed in self._project.filmstrip_badges(self.image_states):
             self.filmstrip.set_processed_badge(
                 source_path,
-                bool(state is not None and state.negative_preview_active),
+                processed,
             )
 
     def _autosave_roll_session(self) -> None:
@@ -2580,34 +2573,21 @@ class MainWindow(QMainWindow):
         self._write_roll_session(show_status=False)
 
     def _write_roll_session(self, *, show_status: bool) -> None:
-        folder = self._roll_session_folder or (self.current_path.parent if self.current_path else None)
-        if folder is None:
-            return
         try:
-            save_roll_session(
-                folder,
-                self.image_states,
-                self.folder_files,
+            session_path = self._project.save_session(
+                image_states=self.image_states,
+                current_path=self.current_path,
                 roll_color_result=self._roll_color_result,
             )
         except OSError as exc:
             self.statusBar().showMessage(f"Roll session save failed: {exc}")
             return
-        if show_status:
-            self.statusBar().showMessage(f"Saved roll session: {session_path_for_folder(folder)}")
+        if show_status and session_path is not None:
+            self.statusBar().showMessage(f"Saved roll session: {session_path}")
 
     def _sync_sequence_position(self, path: Path) -> None:
-        try:
-            self.current_index = self.folder_files.index(path)
-        except ValueError:
-            self.current_index = -1
-
-        if self.current_index >= 0:
-            self.control_panel.set_sequence_status(
-                f"Sequence {self.current_index + 1} / {len(self.folder_files)}"
-            )
-        else:
-            self.control_panel.set_sequence_status("No sequence")
+        self.current_index = self._project.sync_position(path)
+        self.control_panel.set_sequence_status(self._project.sequence_status_text())
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
