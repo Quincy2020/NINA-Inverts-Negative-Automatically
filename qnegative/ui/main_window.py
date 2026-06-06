@@ -761,8 +761,8 @@ class MainWindow(QMainWindow):
 
         self._store_cached_raw_preview(preview)
         self._show_raw_preview(path, preview)
-        restored_state = self._restore_state_for_path(path)
-        self._maybe_auto_frame_new_negative(restored_state)
+        self._restore_state_for_path(path)
+        self._maybe_auto_frame_new_negative()
         self._schedule_nearby_preinvert()
         if self.negative_preview_active:
             self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
@@ -822,8 +822,8 @@ class MainWindow(QMainWindow):
         self.raw_preview_cache.pop(path, None)
         self.raw_preview_cache[path] = cached
         self._show_raw_preview(path, cached.preview)
-        restored_state = self._restore_state_for_path(path)
-        self._maybe_auto_frame_new_negative(restored_state)
+        self._restore_state_for_path(path)
+        self._maybe_auto_frame_new_negative()
         self._schedule_nearby_preinvert()
         if self.negative_preview_active:
             self.statusBar().showMessage(f"Cached positive preview restored: {path.name}")
@@ -2306,8 +2306,8 @@ class MainWindow(QMainWindow):
             self._queue_negative_render(show_errors=False)
         return True
 
-    def _maybe_auto_frame_new_negative(self, restored_state: bool) -> None:
-        if restored_state or not self._auto_frame_new_negatives:
+    def _maybe_auto_frame_new_negative(self) -> None:
+        if not self._auto_frame_new_negatives:
             return
         if self.current_preview is None or self.current_path is None:
             return
