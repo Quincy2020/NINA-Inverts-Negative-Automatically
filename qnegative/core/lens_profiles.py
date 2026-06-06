@@ -115,7 +115,7 @@ def create_flat_frame_profile(
         "map_file": map_path.name,
     }
     output_profile_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    load_flat_frame_gain_map.cache_clear()
+    clear_flat_frame_gain_cache()
     return LensCorrectionParams(
         enabled=True,
         mode="flat_frame",
@@ -123,6 +123,12 @@ def create_flat_frame_profile(
         flat_profile_path=str(output_profile_path),
         flat_strength=100,
     )
+
+
+def clear_flat_frame_gain_cache() -> None:
+    load_flat_frame_gain_map.cache_clear()
+    _flat_frame_gain_for_size_cached.cache_clear()
+    effective_flat_frame_gain_for_size.cache_clear()
 
 
 def build_flat_frame_gain_map(
@@ -143,7 +149,7 @@ def build_flat_frame_gain_map(
 
     if map_mode == "per_channel":
         center = _center_patch(safe)
-        target = np.percentile(center.reshape(-1, 3), 95, axis=0).astype(np.float32)
+        target = np.percentile(center.reshape(-1, 3), 70, axis=0).astype(np.float32)
         gain = target.reshape(1, 1, 3) / safe
     else:
         luminance = (
@@ -151,9 +157,10 @@ def build_flat_frame_gain_map(
             + safe[:, :, 1] * 0.7152
             + safe[:, :, 2] * 0.0722
         )
-        target = float(np.percentile(_center_patch(luminance).reshape(-1), 95))
+        target = float(np.percentile(_center_patch(luminance).reshape(-1), 70))
         gain = target / np.maximum(luminance, eps)
 
+    gain = _normalize_gain_center(gain)
     return np.clip(gain, 1.0, max(1.0, float(max_gain))).astype(np.float32, copy=False)
 
 
@@ -169,11 +176,39 @@ def load_flat_frame_gain_map(profile_path_text: str) -> tuple[np.ndarray, float]
 
 
 def flat_frame_gain_for_size(profile_path: str, size: ImageSize) -> np.ndarray:
+    return _flat_frame_gain_for_size_cached(
+        str(profile_path),
+        int(size.width),
+        int(size.height),
+    ).copy()
+
+
+@lru_cache(maxsize=4)
+def _flat_frame_gain_for_size_cached(profile_path: str, width: int, height: int) -> np.ndarray:
     gain, max_gain = load_flat_frame_gain_map(profile_path)
-    target_shape = (size.height, size.width)
+    target_shape = (int(height), int(width))
     if gain.shape[:2] != target_shape:
-        gain = cv2.resize(gain, (size.width, size.height), interpolation=cv2.INTER_LINEAR)
+        gain = cv2.resize(gain, (int(width), int(height)), interpolation=cv2.INTER_LINEAR)
+    gain = _normalize_gain_center(gain)
     return np.clip(gain, 1.0, max(1.0, max_gain)).astype(np.float32, copy=False)
+
+
+@lru_cache(maxsize=4)
+def effective_flat_frame_gain_for_size(
+    profile_path: str,
+    width: int,
+    height: int,
+    strength_percent: int,
+    max_gain_percent: int,
+) -> np.ndarray:
+    gain = _flat_frame_gain_for_size_cached(str(profile_path), int(width), int(height))
+    strength = float(np.clip(float(strength_percent) / 100.0, 0.0, 2.0))
+    max_gain = max(1.0, float(max_gain_percent) / 100.0)
+    if strength <= 0.0:
+        effective = np.ones_like(gain, dtype=np.float32)
+    else:
+        effective = np.power(np.maximum(gain, 1e-5), strength, dtype=np.float32)
+    return np.clip(effective, 1.0, max_gain).astype(np.float32, copy=False)
 
 
 def _resolve_flat_map_path(profile_path: Path, payload: dict[str, Any]) -> Path:
@@ -205,6 +240,18 @@ def _blur_flat_frame(image: np.ndarray, blur_radius: int) -> np.ndarray:
     radius = max(3, int(blur_radius))
     kernel = radius * 2 + 1
     return cv2.GaussianBlur(image, (kernel, kernel), sigmaX=radius / 2.0, sigmaY=radius / 2.0)
+
+
+def _normalize_gain_center(gain: np.ndarray) -> np.ndarray:
+    center = _center_patch(np.asarray(gain, dtype=np.float32))
+    if center.size == 0:
+        return gain.astype(np.float32, copy=False)
+    if gain.ndim == 3:
+        center_gain = np.median(center.reshape(-1, gain.shape[2]), axis=0).astype(np.float32)
+        scale = np.maximum(center_gain.reshape(1, 1, -1), 1e-5)
+    else:
+        scale = max(1e-5, float(np.median(center.reshape(-1))))
+    return (gain.astype(np.float32, copy=False) / scale).astype(np.float32, copy=False)
 
 
 def _center_patch(image: np.ndarray) -> np.ndarray:

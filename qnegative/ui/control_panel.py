@@ -26,7 +26,6 @@ from qnegative.core.models import AdjustmentParams
 from qnegative.resources import resource_path
 from qnegative.ui.collapsible_section import CollapsibleSection
 from qnegative.ui.color_correction_panel import ColorCorrectionPanel
-from qnegative.ui.density_matrix_panel import DensityMatrixPanel
 from qnegative.ui.histogram_levels import HistogramLevelsWidget
 from qnegative.ui.print_curve_widget import PrintCurveWidget
 from qnegative.ui.tone_curve_widget import ToneCurveWidget
@@ -131,7 +130,6 @@ class ControlPanel(QWidget):
         self.lens_flat_strength_slider = self._make_slider(0, 200, 100)
         self._flat_profile_path: str | None = None
         self.histogram_levels = HistogramLevelsWidget()
-        self.density_matrix_panel = DensityMatrixPanel()
         self.camera_color_panel = self._camera_color_developer_panel()
         self.white_balance_panel = WhiteBalancePanel()
         self.color_correction_panel = ColorCorrectionPanel()
@@ -325,9 +323,6 @@ class ControlPanel(QWidget):
         self._set_lens_mode_widgets("off")
         return CollapsibleSection("Lens Correction", panel, expanded=False)
 
-    def _density_matrix_section(self) -> CollapsibleSection:
-        return CollapsibleSection("Density Matrix", self.density_matrix_panel, expanded=False)
-
     def _white_balance_section(self) -> CollapsibleSection:
         return CollapsibleSection("White Balance", self.white_balance_panel, expanded=False)
 
@@ -433,7 +428,6 @@ class ControlPanel(QWidget):
         self.lens_apply_unprocessed_button.clicked.connect(self.lensApplyUnprocessedRequested.emit)
         self.lens_apply_completed_button.clicked.connect(self.lensApplyCompletedRequested.emit)
         self.analysis_inset_spin.valueChanged.connect(self._emit_adjustments)
-        self.density_matrix_panel.matrixChanged.connect(self._emit_adjustments)
         self.white_balance_panel.balanceChanged.connect(self._emit_adjustments)
         self.white_balance_panel.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
         self.white_balance_panel.interactionFinished.connect(self.adjustmentInteractionFinished.emit)
@@ -515,7 +509,6 @@ class ControlPanel(QWidget):
             "invert_mode": InvertMode.LAB_PRINT.value,
             "print_curve": self.print_curve_combo.currentData(),
             **self.histogram_levels.levels(),
-            **self.density_matrix_panel.values(),
             **self.white_balance_panel.values(),
             **self.color_correction_panel.values(),
         }
@@ -716,7 +709,6 @@ class ControlPanel(QWidget):
             self.lens_flat_strength_slider,
             self.analysis_inset_spin,
             self.histogram_levels,
-            self.density_matrix_panel,
             self.white_balance_panel,
             self.color_correction_panel,
             self.print_curve_combo,
@@ -768,7 +760,6 @@ class ControlPanel(QWidget):
                 adjustments.white_point,
                 emit=False,
             )
-            self.density_matrix_panel.set_adjustments(adjustments)
             self.white_balance_panel.set_adjustments(adjustments)
             self.color_correction_panel.set_adjustments(adjustments)
             self._refresh_slider_value_labels()

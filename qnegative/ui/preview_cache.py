@@ -7,7 +7,6 @@ import numpy as np
 
 from qnegative.core.models import (
     AdjustmentParams,
-    DensityMatrixParams,
     ImagePoint,
     ImageRect,
     LensCorrectionParams,
@@ -15,8 +14,8 @@ from qnegative.core.models import (
 from qnegative.core.pipeline import (
     LabPrintColorStage,
     LabPrintLevelsStage,
+    LabPrintBasePreview,
     LabPrintNegativeStage,
-    NegativeBasePreview,
     NegativePreviewResult,
     log_print_curve_engine,
 )
@@ -27,7 +26,7 @@ from qnegative.core.roll_color_apply import roll_color_frame_key
 @dataclass(frozen=True)
 class PreviewStageCache:
     base_key: tuple | None = None
-    base: NegativeBasePreview | None = None
+    base: LabPrintBasePreview | None = None
     negative_key: tuple | None = None
     negative_stage: LabPrintNegativeStage | None = None
     levels_key: tuple | None = None
@@ -148,20 +147,6 @@ def color_correction_key(adjustments: AdjustmentParams) -> tuple:
     )
 
 
-def density_matrix_params_key(matrix: DensityMatrixParams) -> tuple[float, ...]:
-    return (
-        round(float(matrix.m00), 7),
-        round(float(matrix.m01), 7),
-        round(float(matrix.m02), 7),
-        round(float(matrix.m10), 7),
-        round(float(matrix.m11), 7),
-        round(float(matrix.m12), 7),
-        round(float(matrix.m20), 7),
-        round(float(matrix.m21), 7),
-        round(float(matrix.m22), 7),
-    )
-
-
 def lens_correction_key(params: LensCorrectionParams) -> tuple:
     return (
         params.enabled,
@@ -190,7 +175,6 @@ def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
         balance_axis_key(adjustments.printer_balance),
         color_balance_key(adjustments),
         color_correction_key(adjustments),
-        density_matrix_params_key(adjustments.density_matrix),
         lens_correction_key(adjustments.lens_correction),
         adjustments.exposure,
         adjustments.highlights,

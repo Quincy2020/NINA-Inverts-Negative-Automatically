@@ -7,23 +7,18 @@ import cv2
 import numpy as np
 
 from qnegative.core.geometry import clamp_rect_to_image, scale_point, scale_rect, warp_rotated_rect
-from qnegative.core.lens_profiles import flat_frame_gain_for_size
-from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalanceParams, DensityMatrixParams, ImagePoint, ImageRect, ImageSize, InvertMode, LensCorrectionParams, PrintCurveMode, TonalBalance
+from qnegative.core.lens_profiles import effective_flat_frame_gain_for_size
+from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalanceParams, ImagePoint, ImageRect, ImageSize, LensCorrectionParams, PrintCurveMode, TonalBalance
 from qnegative.core.roll_color_apply import apply_roll_color_to_linear_rgb
 
 
-DENSITY_REFERENCE = 2.046
-TRANSMITTANCE_EPSILON = 1e-5
 LOG_MODE_EPSILON = 1e-6
 LOG_ANALYSIS_BUFFER = 0.05
-LOG_CMY_MAX_DENSITY = 0.2
 LOG_DENSITY_MULTIPLIER = 0.2
 LOG_GRADE_MULTIPLIER = 1.75
 LOG_D_MAX = 4.0
 LOG_TOE_WIDTH = 2.5
 LOG_SHOULDER_WIDTH = 2.5
-LOG_COLOR_SEPARATION_STRENGTH = 0.5
-LOG_AUTO_WB_MAX_OFFSET = 0.025
 LAB_PRINT_LOG_PERCENTILE_CLIP = 0.02
 LAB_PRINT_AUTO_WB_STRENGTH = 0.65
 LAB_PRINT_AUTO_WB_MAX_OFFSET = 0.04
@@ -90,12 +85,9 @@ class PipelineError(ValueError):
 
 
 @dataclass(frozen=True)
-class NegativeBasePreview:
+class LabPrintBasePreview:
     film_linear_rgb: np.ndarray
     film_camera_wb_linear_rgb: np.ndarray | None
-    transmittance_rgb: np.ndarray
-    density_rgb: np.ndarray
-    inverted_linear_rgb: np.ndarray
     mask_rgb: np.ndarray
     film_rect_preview: ImageRect
     camera_to_srgb_matrix: np.ndarray | None = None
@@ -107,14 +99,6 @@ class NegativeBasePreview:
     @property
     def height(self) -> int:
         return self.film_linear_rgb.shape[0]
-
-
-@dataclass(frozen=True)
-class DensityPreviewAnalysis:
-    corrected_density_rgb: np.ndarray
-    control_rgb: np.ndarray
-    histogram: np.ndarray
-    auto_levels: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -179,7 +163,7 @@ def process_negative_preview(
     preview_camera_wb_linear_rgb: np.ndarray | None = None,
     camera_to_srgb_matrix: np.ndarray | None = None,
 ) -> NegativePreviewResult:
-    base = build_negative_base_preview(
+    base = build_lab_print_base_preview(
         preview_linear_rgb,
         source_size=source_size,
         mask_point=mask_point,
@@ -191,7 +175,7 @@ def process_negative_preview(
     return process_negative_base_preview(base, adjustments)
 
 
-def build_negative_base_preview(
+def build_lab_print_base_preview(
     preview_linear_rgb: np.ndarray,
     *,
     source_size: ImageSize,
@@ -200,7 +184,7 @@ def build_negative_base_preview(
     lens_correction: LensCorrectionParams | None = None,
     preview_camera_wb_linear_rgb: np.ndarray | None = None,
     camera_to_srgb_matrix: np.ndarray | None = None,
-) -> NegativeBasePreview:
+) -> LabPrintBasePreview:
     if preview_linear_rgb.ndim != 3 or preview_linear_rgb.shape[2] != 3:
         raise PipelineError("Preview image must be an RGB array.")
     if film_rect is None or not film_rect.is_valid():
@@ -210,22 +194,20 @@ def build_negative_base_preview(
         width=preview_linear_rgb.shape[1],
         height=preview_linear_rgb.shape[0],
     )
+    flat_gain = None
     if (
         lens_correction is not None
         and lens_correction.enabled
         and lens_correction.mode == "flat_frame"
         and lens_correction.flat_profile_path
     ):
-        gain = flat_frame_gain_for_size(lens_correction.flat_profile_path, preview_size)
-        strength = float(np.clip(lens_correction.flat_strength / 100.0, 0.0, 2.0))
-        gain = 1.0 + (gain - 1.0) * strength
-        gain = np.clip(gain, 1.0, max(1.0, lens_correction.max_gain / 100.0)).astype(np.float32, copy=False)
-        preview_linear_rgb = apply_lens_correction_gain(preview_linear_rgb, gain)
-        if preview_camera_wb_linear_rgb is not None:
-            preview_camera_wb_linear_rgb = apply_lens_correction_gain(
-                preview_camera_wb_linear_rgb,
-                gain,
-            )
+        flat_gain = effective_flat_frame_gain_for_size(
+            lens_correction.flat_profile_path,
+            preview_size.width,
+            preview_size.height,
+            lens_correction.flat_strength,
+            lens_correction.max_gain,
+        )
     if mask_point is None:
         mask_rgb = np.array([1.0, 1.0, 1.0], dtype=np.float32)
     else:
@@ -235,6 +217,13 @@ def build_negative_base_preview(
             preview_size=preview_size,
             mask_point=mask_point,
         )
+        if flat_gain is not None:
+            mask_rgb = mask_rgb * sample_gain_rgb(
+                flat_gain,
+                source_size=source_size,
+                preview_size=preview_size,
+                mask_point=mask_point,
+            )
 
     film_rect_preview = scale_rect(film_rect, source_size, preview_size)
     film_rect_preview = clamp_rect_to_image(film_rect_preview, preview_size)
@@ -244,6 +233,11 @@ def build_negative_base_preview(
         if preview_camera_wb_linear_rgb.shape != preview_linear_rgb.shape:
             raise PipelineError("Camera WB preview must match the neutral RAW preview size.")
         film_camera_wb_linear = warp_rotated_rect(preview_camera_wb_linear_rgb, film_rect_preview)
+    if flat_gain is not None:
+        film_gain = warp_rotated_rect(flat_gain, film_rect_preview)
+        film_linear = apply_lens_correction_gain(film_linear, film_gain)
+        if film_camera_wb_linear is not None:
+            film_camera_wb_linear = apply_lens_correction_gain(film_camera_wb_linear, film_gain)
     if (
         lens_correction is not None
         and lens_correction.enabled
@@ -254,185 +248,23 @@ def build_negative_base_preview(
         film_linear = apply_lens_correction_gain(film_linear, gain)
         if film_camera_wb_linear is not None:
             film_camera_wb_linear = apply_lens_correction_gain(film_camera_wb_linear, gain)
-    transmittance = film_linear / mask_rgb.reshape(1, 1, 3)
-    inverted = invert_transmittance_simple(transmittance)
-    density = transmittance_to_density(transmittance)
-
-    return NegativeBasePreview(
+    return LabPrintBasePreview(
         film_linear_rgb=film_linear,
         film_camera_wb_linear_rgb=film_camera_wb_linear,
-        transmittance_rgb=transmittance.astype(np.float32, copy=False),
-        density_rgb=density,
-        inverted_linear_rgb=inverted,
         mask_rgb=mask_rgb,
         film_rect_preview=film_rect_preview,
         camera_to_srgb_matrix=camera_to_srgb_matrix,
     )
 
 def process_negative_base_preview(
-    base: NegativeBasePreview,
-    adjustments: AdjustmentParams,
-    *,
-    density_analysis: DensityPreviewAnalysis | None = None,
-) -> NegativePreviewResult:
-    if adjustments.invert_mode == InvertMode.LAB_PRINT.value:
-        return process_lab_print_preview(base, adjustments)
-    if adjustments.invert_mode == InvertMode.LOG_BOUNDS.value:
-        return process_log_bounds_preview(base, adjustments)
-    if adjustments.invert_mode == InvertMode.DENSITY.value:
-        return process_density_preview(base, adjustments, analysis=density_analysis)
-    return process_simple_preview(base, adjustments)
-
-
-def process_simple_preview(
-    base: NegativeBasePreview,
+    base: LabPrintBasePreview,
     adjustments: AdjustmentParams,
 ) -> NegativePreviewResult:
-    processed = apply_output_color_transform(
-        base.inverted_linear_rgb,
-        base.camera_to_srgb_matrix,
-        adjustments.camera_color_strength,
-    )
-    if adjustments.auto_wb:
-        processed, wb_gains = apply_auto_white_balance(processed)
-    else:
-        wb_gains = np.array([1.0, 1.0, 1.0], dtype=np.float32)
-    processed = apply_color_balance(processed, adjustments.color_balance)
-    color_balanced = processed
-    histogram = luminance_histogram(processed)
-    auto_levels = suggest_luminance_levels(processed)
-    processed = apply_adjustments(processed, adjustments)
-    processed = apply_saturation_adjustment(processed, adjustments)
-    display_rgb8 = linear_to_srgb8(processed)
-
-    return NegativePreviewResult(
-        display_rgb8=display_rgb8,
-        processed_linear_rgb=processed,
-        color_balanced_linear_rgb=color_balanced,
-        histogram=histogram,
-        auto_levels=auto_levels,
-        wb_gains=wb_gains,
-        mask_rgb=base.mask_rgb,
-        film_rect_preview=base.film_rect_preview,
-    )
-
-
-def process_density_preview(
-    base: NegativeBasePreview,
-    adjustments: AdjustmentParams,
-    *,
-    analysis: DensityPreviewAnalysis | None = None,
-) -> NegativePreviewResult:
-    if analysis is None:
-        analysis = build_density_preview_analysis(base, adjustments)
-
-    corrected_density = analysis.corrected_density_rgb
-    histogram = analysis.histogram
-    auto_levels = analysis.auto_levels
-
-    processed = apply_density_levels(corrected_density, adjustments, clip=False)
-    processed = apply_exposure(processed, adjustments)
-    processed = apply_highlight_shadow_adjustments(processed, adjustments)
-    processed = apply_soft_tone_adjustments(processed, adjustments)
-    processed = apply_output_color_transform(
-        processed,
-        base.camera_to_srgb_matrix,
-        adjustments.camera_color_strength,
-    )
-    if adjustments.auto_wb:
-        processed, wb_gains = apply_auto_white_balance(processed)
-    else:
-        wb_gains = np.array([1.0, 1.0, 1.0], dtype=np.float32)
-    processed = apply_color_balance(processed, adjustments.color_balance)
-    color_balanced = processed
-    processed = apply_print_curve(processed, adjustments.print_curve)
-    processed = apply_contrast(processed, adjustments)
-    processed = apply_saturation_adjustment(processed, adjustments)
-    display_rgb8 = linear_to_srgb8(processed)
-
-    return NegativePreviewResult(
-        display_rgb8=display_rgb8,
-        processed_linear_rgb=processed,
-        color_balanced_linear_rgb=color_balanced,
-        histogram=histogram,
-        auto_levels=auto_levels,
-        wb_gains=wb_gains,
-        mask_rgb=base.mask_rgb,
-        film_rect_preview=base.film_rect_preview,
-    )
-
-
-def build_density_preview_analysis(
-    base: NegativeBasePreview,
-    adjustments: AdjustmentParams,
-) -> DensityPreviewAnalysis:
-    corrected_density = apply_density_matrix(base.density_rgb, adjustments.density_matrix)
-    control = density_to_control_image(corrected_density)
-    histogram = luminance_histogram(control)
-    auto_levels = suggest_density_luminance_levels(control, adjustments.print_curve)
-    return DensityPreviewAnalysis(
-        corrected_density_rgb=corrected_density,
-        control_rgb=control,
-        histogram=histogram,
-        auto_levels=auto_levels,
-    )
-
-
-def process_log_bounds_preview(
-    base: NegativeBasePreview,
-    adjustments: AdjustmentParams,
-) -> NegativePreviewResult:
-    normalized_log = normalize_log_bounds(base.film_linear_rgb)
-    positive_control = 1.0 - normalized_log
-    histogram = luminance_histogram(positive_control)
-    auto_levels = suggest_log_bounds_luminance_levels(positive_control)
-
-    positive_control = apply_unit_levels(positive_control, adjustments, clip=True)
-    normalized_for_print = np.clip(1.0 - positive_control, 0.0, 1.0)
-
-    if adjustments.auto_wb:
-        cmy_offsets = estimate_log_auto_cmy_offsets(
-            normalized_for_print,
-            adjustments,
-            base.camera_to_srgb_matrix,
-        )
-    else:
-        cmy_offsets = np.zeros(3, dtype=np.float32)
-
-    processed = apply_log_hd_print_curve(
-        normalized_for_print,
-        adjustments,
-        cmy_offsets=cmy_offsets,
-    )
-    processed = apply_output_color_transform(
-        processed,
-        base.camera_to_srgb_matrix,
-        adjustments.camera_color_strength,
-    )
-    processed = apply_log_color_separation(
-        processed,
-        strength=LOG_COLOR_SEPARATION_STRENGTH,
-    )
-    processed = apply_color_balance(processed, adjustments.color_balance)
-    processed = apply_highlight_shadow_adjustments(processed, adjustments)
-    color_balanced = processed
-    processed = apply_saturation_adjustment(processed, adjustments)
-    display_rgb8 = linear_to_srgb8(processed)
-
-    return NegativePreviewResult(
-        display_rgb8=display_rgb8,
-        processed_linear_rgb=processed,
-        color_balanced_linear_rgb=color_balanced,
-        histogram=histogram,
-        auto_levels=auto_levels,
-        wb_gains=cmy_offsets.astype(np.float32, copy=False),
-        mask_rgb=base.mask_rgb,
-        film_rect_preview=base.film_rect_preview,
-    )
+    return process_lab_print_preview(base, adjustments)
 
 
 def process_lab_print_preview(
-    base: NegativeBasePreview,
+    base: LabPrintBasePreview,
     adjustments: AdjustmentParams,
 ) -> NegativePreviewResult:
     negative_stage = build_lab_print_negative_stage(
@@ -445,7 +277,7 @@ def process_lab_print_preview(
 
 
 def build_lab_print_negative_stage(
-    base: NegativeBasePreview,
+    base: LabPrintBasePreview,
     *,
     include_histogram: bool = True,
     analysis_inset: float = LAB_PRINT_ANALYSIS_INSET,
@@ -677,20 +509,26 @@ def sample_mask_rgb(
     return np.maximum(mask_rgb, np.array([1e-5, 1e-5, 1e-5], dtype=np.float32))
 
 
-def invert_negative(linear_rgb: np.ndarray, mask_rgb: np.ndarray) -> np.ndarray:
-    neutral = linear_rgb / mask_rgb.reshape(1, 1, 3)
-    return invert_transmittance_simple(neutral)
-
-
-def invert_transmittance_simple(transmittance: np.ndarray) -> np.ndarray:
-    positive = 1.0 - transmittance
-    return np.clip(positive, 0.0, 1.0)
-
-
-def transmittance_to_density(transmittance: np.ndarray) -> np.ndarray:
-    clipped = np.clip(transmittance, TRANSMITTANCE_EPSILON, 1.0)
-    density = -np.log10(clipped)
-    return np.maximum(density, 0.0).astype(np.float32, copy=False)
+def sample_gain_rgb(
+    gain: np.ndarray,
+    *,
+    source_size: ImageSize,
+    preview_size: ImageSize,
+    mask_point: ImagePoint,
+    point_radius: int = 12,
+) -> np.ndarray:
+    point = scale_point(mask_point, source_size, preview_size)
+    x0 = max(0, point.x - point_radius)
+    y0 = max(0, point.y - point_radius)
+    x1 = min(preview_size.width, point.x + point_radius + 1)
+    y1 = min(preview_size.height, point.y + point_radius + 1)
+    sample = gain[y0:y1, x0:x1]
+    if sample.size == 0:
+        return np.ones(3, dtype=np.float32)
+    if sample.ndim == 2:
+        value = float(np.median(sample.reshape(-1)))
+        return np.array([value, value, value], dtype=np.float32)
+    return np.median(sample.reshape(-1, 3), axis=0).astype(np.float32)
 
 
 def normalize_log_bounds(
@@ -774,8 +612,13 @@ def radial_lens_correction_gain(
 
 
 def apply_lens_correction_gain(image: np.ndarray, gain: np.ndarray) -> np.ndarray:
-    corrected = image.astype(np.float32, copy=False) * gain[:, :, None]
-    return np.clip(corrected, 0.0, 1.0).astype(np.float32, copy=False)
+    gain_float = gain.astype(np.float32, copy=False)
+    if gain_float.ndim == 2:
+        gain_float = gain_float[:, :, None]
+    corrected = image.astype(np.float32, copy=False)
+    np.multiply(corrected, gain_float, out=corrected)
+    np.clip(corrected, 0.0, 1.0, out=corrected)
+    return corrected
 
 
 def apply_log_hd_print_curve(
@@ -1011,41 +854,6 @@ def log_print_density_grade(adjustments: AdjustmentParams) -> tuple[float, float
     density = base_density - adjustments.exposure / 100.0
     grade = base_grade + adjustments.contrast * 0.025
     return float(np.clip(density, 0.05, 2.0)), float(np.clip(grade, 0.1, 6.0))
-
-
-def estimate_log_auto_cmy_offsets(
-    normalized_log: np.ndarray,
-    adjustments: AdjustmentParams,
-    camera_to_srgb_matrix: np.ndarray | None,
-    *,
-    strength: float = 0.32,
-) -> np.ndarray:
-    probe = apply_log_hd_print_curve(
-        normalized_log,
-        adjustments,
-        cmy_offsets=np.zeros(3, dtype=np.float32),
-    )
-    probe = apply_output_color_transform(
-        probe,
-        camera_to_srgb_matrix,
-        adjustments.camera_color_strength,
-    )
-    probe = apply_log_color_separation(
-        probe,
-        strength=LOG_COLOR_SEPARATION_STRENGTH,
-    )
-    sample = select_log_positive_wb_sample(probe)
-    if sample.size == 0:
-        return np.zeros(3, dtype=np.float32)
-
-    median_rgb = np.maximum(
-        np.median(sample, axis=0).astype(np.float32),
-        np.array([LOG_MODE_EPSILON, LOG_MODE_EPSILON, LOG_MODE_EPSILON], dtype=np.float32),
-    )
-    magenta = float(np.log10(median_rgb[1]) - np.log10(median_rgb[0]))
-    yellow = float(np.log10(median_rgb[2]) - np.log10(median_rgb[0]))
-    offsets = np.array([0.0, magenta, yellow], dtype=np.float32) * strength
-    return np.clip(offsets, -LOG_AUTO_WB_MAX_OFFSET, LOG_AUTO_WB_MAX_OFFSET).astype(np.float32, copy=False)
 
 
 def estimate_lab_print_auto_cmy_offsets(
@@ -1288,24 +1096,6 @@ def apply_unit_levels(
     return np.nan_to_num(adjusted, nan=0.0, posinf=1.0e12, neginf=0.0).astype(np.float32, copy=False)
 
 
-def density_to_control_image(density_rgb: np.ndarray) -> np.ndarray:
-    return np.clip(density_rgb / DENSITY_REFERENCE, 0.0, 1.0).astype(np.float32, copy=False)
-
-
-def apply_density_levels(
-    density_rgb: np.ndarray,
-    adjustments: AdjustmentParams,
-    *,
-    clip: bool = True,
-) -> np.ndarray:
-    return apply_unit_levels(
-        density_to_control_image(density_rgb),
-        adjustments,
-        clip=clip,
-        soft_black=True,
-    )
-
-
 def apply_soft_black_levels(normalized: np.ndarray, gamma: float) -> np.ndarray:
     values = normalized.astype(np.float32, copy=False)
     positive = np.maximum(values, 0.0)
@@ -1317,19 +1107,6 @@ def apply_soft_black_levels(normalized: np.ndarray, gamma: float) -> np.ndarray:
         mapped = np.where(below_black, toe, mapped)
 
     return mapped.astype(np.float32, copy=False)
-
-
-def apply_density_matrix(density_rgb: np.ndarray, params: DensityMatrixParams) -> np.ndarray:
-    matrix = np.array(
-        [
-            [params.m00, params.m01, params.m02],
-            [params.m10, params.m11, params.m12],
-            [params.m20, params.m21, params.m22],
-        ],
-        dtype=np.float32,
-    )
-    corrected = density_rgb @ matrix.T
-    return np.maximum(corrected, 0.0).astype(np.float32, copy=False)
 
 
 def apply_output_color_transform(
@@ -2065,32 +1842,6 @@ def suggest_luminance_levels(
         "mid_point": mid_point,
         "white_point": white_point,
     }
-
-
-def suggest_density_luminance_levels(image: np.ndarray, curve_mode: str) -> dict[str, int]:
-    return suggest_luminance_levels(
-        image,
-        black_percentile=0.6,
-        mid_percentile=72.0,
-        white_percentile=99.4,
-        black_padding=-0.035,
-        white_padding=0.035,
-        curve_mode=curve_mode,
-        target_output_mid=0.54,
-    )
-
-
-def suggest_log_bounds_luminance_levels(image: np.ndarray) -> dict[str, int]:
-    return suggest_luminance_levels(
-        image,
-        black_percentile=0.8,
-        mid_percentile=66.0,
-        white_percentile=99.2,
-        black_padding=0.010,
-        white_padding=0.025,
-        curve_mode=PrintCurveMode.LINEAR.value,
-        target_output_mid=0.52,
-    )
 
 
 def suggest_lab_print_luminance_levels(

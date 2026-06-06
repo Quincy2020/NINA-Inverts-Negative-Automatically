@@ -110,19 +110,6 @@ def build_main_menus(window) -> None:
 
     developer_menu = window.developer_menu = settings_menu.addMenu("Developer")
 
-    window.density_matrix_dock = QDockWidget("Density Matrix", window)
-    window.density_matrix_dock.setObjectName("densityMatrixDock")
-    window.density_matrix_dock.setWidget(window.control_panel.density_matrix_panel)
-    window.density_matrix_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-    window.addDockWidget(Qt.LeftDockWidgetArea, window.density_matrix_dock)
-    window.density_matrix_dock.hide()
-
-    density_action = QAction("Density Matrix", window)
-    density_action.setCheckable(True)
-    density_action.toggled.connect(window.density_matrix_dock.setVisible)
-    window.density_matrix_dock.visibilityChanged.connect(density_action.setChecked)
-    developer_menu.addAction(density_action)
-
     window.camera_color_dock = QDockWidget("Camera Color", window)
     window.camera_color_dock.setObjectName("cameraColorDock")
     window.camera_color_dock.setWidget(window.control_panel.camera_color_panel)

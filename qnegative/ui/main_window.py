@@ -41,7 +41,6 @@ from qnegative.core.auto_detect import (
 )
 from qnegative.core.models import (
     AdjustmentParams,
-    DensityMatrixParams,
     ImagePoint,
     ImageProcessingState,
     ImageRect,
@@ -50,14 +49,12 @@ from qnegative.core.models import (
     ToolMode,
 )
 from qnegative.core.pipeline import (
-    DensityPreviewAnalysis,
-    NegativeBasePreview,
+    LabPrintBasePreview,
     NegativePreviewResult,
     PipelineError,
+    build_lab_print_base_preview,
     build_lab_print_levels_stage,
     build_lab_print_negative_stage,
-    build_negative_base_preview,
-    build_density_preview_analysis,
     analysis_inset_from_adjustments,
     set_log_print_curve_engine,
 )
@@ -163,10 +160,8 @@ class MainWindow(QMainWindow):
         self.auto_levels_pending = True
         self._applying_auto_levels = False
         self.last_negative_result: NegativePreviewResult | None = None
-        self._negative_base_cache: NegativeBasePreview | None = None
+        self._negative_base_cache: LabPrintBasePreview | None = None
         self._negative_base_cache_key: tuple[object, ...] | None = None
-        self._density_analysis_cache: DensityPreviewAnalysis | None = None
-        self._density_analysis_cache_key: tuple[object, ...] | None = None
         self._preview_stage_caches = {
             FINAL_RENDER_QUALITY: PreviewStageCache(),
             INTERACTIVE_RENDER_QUALITY: PreviewStageCache(),
@@ -1607,7 +1602,7 @@ class MainWindow(QMainWindow):
             WhiteBalanceController.status_overlay_text(self.adjustments)
         )
 
-    def _negative_base_for_current(self) -> NegativeBasePreview:
+    def _negative_base_for_current(self) -> LabPrintBasePreview:
         if self.current_preview is None:
             raise PipelineError("Open a RAW file and generate a linear preview first.")
 
@@ -1625,7 +1620,7 @@ class MainWindow(QMainWindow):
         if self._negative_base_cache_key == key and self._negative_base_cache is not None:
             return self._negative_base_cache
 
-        base = build_negative_base_preview(
+        base = build_lab_print_base_preview(
             self.current_preview.preview_linear_rgb,
             source_size=self.current_preview.source_size,
             mask_point=self.mask_point,
@@ -1642,7 +1637,6 @@ class MainWindow(QMainWindow):
         self._negative_base_cache = None
         self._negative_base_cache_key = None
         self._reset_preview_stage_caches()
-        self._invalidate_density_analysis_cache()
         self.last_negative_result = None
         self._last_untransformed_negative_result = None
 
@@ -1656,37 +1650,6 @@ class MainWindow(QMainWindow):
         }
         self._interactive_preview_cache_key = None
         self._interactive_preview_cache = None
-
-    def _density_analysis_for_current(self, base: NegativeBasePreview) -> DensityPreviewAnalysis:
-        key: tuple[object, ...] = (
-            self._negative_base_cache_key,
-            self.adjustments.print_curve,
-            self._density_matrix_key(self.adjustments.density_matrix),
-        )
-        if self._density_analysis_cache_key == key and self._density_analysis_cache is not None:
-            return self._density_analysis_cache
-
-        analysis = build_density_preview_analysis(base, self.adjustments)
-        self._density_analysis_cache = analysis
-        self._density_analysis_cache_key = key
-        return analysis
-
-    def _invalidate_density_analysis_cache(self) -> None:
-        self._density_analysis_cache = None
-        self._density_analysis_cache_key = None
-
-    def _density_matrix_key(self, matrix: DensityMatrixParams) -> tuple[float, ...]:
-        return (
-            matrix.m00,
-            matrix.m01,
-            matrix.m02,
-            matrix.m10,
-            matrix.m11,
-            matrix.m12,
-            matrix.m20,
-            matrix.m21,
-            matrix.m22,
-        )
 
     def export_current(self) -> None:
         if self._export_in_progress:

@@ -11,10 +11,10 @@ export paths stay maintainable.
    - Output is linear RGB plus camera metadata/matrices when available.
 
 2. Base geometry
-   - `build_negative_base_preview()`
+   - `build_lab_print_base_preview()`
    - Applies frame crop/warp.
    - Applies lens correction before inversion when enabled.
-   - Produces the cropped film linear RGB used by later stages.
+   - Produces only the cropped Lab Print base data used by later stages.
 
 3. Negative stage
    - `build_lab_print_negative_stage()`

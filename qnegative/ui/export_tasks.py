@@ -10,14 +10,14 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 
 from qnegative.core.models import AdjustmentParams, ImagePoint, ImageRect
 from qnegative.core.pipeline import (
-    NegativeBasePreview,
+    LabPrintBasePreview,
     analysis_inset_crop,
     analysis_inset_from_adjustments,
+    build_lab_print_base_preview,
     build_lab_print_color_stage,
     build_lab_print_export_linear,
     build_lab_print_levels_stage,
     build_lab_print_negative_stage,
-    build_negative_base_preview,
     suggest_lab_print_luminance_levels,
 )
 from qnegative.core.raw_loader import load_raw_rgb16
@@ -97,7 +97,7 @@ class ImageExportTask(QRunnable):
             self.signals.progress.emit(30, self._timed_progress_text("Building base", timings))
 
             stage_start = perf_counter()
-            base = build_negative_base_preview(
+            base = build_lab_print_base_preview(
                 raw_image.as_float32(),
                 source_size=raw_image.source_size,
                 mask_point=self.mask_point,
@@ -157,7 +157,7 @@ class ImageExportTask(QRunnable):
         elapsed = ", ".join(f"{name} {seconds:.1f}s" for name, seconds in timings.items())
         return f"{current} ({elapsed})"
 
-    def _process_export(self, base: NegativeBasePreview, timings: dict[str, float]) -> np.ndarray:
+    def _process_export(self, base: LabPrintBasePreview, timings: dict[str, float]) -> np.ndarray:
         stage_start = perf_counter()
         negative_stage = build_lab_print_negative_stage(
             base,

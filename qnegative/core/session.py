@@ -10,7 +10,6 @@ from qnegative.core.models import (
     BalanceAxis,
     ColorBalanceParams,
     ColorCorrectionParams,
-    DensityMatrixParams,
     ImagePoint,
     ImageProcessingState,
     ImageRect,
@@ -232,7 +231,6 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
         or {}
     )
     values["color_balance"] = _color_balance_from_dict(color_balance_payload)
-    values["density_matrix"] = _density_matrix_from_dict(payload.get("density_matrix") or {})
     values["lens_correction"] = _lens_correction_from_dict(payload.get("lens_correction") or {})
     values["color_correction"] = _color_correction_from_dict(payload.get("color_correction") or {})
     return AdjustmentParams(**values)
@@ -262,12 +260,6 @@ def _tonal_balance_from_dict(payload: dict[str, Any]) -> TonalBalance:
         blue_yellow=int(payload.get("blue_yellow", 0)),
         tonal_range=int(payload.get("tonal_range", 50)),
     )
-
-
-def _density_matrix_from_dict(payload: dict[str, Any]) -> DensityMatrixParams:
-    allowed = {item.name for item in fields(DensityMatrixParams)}
-    values = {key: float(payload[key]) for key in payload if key in allowed}
-    return DensityMatrixParams(**values)
 
 
 def _lens_correction_from_dict(payload: dict[str, Any]) -> LensCorrectionParams:

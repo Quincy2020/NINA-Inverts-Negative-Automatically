@@ -10,11 +10,11 @@ from qnegative.core.models import ImageProcessingState
 from qnegative.core.pipeline import (
     analysis_inset_crop,
     analysis_inset_from_adjustments,
+    build_lab_print_base_preview,
     build_lab_print_color_stage,
     build_lab_print_display_stage,
     build_lab_print_levels_stage,
     build_lab_print_negative_stage,
-    build_negative_base_preview,
     suggest_lab_print_luminance_levels,
 )
 from qnegative.core.preview import make_raw_preview
@@ -83,7 +83,7 @@ class RollColorAnalysisTask(QRunnable):
         preview = make_raw_preview(item.path, max_size=self.max_size)
         adjustments = deepcopy(state.adjustments)
         adjustments.color_correction.enabled = False
-        base = build_negative_base_preview(
+        base = build_lab_print_base_preview(
             preview.preview_linear_rgb,
             source_size=preview.source_size,
             mask_point=state.mask_point,

@@ -17,16 +17,16 @@ from qnegative.core.auto_detect import (
 from qnegative.core.frame_ranker import load_frame_ranker
 from qnegative.core.models import AdjustmentParams, ImagePoint, ImageProcessingState, ImageRect, ImageSize
 from qnegative.core.pipeline import (
-    NegativeBasePreview,
+    LabPrintBasePreview,
     NegativePreviewResult,
     PipelineError,
     analysis_inset_crop,
     analysis_inset_from_adjustments,
+    build_lab_print_base_preview,
     build_lab_print_color_stage,
     build_lab_print_display_stage,
     build_lab_print_levels_stage,
     build_lab_print_negative_stage,
-    build_negative_base_preview,
     suggest_lab_print_luminance_levels,
 )
 from qnegative.core.preview import RawPreview, make_raw_preview, resize_long_edge
@@ -145,7 +145,7 @@ class PreInvertTask(QRunnable):
             if frame is None or frame.confidence_level not in {"high", "fallback"}:
                 raise PipelineError("No high-confidence frame detected.")
 
-            base = build_negative_base_preview(
+            base = build_lab_print_base_preview(
                 preview.preview_linear_rgb,
                 source_size=preview.source_size,
                 mask_point=None,
@@ -344,11 +344,11 @@ class PreviewRenderTask(QRunnable):
 
         self.signals.finished.emit(self.job_id, output, self.show_errors)
 
-    def _base_stage(self, base_key: tuple) -> NegativeBasePreview:
+    def _base_stage(self, base_key: tuple) -> LabPrintBasePreview:
         if self.render_cache.base_key == base_key and self.render_cache.base is not None:
             return self.render_cache.base
 
-        return build_negative_base_preview(
+        return build_lab_print_base_preview(
             self.preview.preview_linear_rgb,
             source_size=self.preview.source_size,
             mask_point=self.mask_point,
@@ -361,7 +361,7 @@ class PreviewRenderTask(QRunnable):
     def _lab_print_output(
         self,
         base_key: tuple,
-        base: NegativeBasePreview,
+        base: LabPrintBasePreview,
     ) -> PreviewRenderOutput:
         negative_key = ("lab_print_negative", base_key, self.adjustments.analysis_inset_percent)
         if (

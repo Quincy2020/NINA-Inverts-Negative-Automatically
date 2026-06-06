@@ -13,9 +13,6 @@ class ToolMode(str, Enum):
 
 
 class InvertMode(str, Enum):
-    SIMPLE = "simple"
-    DENSITY = "density"
-    LOG_BOUNDS = "log_bounds"
     LAB_PRINT = "lab_print"
 
 
@@ -138,7 +135,6 @@ class AdjustmentParams:
     auto_cmy_strength: int = 65
     printer_balance: BalanceAxis = field(default_factory=BalanceAxis)
     color_balance: ColorBalanceParams = field(default_factory=ColorBalanceParams)
-    density_matrix: DensityMatrixParams = field(default_factory=DensityMatrixParams)
     lens_correction: LensCorrectionParams = field(default_factory=LensCorrectionParams)
     color_correction: ColorCorrectionParams = field(default_factory=ColorCorrectionParams)
     exposure: int = 0
