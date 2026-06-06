@@ -142,6 +142,7 @@ def color_correction_key(adjustments: AdjustmentParams) -> tuple:
         params.roll_strength,
         params.frame_residual_strength,
         params.tone_balance_strength,
+        params.protection_strength,
         params.exposure_match_strength,
     )
 

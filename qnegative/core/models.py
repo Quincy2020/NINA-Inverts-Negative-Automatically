@@ -126,6 +126,7 @@ class ColorCorrectionParams:
     roll_strength: int = 100
     frame_residual_strength: int = 80
     tone_balance_strength: int = 100
+    protection_strength: int = 100
     exposure_match_strength: int = 0
 
 

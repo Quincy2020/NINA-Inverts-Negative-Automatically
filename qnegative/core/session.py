@@ -282,5 +282,6 @@ def _color_correction_from_dict(payload: dict[str, Any]) -> ColorCorrectionParam
         roll_strength=int(payload.get("roll_strength", 100)),
         frame_residual_strength=int(payload.get("frame_residual_strength", 80)),
         tone_balance_strength=int(payload.get("tone_balance_strength", 100)),
+        protection_strength=int(payload.get("protection_strength", 100)),
         exposure_match_strength=int(payload.get("exposure_match_strength", 0)),
     )

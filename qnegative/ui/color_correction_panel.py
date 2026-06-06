@@ -35,6 +35,7 @@ class ColorCorrectionPanel(QWidget):
         self.roll_strength_slider = self._make_slider(0, 125, 100)
         self.frame_residual_slider = self._make_slider(0, 100, 80)
         self.tone_balance_slider = self._make_slider(0, 100, 100)
+        self.protection_slider = self._make_slider(0, 100, 100)
         self.exposure_match_slider = self._make_slider(0, 100, 0)
 
         self._build_layout()
@@ -47,6 +48,7 @@ class ColorCorrectionPanel(QWidget):
                 roll_strength=self.roll_strength_slider.value(),
                 frame_residual_strength=self.frame_residual_slider.value(),
                 tone_balance_strength=self.tone_balance_slider.value(),
+                protection_strength=self.protection_slider.value(),
                 exposure_match_strength=self.exposure_match_slider.value(),
             )
         }
@@ -57,6 +59,7 @@ class ColorCorrectionPanel(QWidget):
             self.roll_strength_slider,
             self.frame_residual_slider,
             self.tone_balance_slider,
+            self.protection_slider,
             self.exposure_match_slider,
         )
         for widget in widgets:
@@ -67,6 +70,7 @@ class ColorCorrectionPanel(QWidget):
             self.roll_strength_slider.setValue(params.roll_strength)
             self.frame_residual_slider.setValue(params.frame_residual_strength)
             self.tone_balance_slider.setValue(params.tone_balance_strength)
+            self.protection_slider.setValue(params.protection_strength)
             self.exposure_match_slider.setValue(params.exposure_match_strength)
             self._refresh_labels()
         finally:
@@ -100,6 +104,7 @@ class ColorCorrectionPanel(QWidget):
         card_layout.addLayout(self._slider_row("Roll Strength", self.roll_strength_slider))
         card_layout.addLayout(self._slider_row("Frame Residual", self.frame_residual_slider))
         card_layout.addLayout(self._slider_row("Tone Balance", self.tone_balance_slider))
+        card_layout.addLayout(self._slider_row("Protection", self.protection_slider))
         card_layout.addLayout(self._slider_row("Exposure Match", self.exposure_match_slider))
         root.addWidget(card)
 
@@ -110,6 +115,7 @@ class ColorCorrectionPanel(QWidget):
             self.roll_strength_slider,
             self.frame_residual_slider,
             self.tone_balance_slider,
+            self.protection_slider,
             self.exposure_match_slider,
         ):
             slider.sliderPressed.connect(self.interactionStarted.emit)

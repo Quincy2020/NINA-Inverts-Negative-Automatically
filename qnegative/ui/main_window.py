@@ -119,6 +119,21 @@ def invert_mode_label(mode: str) -> str:
     return labels.get(mode, mode)
 
 
+def export_timing_is_top_level(name: str) -> bool:
+    return (
+        name in {"RAW decode", "Build base", "Lab Print"}
+        or name.startswith("Prepare ")
+        or name.endswith(" write")
+    )
+
+
+def _float_or_none(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -640,8 +655,7 @@ class MainWindow(QMainWindow):
             if self.negative_preview_active:
                 self._schedule_preview_if_ready(force=True)
 
-        summary = roll_color_result_summary(self._roll_color_result)
-        self.control_panel.set_roll_color_status(summary)
+        self._update_roll_color_status()
         self._autosave_roll_session()
         self.statusBar().showMessage(f"Roll color analysis ready: {updated_count} frames")
 
@@ -695,6 +709,7 @@ class MainWindow(QMainWindow):
         self.current_path = path
         self.view_stack.setCurrentWidget(self.preview_tabs)
         self.filmstrip.show()
+        self._update_roll_color_status()
         self.current_preview = None
         self.negative_preview_active = False
         self.auto_levels_pending = True
@@ -1371,16 +1386,29 @@ class MainWindow(QMainWindow):
             self.preview_result_cache.pop(oldest_path, None)
 
         existing = self.image_states.get(output.path)
+        adjustments = (
+            deepcopy(existing.adjustments)
+            if existing is not None
+            else (
+                deepcopy(output.adjustments)
+                if output.adjustments is not None
+                else self._default_adjustments()
+            )
+        )
         self.image_states[output.path] = ImageProcessingState(
             mask_point=output.mask_point if output.mask_point is not None else (existing.mask_point if existing else None),
             film_rect=output.film_rect if output.film_rect is not None else (existing.film_rect if existing else None),
             white_balance_point=existing.white_balance_point if existing else None,
-            adjustments=deepcopy(output.adjustments) if output.adjustments is not None else (deepcopy(existing.adjustments) if existing else self._default_adjustments()),
-            lab_print_cmy_offsets=output.lab_print_cmy_offsets if output.lab_print_cmy_offsets is not None else (existing.lab_print_cmy_offsets if existing else None),
-            tone_mid_anchor=output.result.tone_mid_anchor,
+            adjustments=adjustments,
+            lab_print_cmy_offsets=(
+                existing.lab_print_cmy_offsets
+                if existing is not None and existing.lab_print_cmy_offsets is not None
+                else output.lab_print_cmy_offsets
+            ),
+            tone_mid_anchor=existing.tone_mid_anchor if existing is not None and existing.tone_mid_anchor is not None else output.result.tone_mid_anchor,
             roll_color_frame=output.roll_color_frame if output.roll_color_frame is not None else (existing.roll_color_frame if existing else None),
             negative_preview_active=True,
-            auto_levels_pending=False,
+            auto_levels_pending=existing.auto_levels_pending if existing is not None else False,
             preview_flip_horizontal=existing.preview_flip_horizontal if existing else False,
             preview_flip_vertical=existing.preview_flip_vertical if existing else False,
             preview_rotation_quarters=existing.preview_rotation_quarters if existing else 0,
@@ -1553,6 +1581,44 @@ class MainWindow(QMainWindow):
         if state is not None and state.roll_color_frame is not None:
             return deepcopy(state.roll_color_frame)
         return None
+
+    def _update_roll_color_status(self) -> None:
+        text = roll_color_result_summary(self._roll_color_result)
+        frame = self._roll_color_frame_for_path(self.current_path)
+        if frame:
+            details = self._roll_color_frame_status_lines(frame)
+            if details:
+                text = f"{text}\n\nCurrent frame\n" + "\n".join(details)
+        self.control_panel.set_roll_color_status(text)
+
+    def _roll_color_frame_status_lines(self, frame: dict) -> list[str]:
+        action = str(frame.get("color_action") or "none")
+        confidence = _float_or_none(frame.get("confidence"))
+        tone_confidence = _float_or_none(frame.get("tone_confidence"))
+        protection_strength = _float_or_none(frame.get("highlight_protection_strength")) or 0.0
+        protection_region = str(frame.get("highlight_protected_region") or "")
+        protection_warning = str(frame.get("highlight_protection_warning") or "")
+        exposure_delta = _float_or_none(frame.get("exposure_delta_stops")) or 0.0
+        exposure_action = str(frame.get("exposure_action") or "")
+
+        lines = [f"Action: {action}" + (f" ({confidence:.2f})" if confidence is not None else "")]
+        if tone_confidence is not None and tone_confidence > 0:
+            lines.append(f"Tone residual: {tone_confidence:.2f}")
+        if protection_strength > 0 or protection_region or protection_warning:
+            protection = f"Protection: {protection_strength * 100:.0f}%"
+            if protection_region:
+                protection += f" {protection_region}"
+            if protection_warning:
+                protection += f" / {protection_warning}"
+            lines.append(protection)
+        else:
+            lines.append("Protection: none")
+        if abs(exposure_delta) >= 0.001:
+            suffix = f" {exposure_action}" if exposure_action and exposure_action != "none" else ""
+            lines.append(f"Exposure match: {exposure_delta:+.2f} stops{suffix}")
+        else:
+            lines.append("Exposure match: none")
+        return lines
 
     def _store_cached_preview_result(self, result: NegativePreviewResult) -> None:
         if self.current_path is None or self.auto_levels_pending:
@@ -2100,7 +2166,11 @@ class MainWindow(QMainWindow):
     def _format_export_timings(timings: dict[str, float]) -> str:
         if not timings:
             return ""
-        total = sum(float(seconds) for seconds in timings.values())
+        total = sum(
+            float(seconds)
+            for name, seconds in timings.items()
+            if export_timing_is_top_level(name)
+        )
         parts = [f"{name} {float(seconds):.1f}s" for name, seconds in timings.items()]
         parts.append(f"total {total:.1f}s")
         return ", ".join(parts)
@@ -2278,6 +2348,7 @@ class MainWindow(QMainWindow):
             self.control_panel.set_film_status("Not selected")
             self.control_panel.set_adjustments(self.adjustments, emit=False)
             self._update_preview_status_overlay()
+            self._update_roll_color_status()
             self.origin_view.restore_selections(mask_point=None, film_rect=None)
             return False
 
@@ -2306,6 +2377,7 @@ class MainWindow(QMainWindow):
         )
         self.control_panel.set_adjustments(self.adjustments, emit=False)
         self._update_preview_status_overlay()
+        self._update_roll_color_status()
         self.origin_view.restore_selections(
             mask_point=self.mask_point,
             film_rect=self.film_rect,
@@ -2559,7 +2631,7 @@ class MainWindow(QMainWindow):
         if restored:
             self.image_states.update(restored)
         self._roll_color_result = load_roll_color_result(path.parent)
-        self.control_panel.set_roll_color_status(roll_color_result_summary(self._roll_color_result))
+        self._update_roll_color_status()
         self._sync_sequence_position(path)
         self.filmstrip.set_files(self.folder_files, path)
         self._restore_filmstrip_session_badges()

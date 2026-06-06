@@ -619,6 +619,7 @@ def build_lab_print_export_linear(
         roll_result=roll_color_result,
         frame_plan=roll_color_frame,
         settings=adjustments.color_correction,
+        stage_timings=stage_timings,
     )
     if stage_timings is not None:
         stage_timings["Lab roll color"] = perf_counter() - stage_start
