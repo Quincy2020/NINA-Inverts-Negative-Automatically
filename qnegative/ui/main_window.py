@@ -101,6 +101,15 @@ from qnegative.ui.preview_tasks import (
 )
 from qnegative.ui.roll_color_tasks import RollColorAnalysisItem, RollColorAnalysisTask
 from qnegative.ui.shortcuts import install_main_window_shortcuts
+from qnegative.ui.state_store import (
+    build_current_image_state,
+    default_adjustments,
+    lab_print_adjustments,
+    merge_stale_preview_result_state,
+    restored_runtime_for_state,
+    should_restore_positive_preview,
+    state_from_preinvert_output,
+)
 
 
 INTERACTIVE_PREVIEW_MAX_EDGE = 720
@@ -149,7 +158,7 @@ class MainWindow(QMainWindow):
         self.film_rect: ImageRect | None = None
         self.white_balance_point: ImagePoint | None = None
         self.lab_print_cmy_offsets: list[float] | None = None
-        self.adjustments = self._default_adjustments()
+        self.adjustments = default_adjustments()
         self.negative_preview_active = False
         self.auto_levels_pending = True
         self._applying_auto_levels = False
@@ -529,7 +538,7 @@ class MainWindow(QMainWindow):
         for path in targets:
             state = self.image_states.get(path)
             if state is None:
-                state = ImageProcessingState(adjustments=self._default_adjustments())
+                state = ImageProcessingState(adjustments=default_adjustments())
             updated_adjustments = deepcopy(state.adjustments)
             updated_adjustments.lens_correction = deepcopy(source_params)
             self.image_states[path] = replace(
@@ -1385,33 +1394,9 @@ class MainWindow(QMainWindow):
             oldest_path = next(iter(self.preview_result_cache))
             self.preview_result_cache.pop(oldest_path, None)
 
-        existing = self.image_states.get(output.path)
-        adjustments = (
-            deepcopy(existing.adjustments)
-            if existing is not None
-            else (
-                deepcopy(output.adjustments)
-                if output.adjustments is not None
-                else self._default_adjustments()
-            )
-        )
-        self.image_states[output.path] = ImageProcessingState(
-            mask_point=output.mask_point if output.mask_point is not None else (existing.mask_point if existing else None),
-            film_rect=output.film_rect if output.film_rect is not None else (existing.film_rect if existing else None),
-            white_balance_point=existing.white_balance_point if existing else None,
-            adjustments=adjustments,
-            lab_print_cmy_offsets=(
-                existing.lab_print_cmy_offsets
-                if existing is not None and existing.lab_print_cmy_offsets is not None
-                else output.lab_print_cmy_offsets
-            ),
-            tone_mid_anchor=existing.tone_mid_anchor if existing is not None and existing.tone_mid_anchor is not None else output.result.tone_mid_anchor,
-            roll_color_frame=output.roll_color_frame if output.roll_color_frame is not None else (existing.roll_color_frame if existing else None),
-            negative_preview_active=True,
-            auto_levels_pending=existing.auto_levels_pending if existing is not None else False,
-            preview_flip_horizontal=existing.preview_flip_horizontal if existing else False,
-            preview_flip_vertical=existing.preview_flip_vertical if existing else False,
-            preview_rotation_quarters=existing.preview_rotation_quarters if existing else 0,
+        self.image_states[output.path] = merge_stale_preview_result_state(
+            self.image_states.get(output.path),
+            output,
         )
         self.filmstrip.set_processed_thumbnail(
             output.path,
@@ -2226,7 +2211,7 @@ class MainWindow(QMainWindow):
         self._invalidate_negative_base_cache()
         self.control_panel.set_mask_status("Not selected")
         self.control_panel.set_film_status("Not selected")
-        self.control_panel.set_adjustments(self._default_adjustments(), emit=True)
+        self.control_panel.set_adjustments(default_adjustments(), emit=True)
         self.control_panel.set_histogram(None)
         self.preview_tabs.setCurrentWidget(self.origin_view)
         self.statusBar().showMessage("Workspace reset")
@@ -2290,28 +2275,21 @@ class MainWindow(QMainWindow):
             or self._last_untransformed_negative_result is not None
             or self.last_negative_result is not None
         )
-        self.image_states[self.current_path] = ImageProcessingState(
+        self.image_states[self.current_path] = build_current_image_state(
+            existing_state=self.image_states.get(self.current_path),
             mask_point=self.mask_point,
             film_rect=self.film_rect,
             white_balance_point=self.white_balance_point,
-            adjustments=deepcopy(self.adjustments),
-            lab_print_cmy_offsets=(
-                deepcopy(self.lab_print_cmy_offsets) if self.adjustments.auto_wb else None
-            ),
+            adjustments=self.adjustments,
+            lab_print_cmy_offsets=self.lab_print_cmy_offsets,
             tone_mid_anchor=(
                 float(self._last_untransformed_negative_result.tone_mid_anchor)
                 if self._last_untransformed_negative_result is not None
                 else None
             ),
-            roll_color_frame=(
-                deepcopy(self.image_states[self.current_path].roll_color_frame)
-                if self.current_path in self.image_states
-                else None
-            ),
-            negative_preview_active=has_positive_result,
-            auto_levels_pending=(
-                False if has_positive_result or self._manual_levels_present() else self.auto_levels_pending
-            ),
+            has_positive_result=has_positive_result,
+            manual_levels_present=self._manual_levels_present(),
+            auto_levels_pending=self.auto_levels_pending,
             preview_flip_horizontal=self._preview_flip_horizontal,
             preview_flip_vertical=self._preview_flip_vertical,
             preview_rotation_quarters=self._preview_rotation_quarters,
@@ -2335,14 +2313,22 @@ class MainWindow(QMainWindow):
 
     def _restore_state_for_path(self, path: Path) -> bool:
         state = self.image_states.get(path)
-        if state is None:
-            self.mask_point = None
-            self.film_rect = None
-            self.white_balance_point = None
-            self.lab_print_cmy_offsets = None
-            self.adjustments = deepcopy(self.adjustments)
-            self.negative_preview_active = False
-            self.auto_levels_pending = True
+        restored = restored_runtime_for_state(
+            state,
+            fallback_adjustments=self.adjustments,
+        )
+        self.mask_point = restored.mask_point
+        self.film_rect = restored.film_rect
+        self.white_balance_point = restored.white_balance_point
+        self.lab_print_cmy_offsets = restored.lab_print_cmy_offsets
+        self.adjustments = restored.adjustments
+        self.negative_preview_active = restored.negative_preview_active
+        self.auto_levels_pending = restored.auto_levels_pending
+        self._preview_flip_horizontal = restored.preview_flip_horizontal
+        self._preview_flip_vertical = restored.preview_flip_vertical
+        self._preview_rotation_quarters = restored.preview_rotation_quarters
+
+        if not restored.restored:
             self._reset_preview_transform()
             self.control_panel.set_mask_status("Not selected")
             self.control_panel.set_film_status("Not selected")
@@ -2351,19 +2337,6 @@ class MainWindow(QMainWindow):
             self._update_roll_color_status()
             self.origin_view.restore_selections(mask_point=None, film_rect=None)
             return False
-
-        self.mask_point = state.mask_point
-        self.film_rect = state.film_rect
-        self.white_balance_point = state.white_balance_point
-        self.lab_print_cmy_offsets = (
-            deepcopy(state.lab_print_cmy_offsets) if state.adjustments.auto_wb else None
-        )
-        self.adjustments = self._lab_print_adjustments(state.adjustments)
-        self.negative_preview_active = False
-        self.auto_levels_pending = state.auto_levels_pending
-        self._preview_flip_horizontal = state.preview_flip_horizontal
-        self._preview_flip_vertical = state.preview_flip_vertical
-        self._preview_rotation_quarters = state.preview_rotation_quarters % 4
 
         self.control_panel.set_mask_status(
             f"Base point: x={self.mask_point.x}, y={self.mask_point.y}"
@@ -2383,8 +2356,9 @@ class MainWindow(QMainWindow):
             film_rect=self.film_rect,
         )
 
-        should_restore_positive = state.negative_preview_active or (
-            self.film_rect is not None and self.film_rect.is_valid() and self._manual_levels_present()
+        should_restore_positive = should_restore_positive_preview(
+            state,
+            manual_levels_present=self._manual_levels_present(),
         )
         if should_restore_positive and not self._restore_cached_preview_result():
             if self._manual_levels_present():
@@ -2496,17 +2470,7 @@ class MainWindow(QMainWindow):
                 oldest_path = next(iter(self.preview_result_cache))
                 self.preview_result_cache.pop(oldest_path, None)
 
-        self.image_states[output.path] = ImageProcessingState(
-            mask_point=None,
-            film_rect=output.frame_rect,
-            white_balance_point=None,
-            adjustments=deepcopy(output.adjustments),
-            lab_print_cmy_offsets=output.lab_print_cmy_offsets,
-            tone_mid_anchor=output.result.tone_mid_anchor,
-            roll_color_frame=None,
-            negative_preview_active=True,
-            auto_levels_pending=False,
-        )
+        self.image_states[output.path] = state_from_preinvert_output(output)
         self.filmstrip.set_processed_thumbnail(
             output.path,
             self._pixmap_from_rgb8(output.result.display_rgb8),
@@ -2539,15 +2503,6 @@ class MainWindow(QMainWindow):
             if state.film_rect is not None or state.mask_point is not None:
                 return state
         return None
-
-    def _default_adjustments(self) -> AdjustmentParams:
-        return AdjustmentParams(invert_mode=InvertMode.LAB_PRINT.value)
-
-    @staticmethod
-    def _lab_print_adjustments(adjustments: AdjustmentParams) -> AdjustmentParams:
-        normalized = deepcopy(adjustments)
-        normalized.invert_mode = InvertMode.LAB_PRINT.value
-        return normalized
 
     def select_sequence_file(self, path: Path) -> None:
         self.load_path(path, refresh_sequence=False)
