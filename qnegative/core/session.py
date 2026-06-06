@@ -47,15 +47,26 @@ def state_from_json_dict(payload: dict[str, Any], source_path: Path) -> ImagePro
     try:
         adjustments_payload = payload.get("adjustments") or {}
         migrated_printer_balance = _uses_legacy_global_balance(adjustments_payload)
+        adjustments = _adjustments_from_dict(adjustments_payload)
+        cmy_strength = (
+            int(payload["lab_print_cmy_strength"])
+            if payload.get("lab_print_cmy_strength") is not None
+            else None
+        )
+        cmy_offsets = _float_list_from_payload(
+            None if migrated_printer_balance else payload.get("lab_print_cmy_offsets"),
+            length=3,
+        )
+        if cmy_strength != adjustments.auto_cmy_strength:
+            cmy_offsets = None
+
         return ImageProcessingState(
             mask_point=_point_from_dict(payload.get("mask_point")),
             film_rect=_rect_from_dict(payload.get("film_rect")),
             white_balance_point=_point_from_dict(payload.get("white_balance_point")),
-            adjustments=_adjustments_from_dict(adjustments_payload),
-            lab_print_cmy_offsets=_float_list_from_payload(
-                None if migrated_printer_balance else payload.get("lab_print_cmy_offsets"),
-                length=3,
-            ),
+            adjustments=adjustments,
+            lab_print_cmy_offsets=cmy_offsets,
+            lab_print_cmy_strength=(cmy_strength if cmy_offsets is not None else None),
             tone_mid_anchor=(
                 float(payload["tone_mid_anchor"])
                 if payload.get("tone_mid_anchor") is not None

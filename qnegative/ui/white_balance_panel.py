@@ -168,7 +168,18 @@ class WhiteBalancePanel(QWidget):
 
         self.auto_wb_checkbox = QCheckBox("Auto CMY")
         self.auto_wb_checkbox.setChecked(True)
-        self.auto_wb_checkbox.stateChanged.connect(lambda _state: self.balanceChanged.emit())
+        self.auto_wb_checkbox.stateChanged.connect(self._auto_wb_changed)
+
+        self.auto_cmy_strength_row = ColorSliderRow(
+            "Strength",
+            minimum=0,
+            maximum=100,
+            value=65,
+            gradient=self.AXIS_GRADIENTS["range"],
+        )
+        self.auto_cmy_strength_row.valueChanged.connect(self.balanceChanged.emit)
+        self.auto_cmy_strength_row.interactionStarted.connect(self.interactionStarted.emit)
+        self.auto_cmy_strength_row.interactionFinished.connect(self.interactionFinished.emit)
 
         self.pick_wb_button = QToolButton()
         self.pick_wb_button.setText("Pick WB")
@@ -186,6 +197,7 @@ class WhiteBalancePanel(QWidget):
         root.setContentsMargins(0, 8, 0, 0)
         root.setSpacing(8)
         root.addWidget(self.auto_wb_checkbox)
+        root.addWidget(self.auto_cmy_strength_row)
         root.addWidget(self.pick_wb_button)
         root.addWidget(self.tabs)
 
@@ -194,6 +206,7 @@ class WhiteBalancePanel(QWidget):
     def values(self) -> dict:
         return {
             "auto_wb": self.auto_wb_checkbox.isChecked(),
+            "auto_cmy_strength": self.auto_cmy_strength_row.value(),
             "printer_balance": self._axis_values("printer"),
             "color_balance": ColorBalanceParams(
                 global_balance=BalanceAxis(),
@@ -207,12 +220,18 @@ class WhiteBalancePanel(QWidget):
         previous = self.blockSignals(True)
         try:
             self.auto_wb_checkbox.setChecked(adjustments.auto_wb)
+            self.auto_cmy_strength_row.set_value(adjustments.auto_cmy_strength)
+            self.auto_cmy_strength_row.setEnabled(adjustments.auto_wb)
             self._set_axis_values("printer", adjustments.printer_balance)
             self._set_tonal_values("shadows", adjustments.color_balance.shadows)
             self._set_tonal_values("midtones", adjustments.color_balance.midtones)
             self._set_tonal_values("highlights", adjustments.color_balance.highlights)
         finally:
             self.blockSignals(previous)
+
+    def _auto_wb_changed(self, _state: int) -> None:
+        self.auto_cmy_strength_row.setEnabled(self.auto_wb_checkbox.isChecked())
+        self.balanceChanged.emit()
 
     def _axis_widget(self, prefix: str) -> QWidget:
         widget = QWidget()

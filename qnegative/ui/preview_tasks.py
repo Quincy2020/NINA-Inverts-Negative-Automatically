@@ -86,6 +86,7 @@ class PreInvertOutput:
     result: NegativePreviewResult
     cache_key: tuple | None
     lab_print_cmy_offsets: list[float] | None
+    lab_print_cmy_strength: int | None
     confidence: float
 
 
@@ -196,6 +197,9 @@ class PreInvertTask(QRunnable):
                 result=result,
                 cache_key=cache_key,
                 lab_print_cmy_offsets=lab_print_cmy_offsets,
+                lab_print_cmy_strength=(
+                    effective.auto_cmy_strength if lab_print_cmy_offsets is not None else None
+                ),
                 confidence=frame.confidence,
             ),
         )
@@ -466,6 +470,9 @@ class PreviewRenderTask(QRunnable):
             film_rect=self.film_rect,
             adjustments=deepcopy(effective_adjustments),
             lab_print_cmy_offsets=lab_print_cmy_offsets,
+            lab_print_cmy_strength=(
+                effective_adjustments.auto_cmy_strength if lab_print_cmy_offsets is not None else None
+            ),
             roll_color_frame=deepcopy(self.roll_color_frame),
             applied_auto_levels=applied_auto_levels,
         )

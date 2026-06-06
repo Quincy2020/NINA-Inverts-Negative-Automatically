@@ -160,6 +160,7 @@ class MainWindow(QMainWindow):
         self.film_rect: ImageRect | None = None
         self.white_balance_point: ImagePoint | None = None
         self.lab_print_cmy_offsets: list[float] | None = None
+        self.lab_print_cmy_strength: int | None = None
         self.adjustments = default_adjustments()
         self.negative_preview_active = False
         self.auto_levels_pending = True
@@ -542,12 +543,13 @@ class MainWindow(QMainWindow):
                 state,
                 adjustments=updated_adjustments,
                 lab_print_cmy_offsets=None,
+                lab_print_cmy_strength=None,
             )
             self.preview_result_cache.pop(path, None)
 
         if self.current_path in targets:
             self.adjustments.lens_correction = deepcopy(source_params)
-            self.lab_print_cmy_offsets = None
+            self._clear_lab_print_cmy_offsets()
             self.control_panel.set_adjustments(self.adjustments, emit=False)
             self._invalidate_negative_base_cache()
             if self.negative_preview_active:
@@ -720,7 +722,7 @@ class MainWindow(QMainWindow):
         self.negative_preview_active = False
         self.auto_levels_pending = True
         self.white_balance_point = None
-        self.lab_print_cmy_offsets = None
+        self._clear_lab_print_cmy_offsets()
         self._last_untransformed_negative_result = None
         self._reset_preview_transform()
         self._invalidate_negative_base_cache()
@@ -853,7 +855,7 @@ class MainWindow(QMainWindow):
     def mask_point_selected(self, point: ImagePoint) -> None:
         self.mask_point = point
         self.white_balance_point = None
-        self.lab_print_cmy_offsets = None
+        self._clear_lab_print_cmy_offsets()
         self.auto_levels_pending = True
         self._invalidate_negative_base_cache()
         self.control_panel.set_mask_status(f"Base point: x={point.x}, y={point.y}")
@@ -863,7 +865,7 @@ class MainWindow(QMainWindow):
     def film_rect_selected(self, rect: ImageRect) -> None:
         self.film_rect = rect
         self.white_balance_point = None
-        self.lab_print_cmy_offsets = None
+        self._clear_lab_print_cmy_offsets()
         self.auto_levels_pending = True
         self._invalidate_negative_base_cache()
         self.control_panel.set_film_status(f"Frame: {rect.label()}")
@@ -873,7 +875,7 @@ class MainWindow(QMainWindow):
     def film_rect_reset(self) -> None:
         self.film_rect = None
         self.white_balance_point = None
-        self.lab_print_cmy_offsets = None
+        self._clear_lab_print_cmy_offsets()
         self.auto_levels_pending = True
         self.negative_preview_active = False
         self._last_untransformed_negative_result = None
@@ -950,11 +952,17 @@ class MainWindow(QMainWindow):
             return np.zeros(3, dtype=np.float32)
 
         manual = manual_printer_balance_offsets(self.adjustments.printer_balance)
-        if self.lab_print_cmy_offsets is not None:
+        if (
+            self.lab_print_cmy_offsets is not None
+            and self.lab_print_cmy_strength == self.adjustments.auto_cmy_strength
+        ):
             effective = np.asarray(self.lab_print_cmy_offsets, dtype=np.float32).reshape(3)
             return (effective - manual).astype(np.float32, copy=False)
 
-        return estimate_lab_print_auto_cmy_offsets(normalized_for_print)
+        return estimate_lab_print_auto_cmy_offsets(
+            normalized_for_print,
+            strength=self.adjustments.auto_cmy_strength / 100.0,
+        )
 
     def _inverse_preview_transform_point(self, point: ImagePoint, *, source_size: ImageSize) -> ImagePoint:
         width = max(1, int(source_size.width))
@@ -1104,7 +1112,7 @@ class MainWindow(QMainWindow):
             return
 
         self.white_balance_point = None
-        self.lab_print_cmy_offsets = None
+        self._clear_lab_print_cmy_offsets()
         self.auto_levels_pending = True
         self._invalidate_negative_base_cache()
         self.origin_view.restore_selections(
@@ -1165,10 +1173,11 @@ class MainWindow(QMainWindow):
         mode_changed = previous.invert_mode != self.adjustments.invert_mode
         if mode_changed:
             self.auto_levels_pending = True
-            self.lab_print_cmy_offsets = None
+            self._clear_lab_print_cmy_offsets()
         printer_balance_changed = previous.printer_balance != self.adjustments.printer_balance
-        if previous.auto_wb != self.adjustments.auto_wb or printer_balance_changed:
-            self.lab_print_cmy_offsets = None
+        auto_cmy_strength_changed = previous.auto_cmy_strength != self.adjustments.auto_cmy_strength
+        if previous.auto_wb != self.adjustments.auto_wb or printer_balance_changed or auto_cmy_strength_changed:
+            self._clear_lab_print_cmy_offsets()
             if self.current_path is not None:
                 self.preview_result_cache.pop(self.current_path, None)
             self._reset_preview_stage_caches()
@@ -1319,6 +1328,7 @@ class MainWindow(QMainWindow):
         self._last_untransformed_negative_result = result
         if output.quality == FINAL_RENDER_QUALITY:
             self.lab_print_cmy_offsets = output.lab_print_cmy_offsets
+            self.lab_print_cmy_strength = output.lab_print_cmy_strength
         displayed_result, _pixmap = self._update_preview_from_result(
             result,
             update_filmstrip=output.quality == FINAL_RENDER_QUALITY,
@@ -1698,6 +1708,10 @@ class MainWindow(QMainWindow):
         self.last_negative_result = None
         self._last_untransformed_negative_result = None
 
+    def _clear_lab_print_cmy_offsets(self) -> None:
+        self.lab_print_cmy_offsets = None
+        self.lab_print_cmy_strength = None
+
     def _reset_preview_stage_caches(self) -> None:
         self._preview_stage_caches = {
             FINAL_RENDER_QUALITY: PreviewStageCache(),
@@ -1930,7 +1944,10 @@ class MainWindow(QMainWindow):
     def _preview_cmy_offsets_for_path(self, path: Path, state: ImageProcessingState) -> np.ndarray | None:
         if not state.adjustments.auto_wb:
             return None
-        if state.lab_print_cmy_offsets is not None:
+        if (
+            state.lab_print_cmy_offsets is not None
+            and state.lab_print_cmy_strength == state.adjustments.auto_cmy_strength
+        ):
             return np.asarray(state.lab_print_cmy_offsets, dtype=np.float32).copy()
         cached = self.preview_result_cache.get(path)
         if cached is None:
@@ -2055,7 +2072,10 @@ class MainWindow(QMainWindow):
             return None
         if self.auto_levels_pending:
             return None
-        if self.lab_print_cmy_offsets is not None:
+        if (
+            self.lab_print_cmy_offsets is not None
+            and self.lab_print_cmy_strength == self.adjustments.auto_cmy_strength
+        ):
             return np.asarray(self.lab_print_cmy_offsets, dtype=np.float32).copy()
 
         # Reuse preview CMY only when the final preview cache exactly matches
@@ -2288,6 +2308,7 @@ class MainWindow(QMainWindow):
         self.film_rect = restored.film_rect
         self.white_balance_point = restored.white_balance_point
         self.lab_print_cmy_offsets = restored.lab_print_cmy_offsets
+        self.lab_print_cmy_strength = restored.lab_print_cmy_strength
         self.adjustments = restored.adjustments
         self.negative_preview_active = restored.negative_preview_active
         self.auto_levels_pending = restored.auto_levels_pending

@@ -25,7 +25,7 @@ LOG_SHOULDER_WIDTH = 2.5
 LOG_COLOR_SEPARATION_STRENGTH = 0.5
 LOG_AUTO_WB_MAX_OFFSET = 0.025
 LAB_PRINT_LOG_PERCENTILE_CLIP = 0.02
-LAB_PRINT_AUTO_WB_STRENGTH = 0.45
+LAB_PRINT_AUTO_WB_STRENGTH = 0.65
 LAB_PRINT_AUTO_WB_MAX_OFFSET = 0.04
 LAB_PRINT_MANUAL_CMY_OFFSET_SCALE = 0.0009
 LAB_PRINT_MANUAL_CMY_MAX_OFFSET = 0.09
@@ -517,7 +517,10 @@ def build_lab_print_color_stage(
     if cmy_offsets is not None:
         cmy_offsets = np.asarray(cmy_offsets, dtype=np.float32)
     elif adjustments.auto_wb:
-        cmy_offsets = estimate_lab_print_auto_cmy_offsets(normalized_for_print)
+        cmy_offsets = estimate_lab_print_auto_cmy_offsets(
+            normalized_for_print,
+            strength=adjustments.auto_cmy_strength / 100.0,
+        )
         cmy_offsets = effective_lab_print_cmy_offsets(cmy_offsets, adjustments)
     else:
         cmy_offsets = np.zeros(3, dtype=np.float32)
@@ -2213,7 +2216,10 @@ def lab_print_visual_brightness_score(
     normalized_for_print = np.clip(1.0 - leveled, 0.0, 1.0)
 
     if adjustments.auto_wb:
-        cmy_offsets = estimate_lab_print_auto_cmy_offsets(normalized_for_print)
+        cmy_offsets = estimate_lab_print_auto_cmy_offsets(
+            normalized_for_print,
+            strength=adjustments.auto_cmy_strength / 100.0,
+        )
     else:
         cmy_offsets = np.zeros(3, dtype=np.float32)
     cmy_offsets = effective_lab_print_cmy_offsets(cmy_offsets, adjustments)

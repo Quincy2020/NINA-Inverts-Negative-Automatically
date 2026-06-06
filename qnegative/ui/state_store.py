@@ -13,6 +13,7 @@ class RestoredImageRuntime:
     film_rect: ImageRect | None
     white_balance_point: object | None
     lab_print_cmy_offsets: list[float] | None
+    lab_print_cmy_strength: int | None
     adjustments: AdjustmentParams
     negative_preview_active: bool
     auto_levels_pending: bool
@@ -43,6 +44,7 @@ def restored_runtime_for_state(
             film_rect=None,
             white_balance_point=None,
             lab_print_cmy_offsets=None,
+            lab_print_cmy_strength=None,
             adjustments=deepcopy(fallback_adjustments),
             negative_preview_active=False,
             auto_levels_pending=True,
@@ -52,13 +54,20 @@ def restored_runtime_for_state(
             restored=False,
         )
 
+    cmy_offsets = state.lab_print_cmy_offsets if state.adjustments.auto_wb else None
+    cmy_strength = state.lab_print_cmy_strength
+    if cmy_strength != state.adjustments.auto_cmy_strength:
+        cmy_offsets = None
+        cmy_strength = None
+
     return RestoredImageRuntime(
         mask_point=state.mask_point,
         film_rect=state.film_rect,
         white_balance_point=state.white_balance_point,
         lab_print_cmy_offsets=(
-            deepcopy(state.lab_print_cmy_offsets) if state.adjustments.auto_wb else None
+            deepcopy(cmy_offsets) if cmy_offsets is not None else None
         ),
+        lab_print_cmy_strength=cmy_strength,
         adjustments=lab_print_adjustments(state.adjustments),
         negative_preview_active=False,
         auto_levels_pending=state.auto_levels_pending,
@@ -108,6 +117,11 @@ def build_current_image_state(
         lab_print_cmy_offsets=(
             deepcopy(lab_print_cmy_offsets) if adjustments.auto_wb else None
         ),
+        lab_print_cmy_strength=(
+            adjustments.auto_cmy_strength
+            if adjustments.auto_wb and lab_print_cmy_offsets is not None
+            else None
+        ),
         tone_mid_anchor=tone_mid_anchor,
         roll_color_frame=deepcopy(existing_state.roll_color_frame) if existing_state else None,
         negative_preview_active=has_positive_result,
@@ -133,6 +147,15 @@ def merge_stale_preview_result_state(
             else default_adjustments()
         )
     )
+    existing_cmy_current = (
+        existing_state is not None
+        and existing_state.lab_print_cmy_offsets is not None
+        and existing_state.lab_print_cmy_strength == adjustments.auto_cmy_strength
+    )
+    output_cmy_current = (
+        output.lab_print_cmy_offsets is not None
+        and getattr(output, "lab_print_cmy_strength", None) == adjustments.auto_cmy_strength
+    )
     return ImageProcessingState(
         mask_point=(
             output.mask_point
@@ -148,8 +171,15 @@ def merge_stale_preview_result_state(
         adjustments=adjustments,
         lab_print_cmy_offsets=(
             existing_state.lab_print_cmy_offsets
-            if existing_state is not None and existing_state.lab_print_cmy_offsets is not None
+            if existing_cmy_current
             else output.lab_print_cmy_offsets
+            if output_cmy_current
+            else None
+        ),
+        lab_print_cmy_strength=(
+            adjustments.auto_cmy_strength
+            if existing_cmy_current or output_cmy_current
+            else None
         ),
         tone_mid_anchor=(
             existing_state.tone_mid_anchor
@@ -176,6 +206,7 @@ def state_from_preinvert_output(output: Any) -> ImageProcessingState:
         white_balance_point=None,
         adjustments=deepcopy(output.adjustments),
         lab_print_cmy_offsets=output.lab_print_cmy_offsets,
+        lab_print_cmy_strength=getattr(output, "lab_print_cmy_strength", None),
         tone_mid_anchor=output.result.tone_mid_anchor,
         roll_color_frame=None,
         negative_preview_active=True,

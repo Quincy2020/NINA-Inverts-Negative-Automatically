@@ -27,6 +27,8 @@ DEFAULT_ANALYSIS_MAX_SIZE = (768, 768)
 DEFAULT_ANALYSIS_CROP_PERCENT = 4.0
 SRGB_LUMA_WEIGHTS_RGB = (0.299, 0.587, 0.114)
 IDENTITY_GAINS_RGB = (1.0, 1.0, 1.0)
+MIN_OBVIOUS_CAST_MAGNITUDE = 0.005
+MIN_ROLL_MEMBERSHIP_FOR_ROLL = 0.30
 
 
 @dataclass(frozen=True)
@@ -1344,7 +1346,7 @@ def _roll_membership_blocks_roll(
 ) -> bool:
     if roll_after_cast <= before_cast + max(0.0015, before_cast * 0.10):
         return False
-    if roll_membership < 0.36:
+    if roll_membership < MIN_ROLL_MEMBERSHIP_FOR_ROLL:
         return True
     if frame.algorithm == "identity" and before_cast <= 0.014 and roll_membership < 0.48:
         return True
@@ -2375,7 +2377,7 @@ def _score_candidate(
 ) -> tuple[float, float, str]:
     before_mag = float(before.magnitude)
     after_mag = float(after.magnitude)
-    if before_mag <= 0.012:
+    if before_mag <= MIN_OBVIOUS_CAST_MAGNITUDE:
         return 0.0, 0.0, "no obvious cast"
     improvement = before_mag - after_mag
     improvement_ratio = improvement / max(before_mag, 1e-6)

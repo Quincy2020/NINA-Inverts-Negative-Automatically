@@ -50,6 +50,7 @@ class PreviewRenderOutput:
     film_rect: ImageRect | None = None
     adjustments: AdjustmentParams | None = None
     lab_print_cmy_offsets: list[float] | None = None
+    lab_print_cmy_strength: int | None = None
     roll_color_frame: dict | None = None
     applied_auto_levels: bool = False
 
@@ -185,6 +186,7 @@ def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
         adjustments.invert_mode,
         adjustments.print_curve,
         adjustments.auto_wb,
+        adjustments.auto_cmy_strength,
         balance_axis_key(adjustments.printer_balance),
         color_balance_key(adjustments),
         color_correction_key(adjustments),
@@ -258,6 +260,7 @@ def lab_print_auto_key(adjustments: AdjustmentParams) -> tuple:
         adjustments.soft_highlights,
         adjustments.soft_shadows,
         adjustments.auto_wb,
+        adjustments.auto_cmy_strength,
         balance_axis_key(adjustments.printer_balance),
         lab_print_engine_key(),
         adjustments.camera_color_strength,
@@ -299,6 +302,7 @@ def lab_print_color_key(
         adjustments.soft_highlights,
         adjustments.soft_shadows,
         adjustments.auto_wb,
+        adjustments.auto_cmy_strength,
         cmy_offsets_key(lab_print_cmy_offsets) if adjustments.auto_wb else None,
         balance_axis_key(adjustments.printer_balance),
         lab_print_engine_key(),

@@ -135,6 +135,7 @@ class AdjustmentParams:
     invert_mode: str = InvertMode.LAB_PRINT.value
     print_curve: str = PrintCurveMode.STANDARD.value
     auto_wb: bool = True
+    auto_cmy_strength: int = 65
     printer_balance: BalanceAxis = field(default_factory=BalanceAxis)
     color_balance: ColorBalanceParams = field(default_factory=ColorBalanceParams)
     density_matrix: DensityMatrixParams = field(default_factory=DensityMatrixParams)
@@ -161,6 +162,7 @@ class ImageProcessingState:
     white_balance_point: ImagePoint | None = None
     adjustments: AdjustmentParams = field(default_factory=AdjustmentParams)
     lab_print_cmy_offsets: list[float] | None = None
+    lab_print_cmy_strength: int | None = None
     tone_mid_anchor: float | None = None
     roll_color_frame: dict | None = None
     negative_preview_active: bool = False
