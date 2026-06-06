@@ -102,7 +102,7 @@ def build_main_menus(window) -> None:
         action = QAction(f"Previous/Next {radius}", window)
         action.setCheckable(True)
         action.setData(radius)
-        action.setChecked(radius == window._auto_preinvert_radius)
+        action.setChecked(radius == window._frame_automation.auto_preinvert_radius)
         window.preinvert_radius_group.addAction(action)
         preinvert_radius_menu.addAction(action)
     window.preinvert_radius_group.triggered.connect(window.set_auto_preinvert_radius)

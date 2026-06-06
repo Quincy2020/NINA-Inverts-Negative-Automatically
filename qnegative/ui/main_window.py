@@ -72,6 +72,7 @@ from qnegative.ui.export_tasks import (
     export_format_from_path,
     export_format_label,
 )
+from qnegative.ui.frame_automation_controller import FrameAutomationController
 from qnegative.ui.folder_filmstrip import FolderFilmstrip
 from qnegative.ui.gl_preview_view import OpenGLPreviewView
 from qnegative.ui.image_view import ImageView
@@ -179,16 +180,9 @@ class MainWindow(QMainWindow):
         self._preview_rotation_quarters = 0
         self._thread_pool = QThreadPool.globalInstance()
         self._render_controller = PreviewRenderController()
+        self._frame_automation = FrameAutomationController()
         self._raw_preview_job_id = 0
         self._raw_preview_in_progress = False
-        self._model_warmup_in_progress = False
-        self._auto_detect_job_id = 0
-        self._auto_detect_auto_preview_jobs: set[int] = set()
-        self._auto_detect_in_progress = False
-        self._preinvert_job_id = 0
-        self._preinvert_in_progress: set[int] = set()
-        self._preinvert_paths: set[Path] = set()
-        self._preinvert_queue: list[Path] = []
         self._export_in_progress = False
         self._batch_export_queue: list[dict] = []
         self._batch_export_total = 0
@@ -201,9 +195,6 @@ class MainWindow(QMainWindow):
         self._default_export_dir: Path | None = None
         self._gpu_preview_enabled = True
         self._auto_invert_after_frame_change = True
-        self._auto_frame_new_negatives = True
-        self._auto_preinvert_nearby_frames = True
-        self._auto_preinvert_radius = 1
         self._roll_session_autosave = True
         self._roll_color_result: dict | None = None
         self._roll_color_analysis_job_id = 0
@@ -349,24 +340,21 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Auto invert after frame change {status}")
 
     def set_auto_frame_new_negatives(self, enabled: bool) -> None:
-        self._auto_frame_new_negatives = bool(enabled)
-        status = "enabled" if self._auto_frame_new_negatives else "disabled"
+        self._frame_automation.set_auto_frame_new_negatives(enabled)
+        status = "enabled" if self._frame_automation.auto_frame_new_negatives else "disabled"
         self.statusBar().showMessage(f"Auto frame new negatives {status}")
 
     def set_auto_preinvert_nearby_frames(self, enabled: bool) -> None:
-        self._auto_preinvert_nearby_frames = bool(enabled)
-        if not self._auto_preinvert_nearby_frames:
-            self._preinvert_queue = []
-        status = "enabled" if self._auto_preinvert_nearby_frames else "disabled"
+        self._frame_automation.set_auto_preinvert_nearby_frames(enabled)
+        status = "enabled" if self._frame_automation.auto_preinvert_nearby_frames else "disabled"
         self.statusBar().showMessage(f"Auto pre-invert nearby frames {status}")
-        if self._auto_preinvert_nearby_frames:
+        if self._frame_automation.auto_preinvert_nearby_frames:
             self._schedule_nearby_preinvert()
 
     def set_auto_preinvert_radius(self, action: QAction) -> None:
-        self._auto_preinvert_radius = int(action.data())
-        self._preinvert_queue = []
+        self._frame_automation.set_auto_preinvert_radius(int(action.data()))
         self.statusBar().showMessage(
-            f"Auto pre-invert range: previous/next {self._auto_preinvert_radius}"
+            f"Auto pre-invert range: previous/next {self._frame_automation.auto_preinvert_radius}"
         )
         self._schedule_nearby_preinvert()
 
@@ -674,16 +662,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Roll color analysis failed")
 
     def _start_frame_ranker_warmup(self) -> None:
-        if self._model_warmup_in_progress:
+        if not self._frame_automation.begin_model_warmup():
             return
-        self._model_warmup_in_progress = True
         self._refresh_activity_progress()
         task = ModelWarmupTask()
         task.signals.finished.connect(self._frame_ranker_warmup_finished)
         self._thread_pool.start(task)
 
     def _frame_ranker_warmup_finished(self, loaded: bool, model_name: str) -> None:
-        self._model_warmup_in_progress = False
+        self._frame_automation.finish_model_warmup()
         self._refresh_activity_progress()
         if loaded:
             self.statusBar().showMessage(f"Frame model ready: {model_name}")
@@ -969,16 +956,13 @@ class MainWindow(QMainWindow):
             if not auto_preview:
                 QMessageBox.information(self, "Auto Detect", "Open a RAW file before auto detection.")
             return
-        if self._auto_detect_in_progress:
+        job = self._frame_automation.begin_auto_detect(auto_preview=auto_preview)
+        if job is None:
             self.statusBar().showMessage("Auto detect already running...")
             return
 
-        self._auto_detect_job_id += 1
-        job_id = self._auto_detect_job_id
-        if auto_preview:
-            self._auto_detect_auto_preview_jobs.add(job_id)
         task = AutoDetectTask(
-            job_id=job_id,
+            job_id=job.job_id,
             mode=mode,
             path=self.current_path,
             preview=self.current_preview,
@@ -990,7 +974,6 @@ class MainWindow(QMainWindow):
         )
         task.signals.finished.connect(self._auto_detect_finished)
         task.signals.failed.connect(self._auto_detect_failed)
-        self._auto_detect_in_progress = True
         self._refresh_activity_progress()
         self.statusBar().showMessage(
             "Auto frame running in background..."
@@ -1000,11 +983,9 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(task)
 
     def _auto_detect_finished(self, job_id: int, output: AutoDetectOutput) -> None:
-        if job_id != self._auto_detect_job_id:
-            self._auto_detect_auto_preview_jobs.discard(job_id)
+        completion = self._frame_automation.finish_auto_detect(job_id)
+        if not completion.is_current:
             return
-        self._auto_detect_auto_preview_jobs.discard(job_id)
-        self._auto_detect_in_progress = False
         self._refresh_activity_progress()
         if output.path != self.current_path:
             self.statusBar().showMessage("Auto detect result ignored after file change")
@@ -1013,15 +994,12 @@ class MainWindow(QMainWindow):
         self._apply_auto_detect_output(output)
 
     def _auto_detect_failed(self, job_id: int, message: str) -> None:
-        if job_id != self._auto_detect_job_id:
-            self._auto_detect_auto_preview_jobs.discard(job_id)
+        completion = self._frame_automation.finish_auto_detect(job_id)
+        if not completion.is_current:
             return
-        auto_preview = job_id in self._auto_detect_auto_preview_jobs
-        self._auto_detect_auto_preview_jobs.discard(job_id)
-        self._auto_detect_in_progress = False
         self._refresh_activity_progress()
         self.statusBar().showMessage("Auto detect failed")
-        if not auto_preview:
+        if not completion.auto_preview:
             QMessageBox.warning(self, "Auto Detect Failed", message)
 
     def _apply_auto_detect_output(self, output: AutoDetectOutput) -> None:
@@ -2167,21 +2145,19 @@ class MainWindow(QMainWindow):
         self._refresh_activity_progress()
 
     def _cancel_auto_detect(self) -> None:
-        self._auto_detect_job_id += 1
-        self._auto_detect_auto_preview_jobs.clear()
-        self._auto_detect_in_progress = False
+        self._frame_automation.cancel_auto_detect()
         self._refresh_activity_progress()
 
     def _refresh_activity_progress(self) -> None:
         if self._raw_preview_in_progress:
             self.control_panel.set_activity_progress(True, text="Loading RAW preview...")
-        elif self._auto_detect_in_progress:
+        elif self._frame_automation.auto_detect_in_progress:
             self.control_panel.set_activity_progress(True, text="Finding frame...")
-        elif self._preinvert_in_progress:
+        elif self._frame_automation.preinvert_in_progress:
             self.control_panel.set_activity_progress(True, text="Pre-inverting nearby frames...")
         elif self._roll_color_analysis_in_progress:
             self.control_panel.set_activity_progress(True, text="Analyzing roll color...")
-        elif self._model_warmup_in_progress:
+        elif self._frame_automation.model_warmup_in_progress:
             self.control_panel.set_activity_progress(True, text="Loading frame model...")
         else:
             self.control_panel.set_activity_progress(False)
@@ -2307,67 +2283,51 @@ class MainWindow(QMainWindow):
         return True
 
     def _maybe_auto_frame_new_negative(self) -> None:
-        if not self._auto_frame_new_negatives:
-            return
-        if self.current_preview is None or self.current_path is None:
-            return
-        if self.current_path.suffix.lower() not in RAW_EXTENSIONS:
-            return
-        if self.film_rect is not None or self.negative_preview_active:
+        if not self._frame_automation.should_auto_frame_new_negative(
+            path=self.current_path,
+            has_current_preview=self.current_preview is not None,
+            has_film_rect=self.film_rect is not None,
+            negative_preview_active=self.negative_preview_active,
+            raw_extensions=RAW_EXTENSIONS,
+        ):
             return
         self.auto_detect_current("frame_base", auto_preview=True)
 
     def _schedule_nearby_preinvert(self) -> None:
-        if not self._auto_preinvert_nearby_frames:
-            return
-        if self.current_index < 0 or not self.folder_files:
-            return
-
-        radius = int(np.clip(self._auto_preinvert_radius, 0, 5))
-        start = max(0, self.current_index - radius)
-        end = min(len(self.folder_files), self.current_index + radius + 1)
-        candidates = [
-            path for path in self.folder_files[start:end]
-            if self._should_preinvert_path(path)
-        ]
-        ordered = sorted(
-            candidates,
-            key=lambda path: abs(self.folder_files.index(path) - self.current_index),
+        self._frame_automation.schedule_nearby_preinvert(
+            folder_files=self.folder_files,
+            current_index=self.current_index,
+            current_path=self.current_path,
+            image_states=self.image_states,
+            preview_result_cache=self.preview_result_cache,
+            raw_extensions=RAW_EXTENSIONS,
         )
-        for path in ordered:
-            if path not in self._preinvert_queue:
-                self._preinvert_queue.append(path)
         self._start_next_preinvert_jobs()
 
     def _should_preinvert_path(self, path: Path) -> bool:
-        if path == self.current_path:
-            return False
-        if path.suffix.lower() not in RAW_EXTENSIONS:
-            return False
-        if path in self._preinvert_paths or path in self.image_states:
-            return False
-        if path in self.preview_result_cache:
-            return False
-        return True
+        return self._frame_automation.should_preinvert_path(
+            path,
+            current_path=self.current_path,
+            image_states=self.image_states,
+            preview_result_cache=self.preview_result_cache,
+            raw_extensions=RAW_EXTENSIONS,
+        )
 
     def _start_next_preinvert_jobs(self) -> None:
         if self._export_in_progress:
             self._refresh_activity_progress()
             return
-        while self._preinvert_queue and len(self._preinvert_in_progress) < 2:
-            path = self._preinvert_queue.pop(0)
-            if not self._should_preinvert_path(path):
-                continue
-            self._preinvert_job_id += 1
-            job_id = self._preinvert_job_id
-            self._preinvert_in_progress.add(job_id)
-            self._preinvert_paths.add(path)
+        jobs = self._frame_automation.start_next_preinvert_jobs(
+            can_start_path=self._should_preinvert_path,
+            export_in_progress=self._export_in_progress,
+        )
+        for job in jobs:
             task = PreInvertTask(
-                job_id=job_id,
-                path=path,
+                job_id=job.job_id,
+                path=job.path,
                 max_size=DEFAULT_PREVIEW_MAX_EDGE,
                 format_hint=self.control_panel.auto_format(),
-                file_key=self._file_key_for_path(path),
+                file_key=self._file_key_for_path(job.path),
                 adjustments=self.adjustments,
                 prior_frame_rect=self._preinvert_prior_frame_rect(),
             )
@@ -2377,14 +2337,14 @@ class MainWindow(QMainWindow):
         self._refresh_activity_progress()
 
     def _preinvert_finished(self, job_id: int, output: PreInvertOutput) -> None:
-        self._preinvert_in_progress.discard(job_id)
-        self._preinvert_paths.discard(output.path)
+        if not self._frame_automation.finish_preinvert(job_id, output.path):
+            return
         self._cache_preinvert_output(output)
         self._start_next_preinvert_jobs()
 
     def _preinvert_failed(self, job_id: int, path: Path, message: str) -> None:
-        self._preinvert_in_progress.discard(job_id)
-        self._preinvert_paths.discard(path)
+        if not self._frame_automation.finish_preinvert(job_id, path):
+            return
         self.statusBar().showMessage(f"Auto pre-invert skipped {path.name}: {message}")
         self._start_next_preinvert_jobs()
 
@@ -2505,9 +2465,7 @@ class MainWindow(QMainWindow):
         self._cancel_preview_render()
         self._cancel_raw_preview()
         self._cancel_auto_detect()
-        self._preinvert_queue = []
-        self._preinvert_in_progress.clear()
-        self._preinvert_paths.clear()
+        self._frame_automation.cancel_preinvert()
         self._batch_export_queue = []
         self._batch_export_cancel_requested = True
         if self._export_cancel_event is not None:
@@ -2519,7 +2477,7 @@ class MainWindow(QMainWindow):
     def _set_folder_sequence(self, path: Path) -> None:
         if self.current_path is not None:
             self._save_current_state()
-        self._preinvert_queue = []
+        self._frame_automation.clear_preinvert_queue()
         result = self._project.load_folder(path, self.image_states)
         self.folder_files = result.files
         self.current_index = result.current_index
