@@ -119,6 +119,7 @@ class PreInvertTask(QRunnable):
         file_key: tuple,
         adjustments: AdjustmentParams,
         prior_frame_rect: ImageRect | None = None,
+        auto_frame_inset_percent: int = 0,
     ) -> None:
         super().__init__()
         self.job_id = job_id
@@ -128,6 +129,7 @@ class PreInvertTask(QRunnable):
         self.file_key = file_key
         self.adjustments = deepcopy(adjustments)
         self.prior_frame_rect = prior_frame_rect
+        self.auto_frame_inset_percent = int(auto_frame_inset_percent)
         self.signals = PreInvertSignals()
 
     def run(self) -> None:
@@ -140,6 +142,7 @@ class PreInvertTask(QRunnable):
                 format_hint=self.format_hint,
                 detect_base=False,
                 prior_frame_rect=self.prior_frame_rect,
+                auto_frame_inset_percent=self.auto_frame_inset_percent,
             )
             frame = detected.frame
             if frame is None or frame.confidence_level not in {"high", "fallback"}:
@@ -228,6 +231,7 @@ class AutoDetectTask(QRunnable):
         current_film_rect: ImageRect | None,
         fallback_state: ImageProcessingState | None,
         auto_preview: bool = False,
+        auto_frame_inset_percent: int = 0,
     ) -> None:
         super().__init__()
         self.job_id = job_id
@@ -239,6 +243,7 @@ class AutoDetectTask(QRunnable):
         self.current_film_rect = current_film_rect
         self.fallback_state = fallback_state
         self.auto_preview = auto_preview
+        self.auto_frame_inset_percent = int(auto_frame_inset_percent)
         self.signals = AutoDetectSignals()
 
     def run(self) -> None:
@@ -258,6 +263,7 @@ class AutoDetectTask(QRunnable):
                     format_hint=self.format_hint,
                     detect_base=self.detect_base,
                     prior_frame_rect=prior_frame_rect,
+                    auto_frame_inset_percent=self.auto_frame_inset_percent,
                 )
                 frame_result = result.frame
                 base_result = result.base
@@ -268,6 +274,7 @@ class AutoDetectTask(QRunnable):
                     source_size=self.preview.source_size,
                     format_hint=self.format_hint,
                     prior_frame_rect=prior_frame_rect,
+                    auto_frame_inset_percent=self.auto_frame_inset_percent,
                 )
             elif self.mode == "base":
                 base_result = detect_film_base(

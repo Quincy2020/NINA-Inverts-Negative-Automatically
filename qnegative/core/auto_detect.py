@@ -16,7 +16,7 @@ DETECT_MAX_EDGE = 1400
 FRAME_CONFIDENCE_HIGH = 0.72
 FRAME_CONFIDENCE_MEDIUM = 0.68
 FRAME_MAX_AREA_RATIO = 0.70
-CENTERED_EDGE_INSET_RATIO = 0.025
+CENTERED_EDGE_INSET_RATIO = 0.0
 CENTERED_EDGE_CONFIDENCE_HIGH = 0.68
 BASE_CONFIDENCE_HIGH = 0.68
 BASE_CONFIDENCE_MEDIUM = 0.45
@@ -80,6 +80,7 @@ def detect_frame_and_base(
     format_hint: str = "auto",
     detect_base: bool = True,
     prior_frame_rect: ImageRect | None = None,
+    auto_frame_inset_percent: int = 0,
 ) -> AutoDetectResult:
     frame = detect_film_frame(
         preview_linear_rgb,
@@ -87,6 +88,7 @@ def detect_frame_and_base(
         source_size=source_size,
         format_hint=format_hint,
         prior_frame_rect=prior_frame_rect,
+        auto_frame_inset_percent=auto_frame_inset_percent,
     )
     if not detect_base:
         return AutoDetectResult(frame=frame, base=None)
@@ -108,6 +110,7 @@ def detect_film_frame(
     source_size: ImageSize,
     format_hint: str = "auto",
     prior_frame_rect: ImageRect | None = None,
+    auto_frame_inset_percent: int = 0,
 ) -> AutoFrameResult | None:
     image = _prepare_detection_image(preview_linear_rgb)
     if image.size == 0:
@@ -123,25 +126,6 @@ def detect_film_frame(
         image_size=detect_size,
         format_hint=format_hint,
     )
-    if centered_candidate is not None and centered_candidate.confidence >= CENTERED_EDGE_CONFIDENCE_HIGH:
-        preview_rect = scale_rect(centered_candidate.rect, detect_size, preview_size)
-        source_rect = _fit_rect_to_format_hint(
-            scale_rect(preview_rect, preview_size, source_size),
-            source_size,
-            format_hint,
-        )
-        source_rect = _inset_axis_aligned_rect(source_rect, CENTERED_EDGE_INSET_RATIO)
-        return AutoFrameResult(
-            rect=source_rect,
-            confidence=round(float(centered_candidate.confidence), 3),
-            confidence_level=_confidence_level(
-                centered_candidate.confidence,
-                FRAME_CONFIDENCE_HIGH,
-                FRAME_CONFIDENCE_MEDIUM,
-            ),
-            format_hint=centered_candidate.format_hint,
-            method=centered_candidate.method,
-        )
 
     ranked = _ranker_frame_candidates(
         image,
@@ -149,6 +133,7 @@ def detect_film_frame(
         source_size=source_size,
         format_hint=format_hint,
         prior_frame_rect=prior_frame_rect,
+        auto_frame_inset_percent=auto_frame_inset_percent,
     )
     if ranked is not None:
         return ranked
@@ -198,6 +183,7 @@ def detect_film_frame(
     )
     if best.method == "centered-edge-inset":
         source_rect = _inset_axis_aligned_rect(source_rect, CENTERED_EDGE_INSET_RATIO)
+    source_rect = _inset_centered_rect(source_rect, auto_frame_inset_percent / 100.0)
     return AutoFrameResult(
         rect=source_rect,
         confidence=round(float(best.confidence), 3),
@@ -214,6 +200,7 @@ def _ranker_frame_candidates(
     source_size: ImageSize,
     format_hint: str,
     prior_frame_rect: ImageRect | None,
+    auto_frame_inset_percent: int,
 ) -> AutoFrameResult | None:
     try:
         candidates = detect_ranked_frame_candidates(
@@ -232,11 +219,14 @@ def _ranker_frame_candidates(
     best = candidates[0]
     if best.confidence < FRAME_CONFIDENCE_MEDIUM:
         return None
+    rect = _fit_rect_to_format_hint(best.rect, source_size, format_hint)
+    rect = _inset_centered_rect(rect, auto_frame_inset_percent / 100.0)
+    result_format = format_hint if format_hint in FORMAT_RATIOS and format_hint != "auto" else best.format_hint
     return AutoFrameResult(
-        rect=best.rect,
+        rect=rect,
         confidence=round(float(best.confidence), 3),
         confidence_level=_confidence_level(best.confidence, FRAME_CONFIDENCE_HIGH, FRAME_CONFIDENCE_MEDIUM),
-        format_hint=best.format_hint,
+        format_hint=result_format,
         method=best.method,
     )
 
@@ -375,7 +365,7 @@ def _centered_edge_frame_candidate(
         angle=0.0,
     )
     area_ratio = (width * height) / max(1.0, float(image_size.width * image_size.height))
-    if area_ratio < 0.14 or area_ratio > 0.98:
+    if area_ratio < 0.14:
         return None
 
     strength_values = np.array(
@@ -690,6 +680,21 @@ def _fit_rect_to_format_hint(rect: ImageRect, image_size: ImageSize, format_hint
         width=min(fitted.width, image_size.width),
         height=min(fitted.height, image_size.height),
         angle=fitted.angle,
+    )
+
+
+def _inset_centered_rect(rect: ImageRect, inset_ratio: float) -> ImageRect:
+    inset = float(np.clip(inset_ratio, 0.0, 0.12))
+    if inset <= 0.0 or not rect.is_valid():
+        return rect
+    width = max(1, int(round(rect.width * (1.0 - inset * 2.0))))
+    height = max(1, int(round(rect.height * (1.0 - inset * 2.0))))
+    return ImageRect(
+        x=int(round(rect.center_x - width * 0.5)),
+        y=int(round(rect.center_y - height * 0.5)),
+        width=width,
+        height=height,
+        angle=rect.angle,
     )
 
 

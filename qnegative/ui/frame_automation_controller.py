@@ -56,7 +56,7 @@ class FrameAutomationController:
             self._preinvert_queue.clear()
 
     def set_auto_preinvert_radius(self, radius: int) -> None:
-        self.auto_preinvert_radius = int(radius)
+        self.auto_preinvert_radius = max(0, min(5, int(radius)))
         self._preinvert_queue.clear()
 
     def begin_model_warmup(self) -> bool:

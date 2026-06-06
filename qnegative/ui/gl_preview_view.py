@@ -28,6 +28,7 @@ class OpenGLPreviewView(QOpenGLWidget):
     flipHorizontalRequested = Signal()
     flipVerticalRequested = Signal()
     rotateClockwiseRequested = Signal()
+    rotateCounterClockwiseRequested = Signal()
     pickerCancelled = Signal()
     viewStatusChanged = Signal(str)
 
@@ -602,6 +603,7 @@ class OpenGLPreviewView(QOpenGLWidget):
         flip_h_action = menu.addAction("Flip horizontal")
         flip_v_action = menu.addAction("Flip vertical")
         rotate_action = menu.addAction("Rotate 90 clockwise")
+        rotate_ccw_action = menu.addAction("Rotate 90 counterclockwise")
         selected = menu.exec(self.mapToGlobal(position))
         if selected == flip_h_action:
             self.flipHorizontalRequested.emit()
@@ -609,6 +611,8 @@ class OpenGLPreviewView(QOpenGLWidget):
             self.flipVerticalRequested.emit()
         elif selected == rotate_action:
             self.rotateClockwiseRequested.emit()
+        elif selected == rotate_ccw_action:
+            self.rotateCounterClockwiseRequested.emit()
 
     def _reset_navigation(self) -> None:
         self._zoom_factor = 1.0

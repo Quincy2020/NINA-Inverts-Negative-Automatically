@@ -61,6 +61,7 @@ from qnegative.core.pipeline import (
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview
 from qnegative.core.roll_color_analysis_adapter import roll_color_result_summary
 from qnegative.ui.control_panel import ControlPanel
+from qnegative.ui.app_settings_controller import AppSettingsController
 from qnegative.ui.export_dialogs import BatchExportDialog, BatchExportSettings, BatchExportSettingsDialog
 from qnegative.ui.export_tasks import (
     ImageExportTask,
@@ -176,6 +177,13 @@ class MainWindow(QMainWindow):
         self._thread_pool = QThreadPool.globalInstance()
         self._render_controller = PreviewRenderController()
         self._frame_automation = FrameAutomationController()
+        self._settings_controller = AppSettingsController()
+        self._default_export_dir: Path | None = None
+        self._gpu_preview_enabled = True
+        self._auto_invert_after_frame_change = True
+        self._auto_frame_inset_percent = 2
+        self._roll_session_autosave = True
+        self._settings_controller.apply_to_window(self)
         self._raw_preview_job_id = 0
         self._raw_preview_in_progress = False
         self._export_in_progress = False
@@ -187,10 +195,6 @@ class MainWindow(QMainWindow):
         self._batch_export_cancel_requested = False
         self._batch_export_current_path: Path | None = None
         self._export_cancel_event: Event | None = None
-        self._default_export_dir: Path | None = None
-        self._gpu_preview_enabled = True
-        self._auto_invert_after_frame_change = True
-        self._roll_session_autosave = True
         self._roll_color_result: dict | None = None
         self._roll_color_analysis_job_id = 0
         self._roll_color_analysis_in_progress = False
@@ -231,9 +235,16 @@ class MainWindow(QMainWindow):
         self._apply_style()
         self.control_panel.set_adjustments(self.adjustments, emit=False)
         self.set_tool_mode(ToolMode.FILM_RECT)
+        self.preview_view.set_gpu_preview_enabled(self._gpu_preview_enabled)
 
         self.statusBar().showMessage("Ready")
         QTimer.singleShot(120, self._start_frame_ranker_warmup)
+
+    def _save_app_settings(self) -> None:
+        try:
+            self._settings_controller.save_from_window(self)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Settings save failed: {exc}")
 
     def _build_layout(self) -> None:
         right_pane = QWidget()
@@ -310,12 +321,17 @@ class MainWindow(QMainWindow):
         self.origin_view.filmRectSelected.connect(self.film_rect_selected)
         self.origin_view.filmRectReset.connect(self.film_rect_reset)
         self.origin_view.viewStatusChanged.connect(self.statusBar().showMessage)
+        self.origin_view.flipHorizontalRequested.connect(self.flip_preview_horizontal)
+        self.origin_view.flipVerticalRequested.connect(self.flip_preview_vertical)
+        self.origin_view.rotateClockwiseRequested.connect(self.rotate_preview_clockwise)
+        self.origin_view.rotateCounterClockwiseRequested.connect(self.rotate_preview_counterclockwise)
         self.preview_view.whiteBalancePointSelected.connect(self.white_balance_point_selected)
         self.preview_view.viewStatusChanged.connect(self.statusBar().showMessage)
         self.preview_view.pickerCancelled.connect(self.cancel_white_balance_picker)
         self.preview_view.flipHorizontalRequested.connect(self.flip_preview_horizontal)
         self.preview_view.flipVerticalRequested.connect(self.flip_preview_vertical)
         self.preview_view.rotateClockwiseRequested.connect(self.rotate_preview_clockwise)
+        self.preview_view.rotateCounterClockwiseRequested.connect(self.rotate_preview_counterclockwise)
 
         self.filmstrip.fileSelected.connect(self.select_sequence_file)
         self.filmstrip.previousRequested.connect(self.go_previous_file)
@@ -326,21 +342,25 @@ class MainWindow(QMainWindow):
     def set_gpu_preview_enabled(self, enabled: bool) -> None:
         self._gpu_preview_enabled = bool(enabled)
         self.preview_view.set_gpu_preview_enabled(self._gpu_preview_enabled)
+        self._save_app_settings()
         status = "enabled" if self._gpu_preview_enabled else "disabled"
         self.statusBar().showMessage(f"GPU preview acceleration {status}")
 
     def set_auto_invert_after_frame_change(self, enabled: bool) -> None:
         self._auto_invert_after_frame_change = bool(enabled)
+        self._save_app_settings()
         status = "enabled" if self._auto_invert_after_frame_change else "disabled"
         self.statusBar().showMessage(f"Auto invert after frame change {status}")
 
     def set_auto_frame_new_negatives(self, enabled: bool) -> None:
         self._frame_automation.set_auto_frame_new_negatives(enabled)
+        self._save_app_settings()
         status = "enabled" if self._frame_automation.auto_frame_new_negatives else "disabled"
         self.statusBar().showMessage(f"Auto frame new negatives {status}")
 
     def set_auto_preinvert_nearby_frames(self, enabled: bool) -> None:
         self._frame_automation.set_auto_preinvert_nearby_frames(enabled)
+        self._save_app_settings()
         status = "enabled" if self._frame_automation.auto_preinvert_nearby_frames else "disabled"
         self.statusBar().showMessage(f"Auto pre-invert nearby frames {status}")
         if self._frame_automation.auto_preinvert_nearby_frames:
@@ -348,13 +368,34 @@ class MainWindow(QMainWindow):
 
     def set_auto_preinvert_radius(self, action: QAction) -> None:
         self._frame_automation.set_auto_preinvert_radius(int(action.data()))
-        self.statusBar().showMessage(
-            f"Auto pre-invert range: previous/next {self._frame_automation.auto_preinvert_radius}"
-        )
+        self._save_app_settings()
+        radius = self._frame_automation.auto_preinvert_radius
+        message = "Auto pre-invert range disabled" if radius == 0 else f"Auto pre-invert range: previous/next {radius}"
+        self.statusBar().showMessage(message)
         self._schedule_nearby_preinvert()
+
+    def set_auto_frame_inset_percent(self, value: int) -> None:
+        self._auto_frame_inset_percent = max(0, min(8, int(value)))
+        if hasattr(self, "auto_frame_inset_spin") and self.auto_frame_inset_spin.value() != self._auto_frame_inset_percent:
+            self.auto_frame_inset_spin.blockSignals(True)
+            self.auto_frame_inset_spin.setValue(self._auto_frame_inset_percent)
+            self.auto_frame_inset_spin.blockSignals(False)
+        self._save_app_settings()
+        self.statusBar().showMessage(f"Auto frame safe crop: {self._auto_frame_inset_percent}%")
+
+    def set_analysis_inset_percent(self, value: int) -> None:
+        value = max(0, min(20, int(value)))
+        if self.control_panel.analysis_inset_spin.value() != value:
+            self.control_panel.analysis_inset_spin.setValue(value)
+        if hasattr(self, "analysis_inset_menu_spin") and self.analysis_inset_menu_spin.value() != value:
+            self.analysis_inset_menu_spin.blockSignals(True)
+            self.analysis_inset_menu_spin.setValue(value)
+            self.analysis_inset_menu_spin.blockSignals(False)
+        self._save_app_settings()
 
     def set_roll_session_autosave(self, enabled: bool) -> None:
         self._roll_session_autosave = bool(enabled)
+        self._save_app_settings()
         status = "enabled" if self._roll_session_autosave else "disabled"
         self.statusBar().showMessage(f"Roll session autosave {status}")
 
@@ -393,6 +434,7 @@ class MainWindow(QMainWindow):
         if not folder:
             return
         self._default_export_dir = Path(folder)
+        self._save_app_settings()
         self.statusBar().showMessage(f"Default export directory: {self._default_export_dir}")
 
     def save_lens_profile(self) -> None:
@@ -966,6 +1008,7 @@ class MainWindow(QMainWindow):
             current_film_rect=self.film_rect,
             fallback_state=self._previous_image_state(),
             auto_preview=auto_preview,
+            auto_frame_inset_percent=self._auto_frame_inset_percent,
         )
         task.signals.finished.connect(self._auto_detect_finished)
         task.signals.failed.connect(self._auto_detect_failed)
@@ -1138,6 +1181,14 @@ class MainWindow(QMainWindow):
                 **values
             )
         )
+        if hasattr(self, "analysis_inset_menu_spin"):
+            boundary = int(self.adjustments.analysis_inset_percent)
+            if self.analysis_inset_menu_spin.value() != boundary:
+                self.analysis_inset_menu_spin.blockSignals(True)
+                self.analysis_inset_menu_spin.setValue(boundary)
+                self.analysis_inset_menu_spin.blockSignals(False)
+        if previous.analysis_inset_percent != self.adjustments.analysis_inset_percent:
+            self._save_app_settings()
         self._update_preview_status_overlay()
         if self._apply_gpu_display_adjustment(previous):
             self._schedule_roll_session_save()
@@ -1450,6 +1501,10 @@ class MainWindow(QMainWindow):
         self._preview_rotation_quarters = (self._preview_rotation_quarters + 1) % 4
         self._refresh_preview_transform("Preview rotated 90 degrees")
 
+    def rotate_preview_counterclockwise(self) -> None:
+        self._preview_rotation_quarters = (self._preview_rotation_quarters - 1) % 4
+        self._refresh_preview_transform("Preview rotated -90 degrees")
+
     def _refresh_preview_transform(self, status: str) -> None:
         if self._last_untransformed_negative_result is None:
             self.statusBar().showMessage("Generate a positive preview first")
@@ -1688,6 +1743,8 @@ class MainWindow(QMainWindow):
         )
         if not known_suffix:
             output_path = output_path.with_suffix(export_format_extension(export_format))
+        self._default_export_dir = output_path.parent
+        self._save_app_settings()
 
         self._export_cancel_event = Event()
         task = ImageExportTask(
@@ -1738,6 +1795,7 @@ class MainWindow(QMainWindow):
 
         settings = settings_dialog.settings()
         self._default_export_dir = settings.output_dir
+        self._save_app_settings()
         items = self._completed_export_items(settings)
         if not items:
             QMessageBox.information(
@@ -2293,6 +2351,7 @@ class MainWindow(QMainWindow):
                 file_key=self._file_key_for_path(job.path),
                 adjustments=self.adjustments,
                 prior_frame_rect=self._preinvert_prior_frame_rect(),
+                auto_frame_inset_percent=self._auto_frame_inset_percent,
             )
             task.signals.finished.connect(self._preinvert_finished)
             task.signals.failed.connect(self._preinvert_failed)
@@ -2433,6 +2492,7 @@ class MainWindow(QMainWindow):
         self._batch_export_cancel_requested = True
         if self._export_cancel_event is not None:
             self._export_cancel_event.set()
+        self._save_app_settings()
         self._save_current_state()
         self._thread_pool.waitForDone(1500)
         super().closeEvent(event)
@@ -2513,6 +2573,9 @@ class MainWindow(QMainWindow):
             QMenu::item {
                 padding: 7px 28px 7px 24px;
             }
+            QMenu::item:disabled {
+                color: #7D7164;
+            }
             QMenu::item:selected {
                 background: #3A3026;
             }
@@ -2520,6 +2583,33 @@ class MainWindow(QMainWindow):
                 height: 1px;
                 background: #3D352D;
                 margin: 5px 8px;
+            }
+            QMenu::right-arrow {
+                image: none;
+                border: none;
+                width: 6px;
+                height: 6px;
+                margin-right: 8px;
+                background: #FFB000;
+            }
+            QWidget#menuSpinRow {
+                background: #1A1A1A;
+                color: #F2EEE6;
+            }
+            QWidget#menuSpinRow QLabel {
+                color: #F2EEE6;
+                padding-right: 14px;
+            }
+            QSpinBox#menuSpinBox {
+                background: #202020;
+                color: #F2EEE6;
+                border: 1px solid #5A4B39;
+                border-radius: 4px;
+                padding: 3px 8px;
+                min-width: 64px;
+            }
+            QSpinBox#menuSpinBox:focus {
+                border-color: #FFB000;
             }
             QStatusBar {
                 background: #202020;

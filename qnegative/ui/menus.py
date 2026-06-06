@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QActionGroup
-from PySide6.QtWidgets import QApplication, QDockWidget
+from PySide6.QtWidgets import QApplication, QDockWidget, QHBoxLayout, QLabel, QSpinBox, QWidget, QWidgetAction
 
 from qnegative.core.models import ToolMode
 from qnegative.core.pipeline import (
@@ -67,45 +67,83 @@ def build_main_menus(window) -> None:
     settings_menu = window.settings_menu = window.menuBar().addMenu("Settings")
     window.gpu_preview_action = QAction("GPU Preview Acceleration", window)
     window.gpu_preview_action.setCheckable(True)
-    window.gpu_preview_action.setChecked(True)
+    window.gpu_preview_action.setChecked(window._gpu_preview_enabled)
     window.gpu_preview_action.toggled.connect(window.set_gpu_preview_enabled)
     settings_menu.addAction(window.gpu_preview_action)
 
     window.auto_invert_after_frame_action = QAction("Auto Invert After Frame Change", window)
     window.auto_invert_after_frame_action.setCheckable(True)
-    window.auto_invert_after_frame_action.setChecked(True)
+    window.auto_invert_after_frame_action.setChecked(window._auto_invert_after_frame_change)
     window.auto_invert_after_frame_action.toggled.connect(window.set_auto_invert_after_frame_change)
     settings_menu.addAction(window.auto_invert_after_frame_action)
 
     window.auto_frame_new_negatives_action = QAction("Auto Frame New Negatives", window)
     window.auto_frame_new_negatives_action.setCheckable(True)
-    window.auto_frame_new_negatives_action.setChecked(True)
+    window.auto_frame_new_negatives_action.setChecked(window._frame_automation.auto_frame_new_negatives)
     window.auto_frame_new_negatives_action.toggled.connect(window.set_auto_frame_new_negatives)
     settings_menu.addAction(window.auto_frame_new_negatives_action)
 
     window.auto_preinvert_nearby_action = QAction("Auto Pre-Invert Nearby Frames", window)
     window.auto_preinvert_nearby_action.setCheckable(True)
-    window.auto_preinvert_nearby_action.setChecked(True)
+    window.auto_preinvert_nearby_action.setChecked(window._frame_automation.auto_preinvert_nearby_frames)
     window.auto_preinvert_nearby_action.toggled.connect(window.set_auto_preinvert_nearby_frames)
     settings_menu.addAction(window.auto_preinvert_nearby_action)
 
     window.roll_session_autosave_action = QAction("Auto Save Roll Session", window)
     window.roll_session_autosave_action.setCheckable(True)
-    window.roll_session_autosave_action.setChecked(True)
+    window.roll_session_autosave_action.setChecked(window._roll_session_autosave)
     window.roll_session_autosave_action.toggled.connect(window.set_roll_session_autosave)
     settings_menu.addAction(window.roll_session_autosave_action)
 
     preinvert_radius_menu = window.preinvert_radius_menu = settings_menu.addMenu("Auto Pre-Invert Range")
     window.preinvert_radius_group = QActionGroup(window)
     window.preinvert_radius_group.setExclusive(True)
-    for radius in (1, 2, 3, 5):
-        action = QAction(f"Previous/Next {radius}", window)
+    for radius in (0, 1, 2, 3, 5):
+        label = "Disabled" if radius == 0 else f"Previous/Next {radius}"
+        action = QAction(label, window)
         action.setCheckable(True)
         action.setData(radius)
         action.setChecked(radius == window._frame_automation.auto_preinvert_radius)
         window.preinvert_radius_group.addAction(action)
         preinvert_radius_menu.addAction(action)
     window.preinvert_radius_group.triggered.connect(window.set_auto_preinvert_radius)
+    settings_menu.addSeparator()
+
+    boundary_menu = window.boundary_settings_menu = settings_menu.addMenu("Frame / Analysis Boundaries")
+
+    safe_crop_action = QWidgetAction(window)
+    safe_crop_widget = QWidget()
+    safe_crop_widget.setObjectName("menuSpinRow")
+    safe_crop_layout = QHBoxLayout(safe_crop_widget)
+    safe_crop_layout.setContentsMargins(10, 4, 10, 4)
+    safe_crop_layout.addWidget(QLabel("Auto Frame Safe Crop"))
+    safe_crop_layout.addStretch(1)
+    window.auto_frame_inset_spin = QSpinBox()
+    window.auto_frame_inset_spin.setObjectName("menuSpinBox")
+    window.auto_frame_inset_spin.setRange(0, 8)
+    window.auto_frame_inset_spin.setSuffix("%")
+    window.auto_frame_inset_spin.setValue(window._auto_frame_inset_percent)
+    window.auto_frame_inset_spin.valueChanged.connect(window.set_auto_frame_inset_percent)
+    safe_crop_layout.addWidget(window.auto_frame_inset_spin)
+    safe_crop_action.setDefaultWidget(safe_crop_widget)
+    boundary_menu.addAction(safe_crop_action)
+
+    analysis_boundary_action = QWidgetAction(window)
+    analysis_boundary_widget = QWidget()
+    analysis_boundary_widget.setObjectName("menuSpinRow")
+    analysis_boundary_layout = QHBoxLayout(analysis_boundary_widget)
+    analysis_boundary_layout.setContentsMargins(10, 4, 10, 4)
+    analysis_boundary_layout.addWidget(QLabel("Invert Analysis Boundary"))
+    analysis_boundary_layout.addStretch(1)
+    window.analysis_inset_menu_spin = QSpinBox()
+    window.analysis_inset_menu_spin.setObjectName("menuSpinBox")
+    window.analysis_inset_menu_spin.setRange(0, 20)
+    window.analysis_inset_menu_spin.setSuffix("%")
+    window.analysis_inset_menu_spin.setValue(window.adjustments.analysis_inset_percent)
+    window.analysis_inset_menu_spin.valueChanged.connect(window.set_analysis_inset_percent)
+    analysis_boundary_layout.addWidget(window.analysis_inset_menu_spin)
+    analysis_boundary_action.setDefaultWidget(analysis_boundary_widget)
+    boundary_menu.addAction(analysis_boundary_action)
     settings_menu.addSeparator()
 
     developer_menu = window.developer_menu = settings_menu.addMenu("Developer")

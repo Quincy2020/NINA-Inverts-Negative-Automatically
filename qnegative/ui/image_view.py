@@ -18,6 +18,7 @@ class ImageView(QWidget):
     flipHorizontalRequested = Signal()
     flipVerticalRequested = Signal()
     rotateClockwiseRequested = Signal()
+    rotateCounterClockwiseRequested = Signal()
     viewStatusChanged = Signal(str)
     pickerCancelled = Signal()
 
@@ -651,6 +652,7 @@ class ImageView(QWidget):
             flip_h_action = menu.addAction("Flip horizontal")
             flip_v_action = menu.addAction("Flip vertical")
             rotate_action = menu.addAction("Rotate 90 clockwise")
+            rotate_ccw_action = menu.addAction("Rotate 90 counterclockwise")
             selected = menu.exec(self.mapToGlobal(position))
             if selected == flip_h_action:
                 self.flipHorizontalRequested.emit()
@@ -658,6 +660,8 @@ class ImageView(QWidget):
                 self.flipVerticalRequested.emit()
             elif selected == rotate_action:
                 self.rotateClockwiseRequested.emit()
+            elif selected == rotate_ccw_action:
+                self.rotateCounterClockwiseRequested.emit()
             return
 
         if self._film_rect is None:
