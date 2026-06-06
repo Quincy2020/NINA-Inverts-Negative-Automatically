@@ -9,7 +9,7 @@ import numpy as np
 from qnegative.core.geometry import clamp_rect_to_image, scale_point, scale_rect, warp_rotated_rect
 from qnegative.core.lens_profiles import flat_frame_gain_for_size
 from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalanceParams, DensityMatrixParams, ImagePoint, ImageRect, ImageSize, InvertMode, LensCorrectionParams, PrintCurveMode, TonalBalance
-from qnegative.core.roll_color_adapter import apply_roll_color_to_linear_rgb
+from qnegative.core.roll_color_apply import apply_roll_color_to_linear_rgb
 
 
 DENSITY_REFERENCE = 2.046

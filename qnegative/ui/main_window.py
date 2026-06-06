@@ -65,7 +65,7 @@ from qnegative.core.pipeline import (
     suggest_printer_balance_from_log_sample,
 )
 from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview
-from qnegative.core.roll_color_adapter import roll_color_result_summary
+from qnegative.core.roll_color_analysis_adapter import roll_color_result_summary
 from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.export_dialogs import BatchExportDialog, BatchExportSettings, BatchExportSettingsDialog
 from qnegative.ui.export_tasks import (

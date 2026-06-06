@@ -21,7 +21,7 @@ from qnegative.core.pipeline import (
     log_print_curve_engine,
 )
 from qnegative.core.preview import RawPreview
-from qnegative.core.roll_color_adapter import roll_color_frame_key
+from qnegative.core.roll_color_apply import roll_color_frame_key
 
 
 @dataclass(frozen=True)

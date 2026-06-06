@@ -18,7 +18,7 @@ from qnegative.core.pipeline import (
     suggest_lab_print_luminance_levels,
 )
 from qnegative.core.preview import make_raw_preview
-from qnegative.core.roll_color_adapter import analyze_positive_bgr_roll, positive_linear_to_bgr16
+from qnegative.core.roll_color_analysis_adapter import analyze_positive_bgr_roll, positive_linear_to_bgr16
 
 
 class RollColorAnalysisSignals(QObject):
