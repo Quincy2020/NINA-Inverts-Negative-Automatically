@@ -101,6 +101,7 @@ from qnegative.ui.preview_tasks import (
 )
 from qnegative.ui.roll_color_tasks import RollColorAnalysisItem, RollColorAnalysisTask
 from qnegative.ui.shortcuts import install_main_window_shortcuts
+from qnegative.ui.render_controller import PreviewRenderController
 from qnegative.ui.state_store import (
     build_current_image_state,
     default_adjustments,
@@ -179,11 +180,7 @@ class MainWindow(QMainWindow):
         self._preview_flip_vertical = False
         self._preview_rotation_quarters = 0
         self._thread_pool = QThreadPool.globalInstance()
-        self._render_job_id = 0
-        self._render_tokens: dict[Path, int] = {}
-        self._render_in_progress = False
-        self._render_pending = False
-        self._render_pending_show_errors = False
+        self._render_controller = PreviewRenderController()
         self._raw_preview_job_id = 0
         self._raw_preview_in_progress = False
         self._model_warmup_in_progress = False
@@ -1145,11 +1142,8 @@ class MainWindow(QMainWindow):
             return
 
         self.preview_refresh_timer.stop()
-        if self._render_in_progress:
-            if self.current_path is not None:
-                self._bump_render_token(self.current_path)
-            self._render_pending = True
-            self._render_pending_show_errors = False
+        if self._render_controller.in_progress:
+            self._render_controller.defer(self.current_path, show_errors=False)
             return
         self._queue_negative_render(show_errors=False, interactive=False)
 
@@ -1198,10 +1192,8 @@ class MainWindow(QMainWindow):
             self._schedule_roll_session_save()
             return
         if self.negative_preview_active:
-            if self._render_in_progress:
-                if self.current_path is not None:
-                    self._bump_render_token(self.current_path)
-                self._render_pending = True
+            if self._render_controller.in_progress:
+                self._render_controller.defer(self.current_path, show_errors=False)
             self.preview_refresh_timer.setInterval(
                 INTERACTIVE_RENDER_DEBOUNCE_MS
                 if self._interactive_adjustment_active
@@ -1267,20 +1259,15 @@ class MainWindow(QMainWindow):
         if self.auto_levels_pending and not auto_levels_pending:
             self.auto_levels_pending = False
 
-        if self._render_in_progress:
-            if self.current_path is not None:
-                self._bump_render_token(self.current_path)
-            self._render_pending = True
-            self._render_pending_show_errors = self._render_pending_show_errors or show_errors
+        if self._render_controller.in_progress:
+            self._render_controller.defer(self.current_path, show_errors=show_errors)
             self.statusBar().showMessage("Preview render queued...")
             return True
 
-        self._render_job_id += 1
-        job_id = self._render_job_id
-        render_token = self._bump_render_token(render_preview.path)
+        render_start = self._render_controller.start(render_preview.path)
         task = PreviewRenderTask(
-            job_id=job_id,
-            render_token=render_token,
+            job_id=render_start.job_id,
+            render_token=render_start.render_token,
             preview=render_preview,
             mask_point=self.mask_point,
             film_rect=self.film_rect,
@@ -1296,7 +1283,6 @@ class MainWindow(QMainWindow):
         )
         task.signals.finished.connect(self._preview_render_finished)
         task.signals.failed.connect(self._preview_render_failed)
-        self._render_in_progress = True
         self.statusBar().showMessage(
             "Rendering interactive preview..."
             if interactive
@@ -1306,20 +1292,20 @@ class MainWindow(QMainWindow):
         return True
 
     def _preview_render_finished(self, job_id: int, output: PreviewRenderOutput, show_errors: bool) -> None:
-        if not self._render_output_is_current(output):
-            if job_id == self._render_job_id:
-                self._render_in_progress = False
+        if not self._render_controller.output_is_current(output):
+            if self._render_controller.is_latest_job(job_id):
+                self._render_controller.mark_idle()
                 self._queue_pending_render_if_needed()
             return
 
-        if job_id != self._render_job_id:
+        if not self._render_controller.is_latest_job(job_id):
             self._store_stale_preview_result(output)
             return
 
-        self._render_in_progress = False
+        self._render_controller.mark_idle()
         if output.path != self.current_path:
             self._store_stale_preview_result(output)
-            if self._render_pending:
+            if self._render_controller.has_pending():
                 self._queue_pending_render_if_needed()
             return
 
@@ -1351,26 +1337,16 @@ class MainWindow(QMainWindow):
         )
         self._schedule_roll_session_save()
 
-        if self._render_pending:
+        if self._render_controller.has_pending():
             self._queue_pending_render_if_needed()
 
-    def _bump_render_token(self, path: Path) -> int:
-        token = self._render_tokens.get(path, 0) + 1
-        self._render_tokens[path] = token
-        return token
-
-    def _render_output_is_current(self, output: PreviewRenderOutput) -> bool:
-        return output.render_token == self._render_tokens.get(output.path, 0)
-
     def _queue_pending_render_if_needed(self) -> None:
-        if not self._render_pending:
+        pending = self._render_controller.consume_pending()
+        if pending is None:
             return
-        pending_show_errors = self._render_pending_show_errors
-        self._render_pending = False
-        self._render_pending_show_errors = False
         self._queue_negative_render(
-            show_errors=pending_show_errors,
-            interactive=self._interactive_adjustment_active and not pending_show_errors,
+            show_errors=pending.show_errors,
+            interactive=self._interactive_adjustment_active and not pending.show_errors,
         )
 
     def _start_pending_preview_before_switch(self) -> None:
@@ -1406,17 +1382,17 @@ class MainWindow(QMainWindow):
         self._autosave_roll_session()
 
     def _preview_render_failed(self, job_id: int, message: str, show_errors: bool) -> None:
-        if job_id != self._render_job_id:
+        if not self._render_controller.is_latest_job(job_id):
             return
 
-        self._render_in_progress = False
+        self._render_controller.mark_idle()
         self.last_negative_result = None
         self._last_untransformed_negative_result = None
         if show_errors:
             QMessageBox.warning(self, "Invert Preview Failed", message)
         self.statusBar().showMessage("Inverted preview failed")
 
-        if self._render_pending:
+        if self._render_controller.has_pending():
             self._queue_pending_render_if_needed()
 
     def _schedule_preview_if_ready(self, *, force: bool = False) -> None:
@@ -2217,12 +2193,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Workspace reset")
 
     def _cancel_preview_render(self) -> None:
-        if self.current_path is not None:
-            self._bump_render_token(self.current_path)
-        self._render_job_id += 1
-        self._render_in_progress = False
-        self._render_pending = False
-        self._render_pending_show_errors = False
+        self._render_controller.cancel(self.current_path)
 
     def _cancel_raw_preview(self) -> None:
         self._raw_preview_job_id += 1
