@@ -22,10 +22,10 @@ NINA is GPLv3 licensed.
 - **Roll workflow**: open a folder, browse the bottom filmstrip, and keep each image's frame, adjustments, preview state, and completion status.
 - **Auto frame detection**: detects film frames, supports format hints.
 - **Automatic CMY balance**: automatic printer-style color balance with manual CMY offsets for fast correction.
-- **Roll Color Analysis**: analyzes a whole roll for color bias, then applies roll-level and corrections per frame.
-- **Lens falloff correction**: radial correction and flat-frame profiles for macro lens vignetting.
+- **Roll Color Analysis**: analyzes a whole roll for color bias, then applies corrections per roll and per frame.
+- **Lens falloff correction**: radial correction and flat-frame profiles for copy lens vignetting.
 - **Quick keyboard workflow**: adjust color, exposure, gray point, confirm the frame, and jump to the next image without leaving the keyboard.
-- **Batch export**: export completed images to TIFF, PNG, or JPEG with a queue window.
+- **Batch export**: export completed images to TIFF, PNG, or JPEG.
 
 ## Input And Output
 
@@ -37,7 +37,7 @@ Notes:
 
 - Lightroom panorama files may not behave like normal camera RAW files and can be unsupported by LibRaw.
 - NINA is not currently optimized as a general TIFF/JPEG negative converter. The intended workflow is camera RAW/DNG.
-- Black-and-white negatives can also be inverted; the current README demo simply focuses on color negative film.
+- Black-and-white negatives can also be inverted.
 
 Output:
 
