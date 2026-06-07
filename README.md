@@ -1,16 +1,68 @@
+![NINA](logo/Banner.svg)
+
 # NINA
 
-NINA is a desktop RAW negative conversion tool focused on camera-scanned film.
+**NINA Inverts Negative Automatically.**
 
-NINA stands for "NINA Inverts Negative Automatically". The current MVP is built with PySide6, rawpy, NumPy, and OpenCV.
+NINA is a fast desktop negative conversion tool for camera-scanned film. It is inspired by the practical operating style of minilab systems such as the Frontier: load a roll, find the frame, make a clean positive, adjust quickly, and move on.
 
-## Run
+The focus is **camera scanning**, not flatbed/scanner workflows. NINA is designed around camera RAW/DNG files, folder sequences, automatic frame detection, fast previewing, roll-level color correction, and lens falloff correction for copy-camera setups.
+
+NINA is GPLv3 licensed.
+
+## Highlights
+
+- **Camera RAW first**: works with RAW/DNG files supported by rawpy/LibRaw.
+- **Roll workflow**: open a folder, browse the bottom filmstrip, and keep each image's frame, adjustments, preview state, and completion status.
+- **Auto frame detection**: detects film frames, supports format hints, and can apply a small safe crop so white/black borders do not leak into the final positive.
+- **Fast Lab Print conversion**: preview uses a smaller RAW preview while export uses full-resolution RAW data.
+- **Automatic CMY balance**: automatic printer-style color balance with manual CMY offsets for fast correction.
+- **Roll Color Analysis**: analyzes a whole roll for color bias, then applies roll-level and per-frame corrections.
+- **Lens falloff correction**: radial correction and flat-frame profiles for camera-scan vignetting.
+- **Quick keyboard workflow**: adjust color, exposure, gray point, confirm the frame, and jump to the next image without leaving the keyboard.
+- **Batch export**: export completed images to TIFF, PNG, or JPEG with a queue window.
+
+## Input And Output
+
+Primary input:
+
+- Camera RAW files supported by rawpy/LibRaw, such as `ARW`, `DNG`, `CR2`, `CR3`, `NEF`, `RAF`, `ORF`, `RW2`.
+
+Notes:
+
+- Lightroom panorama/HDR DNG files may not behave like normal camera RAW files and can be unsupported by LibRaw.
+- NINA is not currently optimized as a general TIFF/JPEG negative converter. The intended workflow is camera RAW/DNG.
+
+Output:
+
+- TIFF 16-bit RGB
+- TIFF 8-bit RGB
+- PNG 16-bit RGB
+- PNG 8-bit RGB
+- JPEG 8-bit
+
+## Quick Start
+
+Run from source:
 
 ```powershell
+pip install -r requirements.txt
 python -m qnegative.app
 ```
 
-Open a RAW/TIFF from `File > Open RAW / TIFF...` or open a folder from `File > Open Folder...`.
+Open a folder:
+
+```text
+File > Open Folder...
+```
+
+Basic workflow:
+
+1. Open a folder of camera-scanned negatives.
+2. Let NINA auto-detect the film frame and create an initial positive preview.
+3. Adjust exposure, gray point, CMY balance, and optional roll color correction.
+4. Press `Space` or `Enter` to confirm the current image and move to the next.
+5. Export one image or all completed images.
 
 ## Build
 
@@ -26,91 +78,120 @@ The executable is written to:
 dist\NINA\NINA.exe
 ```
 
-This build uses PyInstaller and keeps Qt/rawpy dependencies next to the executable. The one-folder layout is preferred for now because it starts faster and is less fragile than a single-file bundle.
+The current packaged build target is Windows. The codebase is Python/PySide6 and is intended to be portable, but macOS and Linux need separate platform builds and testing.
 
-## Current MVP
+## Lens Falloff Correction
 
-- Folder sequence browsing with a bottom filmstrip.
-- Origin/Preview tabs: the origin view keeps frame selection editable, while the preview view shows the cropped positive.
-- Rotated frame selection with move/resize/rotate controls.
-- Lab Print inversion mode as the default workflow.
-- Auto frame detection MVP with a lightweight ranker path.
-- Per-image cached adjustments and preview results.
-- Histogram levels with black/mid/white controls.
-- Auto CMY white balance plus manual white balance controls.
-- Exposure, contrast, highlights, shadows, saturation, print curve, and analysis boundary controls.
-- Manual radial lens correction for camera-scan falloff before inversion.
-- 16-bit TIFF export.
+Camera scanning often has visible lens falloff. After negative inversion, this can become bright corners or uneven contrast.
 
-## Roll Sessions
+NINA supports two correction modes:
 
-NINA stores per-folder processing state in:
+- **Radial**: manual strength/radius/center correction.
+- **Flat frame**: create a profile from a RAW photo of an evenly lit white panel or light table.
+
+Recommended flat-frame workflow:
+
+1. Keep the same lens, aperture, focus distance, and copy setup used for scanning.
+2. Photograph an evenly lit white panel or light table.
+3. In NINA, open Lens Correction and create a flat-frame profile from that RAW file.
+4. Load the profile and adjust its strength if needed.
+5. Apply it to the current image, unprocessed images, completed images, or the whole folder.
+
+Flat-frame correction is usually the best option when the copy lens or light source produces uneven illumination.
+
+## Roll Color Analysis
+
+Roll Color Analysis is meant to make a whole roll feel more consistent.
+
+It analyzes completed positive previews, estimates roll-level color bias, and then applies controlled per-frame correction. This is useful when a whole roll is slightly too green, too blue, too warm, or inconsistent between frames.
+
+The goal is not to remove manual control. It gives the roll a better starting point so final tweaks are faster.
+
+## Keyboard Shortcuts
+
+Coarse color/exposure shortcuts use a step of `20`. Hold `Shift` for a fine step of `5`.
+
+| Shortcut | Action |
+| --- | --- |
+| `Left` / `Right` | Move to previous / next file in the filmstrip. |
+| `Space` / `Enter` | Confirm current image and move to the next file. |
+| `Tab` | Toggle between `Origin` and `Preview`. |
+| `I` | Render / refresh positive preview. |
+| `K` | Auto-detect frame. |
+| `Q` / `A` | Move printer balance toward yellow / blue. |
+| `W` / `S` | Move printer balance toward magenta / green. |
+| `E` / `D` | Move printer balance toward cyan / red. |
+| `R` / `F` | Increase / decrease exposure. |
+| `[` / `]` | Move gray point darker / brighter. |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo adjustments. |
+
+Preview right-click menu:
+
+- Flip horizontal
+- Flip vertical
+- Rotate 90 clockwise
+- Rotate 90 counterclockwise
+
+## Settings And Sessions
+
+Application preferences are saved as JSON:
+
+```text
+%LOCALAPPDATA%\NINA\NINA\settings.json
+```
+
+These include GPU preview, auto frame behavior, pre-invert range, safe crop, analysis boundary, autosave, and default export directory.
+
+Per-folder roll state is saved in:
 
 ```text
 .nina/roll_session.json
 ```
 
-The session file records per-image selections and adjustments, including frame area, film base point, levels, white balance, color controls, preview orientation, and completion state. Preview images are not stored; they are rebuilt from the saved parameters when the folder is opened again.
+The roll session stores each image's frame area, adjustments, automatic CMY offsets, preview orientation, completion state, and roll color data. Preview images are rebuilt from the original RAW files and saved parameters.
 
-Session entries are matched by filename, file size, and modification time, so replacing a RAW file will not silently reuse stale parameters. Roll sessions are auto-saved by default and can also be written manually from `File > Save Roll Session`.
+## Processing Outline
 
-## Shortcuts
-
-Adjustment shortcuts use a coarse step of `20`. Hold `Shift` for a fine step of `5`.
-
-| Shortcut | Action |
-| --- | --- |
-| `Left` / `Right` | Move to previous / next file in the filmstrip. |
-| `Space` / `Enter` | Confirm the current image and move to the next file. |
-| `Tab` | Toggle between `Origin` and `Preview`. |
-| `Q` / `A` | Push global color balance toward yellow / blue. |
-| `W` / `S` | Push global color balance toward magenta / green. |
-| `E` / `D` | Push global color balance toward cyan / red. |
-| `R` / `F` | Increase / decrease exposure. |
-
-## Processing Notes
-
-The default Lab Print path is:
+The default conversion path is intentionally simple at the user level:
 
 ```text
-RAW linear
--> frame warp
--> lens falloff correction
--> normalized log signal
--> levels / auto levels
--> CMY auto white balance
--> H&D print curve
--> color separation
--> manual color balance
--> highlights / shadows / saturation
--> sRGB preview or 16-bit TIFF export
+camera RAW
+-> frame crop / warp
+-> optional lens falloff correction
+-> Lab Print conversion
+-> auto levels and CMY balance
+-> print curve and color controls
+-> preview or export
 ```
 
-Preview uses a 1080px RAW preview for speed. Export uses full-resolution RAW data.
+More detailed implementation notes are in [qnegative/core/PIPELINE.md](qnegative/core/PIPELINE.md).
 
-When a final preview cache exactly matches the current image, selection, and adjustments, export reuses the preview CMY auto white-balance offsets. If the cache does not match, export recomputes auto WB at full resolution.
+## Project Status
 
-## Performance
+NINA is usable as an MVP, but still actively evolving.
 
-The Lab Print H&D curve defaults to a per-channel LUT engine. This keeps preview and export close to the direct reference curve while avoiding repeated full-image `exp`/`power` calculations.
+Current priorities:
 
-Developer switch:
+- Better automatic frame detection.
+- More reliable automatic brightness and white balance.
+- Better lens falloff profiles.
+- Faster full-resolution export.
+- Cleaner modular architecture.
+- Camera-scan stitching / panorama workflow research.
+- Optional dust removal research.
 
-```text
-Settings > Developer > Export Advanced > Print Curve Engine
-```
+## Dependencies
 
-Options:
+Core runtime:
 
-- `LUT 8192` default
-- `LUT 4096`
-- `Direct Reference`
+- PySide6
+- rawpy / LibRaw
+- NumPy
+- OpenCV
+- tifffile
 
-On a measured `6138 x 4079` export, the LUT path reduced total export time from about `16.6s` to about `12.4s`, with max reference error around `1e-7`.
+Optional ML/ranker development dependencies are listed in `requirements-ml.txt`.
 
-## Developer Notes
+## License
 
-- The experimental GPU color-adjustment shader is currently disabled for final color operations because the 8-bit linear texture path can quantize deep shadows. OpenGL is still used for display behavior.
-- `Density` and `Simple` inversion modes are kept as developer options.
-- Calibration datasets, generated labels, model artifacts, RAW files, positive references, and TIFF outputs should not be committed unless explicitly intended.
-- Folder-local `.nina/roll_session.json` files are user/session data and should not be committed.
+NINA is released under the GNU General Public License v3. See [LICENSE](LICENSE).
