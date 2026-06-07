@@ -318,7 +318,6 @@ class MainWindow(QMainWindow):
         self.roll_selection.openRequested.connect(self.select_sequence_file)
         self.roll_selection.exportSelectedRequested.connect(self.export_selected)
         self.roll_selection.removeRequested.connect(self.remove_from_roll)
-        self.roll_selection.syncRequested.connect(self.sync_current_settings_to_selected)
         self.roll_selection.selectionChanged.connect(self._roll_selection_changed)
         self.filmstrip.previousRequested.connect(self.go_previous_file)
         self.filmstrip.nextRequested.connect(self.go_next_file)
@@ -1765,10 +1764,6 @@ class MainWindow(QMainWindow):
             self.view_stack.setCurrentWidget(self.empty_state)
             self.control_panel.set_sequence_status("No sequence")
         self.statusBar().showMessage(f"Removed {len(remove_paths)} image(s) from roll")
-
-    def sync_current_settings_to_selected(self, paths) -> None:
-        del paths
-        self.statusBar().showMessage("Settings sync is reserved for the next implementation step")
 
     def _roll_selection_changed(self, paths) -> None:
         count = len(paths)

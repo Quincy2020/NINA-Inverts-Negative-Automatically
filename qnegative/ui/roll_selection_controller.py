@@ -13,7 +13,6 @@ class RollSelectionController(QObject):
     selectionChanged = Signal(object)
     exportSelectedRequested = Signal(object)
     removeRequested = Signal(object)
-    syncRequested = Signal(object)
 
     def __init__(self, filmstrip: FolderFilmstrip) -> None:
         super().__init__(filmstrip)
@@ -96,8 +95,6 @@ class RollSelectionController(QObject):
         remove_label = "Remove Selected From Roll" if len(targets) > 1 else "Remove From Roll"
         remove_action = menu.addAction(remove_label)
         menu.addSeparator()
-        sync_action = menu.addAction("Sync Current Settings To Selected...")
-        sync_action.setEnabled(False)
         clear_action = menu.addAction("Clear Selection")
         clear_action.setEnabled(bool(self._selected_paths))
 
@@ -108,8 +105,6 @@ class RollSelectionController(QObject):
             self.exportSelectedRequested.emit(targets)
         elif selected == remove_action:
             self.removeRequested.emit(targets)
-        elif selected == sync_action:
-            self.syncRequested.emit(targets)
         elif selected == clear_action:
             self.clear_selection()
 
