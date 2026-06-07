@@ -157,6 +157,8 @@ class ImageProcessingState:
     film_rect: ImageRect | None = None
     white_balance_point: ImagePoint | None = None
     adjustments: AdjustmentParams = field(default_factory=AdjustmentParams)
+    lab_print_log_floors: list[float] | None = None
+    lab_print_log_ceils: list[float] | None = None
     lab_print_cmy_offsets: list[float] | None = None
     lab_print_cmy_strength: int | None = None
     tone_mid_anchor: float | None = None

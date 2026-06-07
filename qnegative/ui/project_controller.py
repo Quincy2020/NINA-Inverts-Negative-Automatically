@@ -6,6 +6,7 @@ from pathlib import Path
 from qnegative.core.file_sequence import list_supported_files
 from qnegative.core.models import ImageProcessingState
 from qnegative.core.session import (
+    load_roll_excluded_file_names,
     load_roll_color_result,
     load_roll_session,
     save_roll_session,
@@ -27,10 +28,16 @@ class ProjectController:
         self.folder_files: list[Path] = []
         self.current_index: int = -1
         self.roll_session_folder: Path | None = None
+        self.excluded_file_names: set[str] = set()
 
     def load_folder(self, path: Path, image_states: dict[Path, ImageProcessingState]) -> FolderLoadResult:
         folder = path.parent
-        self.folder_files = self.supported_files_for_folder(folder)
+        self.excluded_file_names = load_roll_excluded_file_names(folder)
+        self.folder_files = [
+            item
+            for item in self.supported_files_for_folder(folder)
+            if item.name not in self.excluded_file_names
+        ]
         self.roll_session_folder = folder
         restored = load_roll_session(folder, self.folder_files)
         if restored:
@@ -68,6 +75,21 @@ class ProjectController:
             for path in self.folder_files
         ]
 
+    def exclude_from_roll(self, paths: list[Path]) -> None:
+        folder = self.roll_session_folder
+        if folder is None and paths:
+            folder = paths[0].parent
+        if folder is None:
+            return
+        for path in paths:
+            if path.parent == folder:
+                self.excluded_file_names.add(path.name)
+        self.folder_files = [
+            path for path in self.folder_files if path.name not in self.excluded_file_names
+        ]
+        if self.current_index >= len(self.folder_files):
+            self.current_index = len(self.folder_files) - 1
+
     def session_folder_for(self, current_path: Path | None) -> Path | None:
         return self.roll_session_folder or (current_path.parent if current_path else None)
 
@@ -86,6 +108,7 @@ class ProjectController:
             image_states,
             self.folder_files,
             roll_color_result=roll_color_result,
+            excluded_file_names=self.excluded_file_names,
         )
         return session_path_for_folder(folder)
 

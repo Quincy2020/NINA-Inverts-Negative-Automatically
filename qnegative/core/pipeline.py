@@ -109,6 +109,8 @@ class NegativePreviewResult:
     histogram: np.ndarray
     auto_levels: dict[str, int]
     wb_gains: np.ndarray
+    lab_print_log_floors: np.ndarray
+    lab_print_log_ceils: np.ndarray
     mask_rgb: np.ndarray
     film_rect_preview: ImageRect
     tone_mid_anchor: float = 0.46
@@ -127,6 +129,8 @@ class LabPrintNegativeStage:
     normalized_log: np.ndarray
     positive_control: np.ndarray
     histogram: np.ndarray
+    lab_print_log_floors: np.ndarray
+    lab_print_log_ceils: np.ndarray
     mask_rgb: np.ndarray
     film_rect_preview: ImageRect
     analysis_inset: float
@@ -138,6 +142,8 @@ class LabPrintLevelsStage:
     normalized_for_print: np.ndarray
     histogram: np.ndarray
     auto_levels: dict[str, int]
+    lab_print_log_floors: np.ndarray
+    lab_print_log_ceils: np.ndarray
     mask_rgb: np.ndarray
     film_rect_preview: ImageRect
     camera_to_srgb_matrix: np.ndarray | None = None
@@ -149,6 +155,8 @@ class LabPrintColorStage:
     histogram: np.ndarray
     auto_levels: dict[str, int]
     wb_gains: np.ndarray
+    lab_print_log_floors: np.ndarray
+    lab_print_log_ceils: np.ndarray
     mask_rgb: np.ndarray
     film_rect_preview: ImageRect
 
@@ -281,15 +289,19 @@ def build_lab_print_negative_stage(
     *,
     include_histogram: bool = True,
     analysis_inset: float = LAB_PRINT_ANALYSIS_INSET,
+    lab_print_log_floors: np.ndarray | list[float] | None = None,
+    lab_print_log_ceils: np.ndarray | list[float] | None = None,
 ) -> LabPrintNegativeStage:
     source_linear = (
         base.film_camera_wb_linear_rgb
         if base.film_camera_wb_linear_rgb is not None
         else base.film_linear_rgb
     )
-    normalized_log = normalize_log_bounds(
+    normalized_log, resolved_floors, resolved_ceils = normalize_log_bounds_with_metadata(
         source_linear,
         percentile_clip=LAB_PRINT_LOG_PERCENTILE_CLIP,
+        lab_print_log_floors=lab_print_log_floors,
+        lab_print_log_ceils=lab_print_log_ceils,
     )
     positive_control = 1.0 - normalized_log
     analysis_control = analysis_inset_crop(positive_control, analysis_inset)
@@ -303,6 +315,8 @@ def build_lab_print_negative_stage(
         normalized_log=normalized_log,
         positive_control=positive_control,
         histogram=histogram,
+        lab_print_log_floors=resolved_floors,
+        lab_print_log_ceils=resolved_ceils,
         mask_rgb=base.mask_rgb,
         film_rect_preview=base.film_rect_preview,
         analysis_inset=analysis_inset,
@@ -330,6 +344,8 @@ def build_lab_print_levels_stage(
         normalized_for_print=normalized_for_print,
         histogram=negative_stage.histogram,
         auto_levels=auto_levels,
+        lab_print_log_floors=negative_stage.lab_print_log_floors,
+        lab_print_log_ceils=negative_stage.lab_print_log_ceils,
         mask_rgb=negative_stage.mask_rgb,
         film_rect_preview=negative_stage.film_rect_preview,
         camera_to_srgb_matrix=negative_stage.camera_to_srgb_matrix,
@@ -396,6 +412,8 @@ def build_lab_print_color_stage(
         histogram=levels_stage.histogram,
         auto_levels=levels_stage.auto_levels,
         wb_gains=cmy_offsets.astype(np.float32, copy=False),
+        lab_print_log_floors=levels_stage.lab_print_log_floors,
+        lab_print_log_ceils=levels_stage.lab_print_log_ceils,
         mask_rgb=levels_stage.mask_rgb,
         film_rect_preview=levels_stage.film_rect_preview,
     )
@@ -433,6 +451,8 @@ def build_lab_print_display_stage(
         histogram=color_stage.histogram,
         auto_levels=color_stage.auto_levels,
         wb_gains=color_stage.wb_gains,
+        lab_print_log_floors=color_stage.lab_print_log_floors,
+        lab_print_log_ceils=color_stage.lab_print_log_ceils,
         mask_rgb=color_stage.mask_rgb,
         film_rect_preview=color_stage.film_rect_preview,
         tone_mid_anchor=tone_mid_anchor,
@@ -537,26 +557,50 @@ def normalize_log_bounds(
     percentile_clip: float = 0.00001,
     analysis_buffer: float = LOG_ANALYSIS_BUFFER,
 ) -> np.ndarray:
+    normalized, _floors, _ceils = normalize_log_bounds_with_metadata(
+        linear_rgb,
+        percentile_clip=percentile_clip,
+        analysis_buffer=analysis_buffer,
+    )
+    return normalized
+
+
+def normalize_log_bounds_with_metadata(
+    linear_rgb: np.ndarray,
+    *,
+    percentile_clip: float = 0.00001,
+    analysis_buffer: float = LOG_ANALYSIS_BUFFER,
+    lab_print_log_floors: np.ndarray | list[float] | None = None,
+    lab_print_log_ceils: np.ndarray | list[float] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     safe = np.clip(
         np.nan_to_num(linear_rgb, nan=LOG_MODE_EPSILON, posinf=1.0, neginf=LOG_MODE_EPSILON),
         LOG_MODE_EPSILON,
         1.0,
     )
     log_rgb = np.log10(safe).astype(np.float32, copy=False)
-    sample = log_analysis_crop(log_rgb, analysis_buffer).reshape(-1, 3)
-    if sample.size == 0:
-        sample = log_rgb.reshape(-1, 3)
+    if lab_print_log_floors is not None and lab_print_log_ceils is not None:
+        floors = np.asarray(lab_print_log_floors, dtype=np.float32).reshape(3)
+        ceils = np.asarray(lab_print_log_ceils, dtype=np.float32).reshape(3)
+    else:
+        sample = log_analysis_crop(log_rgb, analysis_buffer).reshape(-1, 3)
+        if sample.size == 0:
+            sample = log_rgb.reshape(-1, 3)
 
-    stride = max(1, len(sample) // 800_000)
-    sample = sample[::stride]
-    clip = float(np.clip(percentile_clip, 0.00001, 1.0))
-    floors = np.percentile(sample, clip, axis=0).astype(np.float32)
-    ceils = np.percentile(sample, 100.0 - clip, axis=0).astype(np.float32)
+        stride = max(1, len(sample) // 800_000)
+        sample = sample[::stride]
+        clip = float(np.clip(percentile_clip, 0.00001, 1.0))
+        floors = np.percentile(sample, clip, axis=0).astype(np.float32)
+        ceils = np.percentile(sample, 100.0 - clip, axis=0).astype(np.float32)
     span = ceils - floors
     span = np.where(np.abs(span) < LOG_MODE_EPSILON, LOG_MODE_EPSILON, span).astype(np.float32)
 
     normalized = (log_rgb - floors.reshape(1, 1, 3)) / span.reshape(1, 1, 3)
-    return np.clip(normalized, 0.0, 1.0).astype(np.float32, copy=False)
+    return (
+        np.clip(normalized, 0.0, 1.0).astype(np.float32, copy=False),
+        floors.astype(np.float32, copy=True),
+        ceils.astype(np.float32, copy=True),
+    )
 
 
 def log_analysis_crop(image: np.ndarray, buffer_ratio: float) -> np.ndarray:

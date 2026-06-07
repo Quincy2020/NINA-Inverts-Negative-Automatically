@@ -48,6 +48,8 @@ class PreviewRenderOutput:
     mask_point: ImagePoint | None = None
     film_rect: ImageRect | None = None
     adjustments: AdjustmentParams | None = None
+    lab_print_log_floors: list[float] | None = None
+    lab_print_log_ceils: list[float] | None = None
     lab_print_cmy_offsets: list[float] | None = None
     lab_print_cmy_strength: int | None = None
     roll_color_frame: dict | None = None
@@ -97,6 +99,15 @@ def cmy_offsets_key(offsets: list[float] | np.ndarray | None) -> tuple[float, ..
     if offsets is None:
         return None
     values = np.asarray(offsets, dtype=np.float32).reshape(-1)
+    if values.size != 3:
+        return None
+    return tuple(round(float(value), 7) for value in values)
+
+
+def log_bounds_key(bounds: list[float] | np.ndarray | None) -> tuple[float, ...] | None:
+    if bounds is None:
+        return None
+    values = np.asarray(bounds, dtype=np.float32).reshape(-1)
     if values.size != 3:
         return None
     return tuple(round(float(value), 7) for value in values)
@@ -199,6 +210,8 @@ def preview_result_cache_key_for(
     film_rect: ImageRect | None,
     adjustments: AdjustmentParams,
     lab_print_cmy_offsets: list[float] | np.ndarray | None = None,
+    lab_print_log_floors: list[float] | np.ndarray | None = None,
+    lab_print_log_ceils: list[float] | np.ndarray | None = None,
     roll_color_frame: dict | None = None,
 ) -> tuple:
     return (
@@ -211,6 +224,8 @@ def preview_result_cache_key_for(
         adjustments_preview_cache_key(adjustments),
         lab_print_engine_key(),
         cmy_offsets_key(lab_print_cmy_offsets) if adjustments.auto_wb else None,
+        log_bounds_key(lab_print_log_floors),
+        log_bounds_key(lab_print_log_ceils),
         roll_color_frame_key(roll_color_frame) if adjustments.color_correction.enabled else None,
     )
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import rawpy
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -19,7 +19,9 @@ from qnegative.core.file_sequence import RAW_EXTENSIONS
 
 
 class ThumbnailItem(QFrame):
-    selected = Signal(object)
+    clicked = Signal(object, object)
+    doubleClicked = Signal(object)
+    contextMenuRequested = Signal(object, object)
     wheelMoved = Signal(int)
 
     def __init__(self, path: Path, index: int, parent: QWidget | None = None) -> None:
@@ -29,6 +31,7 @@ class ThumbnailItem(QFrame):
         self._processed = False
         self.setObjectName("thumbnailItem")
         self.setProperty("active", False)
+        self.setProperty("selected", False)
         self.setFixedSize(112, 104)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -59,6 +62,11 @@ class ThumbnailItem(QFrame):
 
     def set_active(self, active: bool) -> None:
         self.setProperty("active", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
 
@@ -93,8 +101,17 @@ class ThumbnailItem(QFrame):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton:
-            self.selected.emit(self.path)
+            self.clicked.emit(self.path, event.modifiers())
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.doubleClicked.emit(self.path)
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.contextMenuRequested.emit(self.path, self.mapToGlobal(QPoint(event.pos())))
+        event.accept()
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         delta = event.angleDelta().y() or event.angleDelta().x()
@@ -118,6 +135,9 @@ class HorizontalWheelScrollArea(QScrollArea):
 
 class FolderFilmstrip(QWidget):
     fileSelected = Signal(object)
+    itemClicked = Signal(object, object)
+    itemDoubleClicked = Signal(object)
+    itemContextMenuRequested = Signal(object, object)
     previousRequested = Signal()
     nextRequested = Signal()
 
@@ -180,7 +200,9 @@ class FolderFilmstrip(QWidget):
 
         for index, path in enumerate(files, start=1):
             item = ThumbnailItem(path, index)
-            item.selected.connect(self.fileSelected.emit)
+            item.clicked.connect(self.itemClicked.emit)
+            item.doubleClicked.connect(self.itemDoubleClicked.emit)
+            item.contextMenuRequested.connect(self.itemContextMenuRequested.emit)
             item.wheelMoved.connect(self._scroll_by_wheel)
             item.set_active(current_path is not None and path == current_path)
             self.content_layout.insertWidget(self.content_layout.count() - 1, item)
@@ -198,6 +220,11 @@ class FolderFilmstrip(QWidget):
         self._update_buttons()
         if path in self._items:
             self._center_item(self._items[path])
+
+    def set_selected_paths(self, paths: list[Path] | set[Path]) -> None:
+        selected = set(paths)
+        for path, item in self._items.items():
+            item.set_selected(path in selected)
 
     def _center_item(self, item: ThumbnailItem) -> None:
         bar = self.scroll_area.horizontalScrollBar()
@@ -273,9 +300,17 @@ class FolderFilmstrip(QWidget):
                 border: 1px solid #3D352D;
                 border-radius: 6px;
             }
+            QFrame#thumbnailItem[selected="true"] {
+                border: 2px solid #4EA0FF;
+                background: #1F2A32;
+            }
             QFrame#thumbnailItem[active="true"] {
                 border: 3px solid #FFB000;
                 background: #2E2418;
+            }
+            QFrame#thumbnailItem[active="true"][selected="true"] {
+                border: 3px solid #FFB000;
+                background: #2A2A22;
             }
             QLabel#thumbnailImage {
                 background: #121212;

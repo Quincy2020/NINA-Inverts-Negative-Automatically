@@ -58,12 +58,19 @@ def state_from_json_dict(payload: dict[str, Any], source_path: Path) -> ImagePro
         )
         if cmy_strength != adjustments.auto_cmy_strength:
             cmy_offsets = None
+        log_floors = _float_list_from_payload(payload.get("lab_print_log_floors"), length=3)
+        log_ceils = _float_list_from_payload(payload.get("lab_print_log_ceils"), length=3)
+        if log_floors is None or log_ceils is None:
+            log_floors = None
+            log_ceils = None
 
         return ImageProcessingState(
             mask_point=_point_from_dict(payload.get("mask_point")),
             film_rect=_rect_from_dict(payload.get("film_rect")),
             white_balance_point=_point_from_dict(payload.get("white_balance_point")),
             adjustments=adjustments,
+            lab_print_log_floors=log_floors,
+            lab_print_log_ceils=log_ceils,
             lab_print_cmy_offsets=cmy_offsets,
             lab_print_cmy_strength=(cmy_strength if cmy_offsets is not None else None),
             tone_mid_anchor=(
@@ -125,12 +132,32 @@ def load_roll_color_result(folder: Path) -> dict[str, Any] | None:
     return result if isinstance(result, dict) else None
 
 
+def load_roll_excluded_file_names(folder: Path) -> set[str]:
+    path = session_path_for_folder(folder)
+    if not path.exists():
+        return set()
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    if payload.get("schema_version") != SESSION_SCHEMA_VERSION:
+        return set()
+    excluded = payload.get("excluded_files")
+    if not isinstance(excluded, list):
+        return set()
+    return {str(name) for name in excluded if str(name).strip()}
+
+
 def save_roll_session(
     folder: Path,
     states: dict[Path, ImageProcessingState],
     files: list[Path],
     *,
     roll_color_result: dict[str, Any] | None = None,
+    excluded_file_names: set[str] | None = None,
 ) -> None:
     path = session_path_for_folder(folder)
     file_set = set(files)
@@ -151,6 +178,8 @@ def save_roll_session(
         "app": "NINA",
         "images": images,
     }
+    if excluded_file_names:
+        payload["excluded_files"] = sorted(excluded_file_names)
     if roll_color_result is not None:
         payload["roll_color_result"] = roll_color_result
 

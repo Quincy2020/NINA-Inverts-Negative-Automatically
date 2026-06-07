@@ -33,6 +33,10 @@ def build_main_menus(window) -> None:
     export_completed_action.triggered.connect(window.export_completed)
     file_menu.addAction(export_completed_action)
 
+    export_selected_action = QAction("Export Selected Images...", window)
+    export_selected_action.triggered.connect(window.export_selected)
+    file_menu.addAction(export_selected_action)
+
     export_dir_action = QAction("Set Default Export Directory...", window)
     export_dir_action.triggered.connect(window.set_default_export_directory)
     file_menu.addAction(export_dir_action)

@@ -85,6 +85,8 @@ class PreInvertOutput:
     adjustments: AdjustmentParams
     result: NegativePreviewResult
     cache_key: tuple | None
+    lab_print_log_floors: list[float] | None
+    lab_print_log_ceils: list[float] | None
     lab_print_cmy_offsets: list[float] | None
     lab_print_cmy_strength: int | None
     confidence: float
@@ -177,6 +179,8 @@ class PreInvertTask(QRunnable):
             )
             color_stage = build_lab_print_color_stage(levels_stage, effective)
             result = build_lab_print_display_stage(color_stage, effective)
+            lab_print_log_floors = _log_bounds_to_state(result.lab_print_log_floors)
+            lab_print_log_ceils = _log_bounds_to_state(result.lab_print_log_ceils)
             lab_print_cmy_offsets = _cmy_offsets_to_state(result.wb_gains if effective.auto_wb else None)
             cache_key = preview_result_cache_key_for(
                 file_key=self.file_key,
@@ -185,6 +189,8 @@ class PreInvertTask(QRunnable):
                 film_rect=frame.rect,
                 adjustments=effective,
                 lab_print_cmy_offsets=lab_print_cmy_offsets,
+                lab_print_log_floors=lab_print_log_floors,
+                lab_print_log_ceils=lab_print_log_ceils,
             )
         except Exception as exc:
             self.signals.failed.emit(self.job_id, self.path, str(exc))
@@ -199,6 +205,8 @@ class PreInvertTask(QRunnable):
                 adjustments=effective,
                 result=result,
                 cache_key=cache_key,
+                lab_print_log_floors=lab_print_log_floors,
+                lab_print_log_ceils=lab_print_log_ceils,
                 lab_print_cmy_offsets=lab_print_cmy_offsets,
                 lab_print_cmy_strength=(
                     effective.auto_cmy_strength if lab_print_cmy_offsets is not None else None
@@ -433,6 +441,8 @@ class PreviewRenderTask(QRunnable):
         lab_print_cmy_offsets = _cmy_offsets_to_state(
             color_stage.wb_gains if effective_adjustments.auto_wb else None
         )
+        lab_print_log_floors = _log_bounds_to_state(color_stage.lab_print_log_floors)
+        lab_print_log_ceils = _log_bounds_to_state(color_stage.lab_print_log_ceils)
 
         display_key = lab_print_display_key(
             color_key,
@@ -472,10 +482,14 @@ class PreviewRenderTask(QRunnable):
             cache_key=self._result_cache_key(
                 effective_adjustments,
                 lab_print_cmy_offsets=lab_print_cmy_offsets,
+                lab_print_log_floors=lab_print_log_floors,
+                lab_print_log_ceils=lab_print_log_ceils,
             ),
             mask_point=self.mask_point,
             film_rect=self.film_rect,
             adjustments=deepcopy(effective_adjustments),
+            lab_print_log_floors=lab_print_log_floors,
+            lab_print_log_ceils=lab_print_log_ceils,
             lab_print_cmy_offsets=lab_print_cmy_offsets,
             lab_print_cmy_strength=(
                 effective_adjustments.auto_cmy_strength if lab_print_cmy_offsets is not None else None
@@ -489,6 +503,8 @@ class PreviewRenderTask(QRunnable):
         adjustments: AdjustmentParams,
         *,
         lab_print_cmy_offsets: list[float] | np.ndarray | None = None,
+        lab_print_log_floors: list[float] | np.ndarray | None = None,
+        lab_print_log_ceils: list[float] | np.ndarray | None = None,
     ) -> tuple | None:
         if self.file_key is None:
             return None
@@ -503,6 +519,8 @@ class PreviewRenderTask(QRunnable):
                 if lab_print_cmy_offsets is not None
                 else self.lab_print_cmy_offsets
             ),
+            lab_print_log_floors=lab_print_log_floors,
+            lab_print_log_ceils=lab_print_log_ceils,
             roll_color_frame=self.roll_color_frame,
         )
 
@@ -536,3 +554,12 @@ def _cmy_offsets_to_state(offsets: np.ndarray | list[float] | None) -> list[floa
     if key is None:
         return None
     return [float(value) for value in key]
+
+
+def _log_bounds_to_state(bounds: np.ndarray | list[float] | None) -> list[float] | None:
+    if bounds is None:
+        return None
+    values = np.asarray(bounds, dtype=np.float32).reshape(-1)
+    if values.size != 3:
+        return None
+    return [float(value) for value in values]

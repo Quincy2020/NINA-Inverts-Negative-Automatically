@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from threading import Event
 from time import perf_counter
@@ -49,6 +50,8 @@ class ImageExportTask(QRunnable):
         auto_levels_pending: bool,
         export_format: str | None = None,
         preview_cmy_offsets: np.ndarray | None = None,
+        preview_log_floors: np.ndarray | list[float] | None = None,
+        preview_log_ceils: np.ndarray | list[float] | None = None,
         preview_tone_mid_anchor: float | None = None,
         roll_color_result: dict | None = None,
         roll_color_frame: dict | None = None,
@@ -68,6 +71,16 @@ class ImageExportTask(QRunnable):
         self.preview_cmy_offsets = (
             np.asarray(preview_cmy_offsets, dtype=np.float32).copy()
             if preview_cmy_offsets is not None
+            else None
+        )
+        self.preview_log_floors = (
+            np.asarray(preview_log_floors, dtype=np.float32).reshape(3).copy()
+            if preview_log_floors is not None
+            else None
+        )
+        self.preview_log_ceils = (
+            np.asarray(preview_log_ceils, dtype=np.float32).reshape(3).copy()
+            if preview_log_ceils is not None
             else None
         )
         self.preview_tone_mid_anchor = (
@@ -163,6 +176,8 @@ class ImageExportTask(QRunnable):
             base,
             include_histogram=False,
             analysis_inset=analysis_inset_from_adjustments(self.adjustments),
+            lab_print_log_floors=self.preview_log_floors,
+            lab_print_log_ceils=self.preview_log_ceils,
         )
         timings["Lab negative"] = perf_counter() - stage_start
 
@@ -300,7 +315,18 @@ def write_export_image(path: Path, encoded_rgb: np.ndarray, export_format: str) 
     if export_format in {"tiff8", "tiff16"}:
         import tifffile
 
-        tifffile.imwrite(path, encoded_rgb, photometric="rgb")
+        icc_profile = srgb_icc_profile_bytes()
+        extratags = (
+            [(34675, "B", len(icc_profile), icc_profile, False)]
+            if icc_profile
+            else None
+        )
+        tifffile.imwrite(
+            path,
+            encoded_rgb,
+            photometric="rgb",
+            extratags=extratags,
+        )
         return
 
     import cv2
@@ -314,3 +340,14 @@ def write_export_image(path: Path, encoded_rgb: np.ndarray, export_format: str) 
         raise ValueError(f"Unsupported export format: {export_format}")
     if not ok:
         raise OSError(f"Could not write {path}")
+
+
+@lru_cache(maxsize=1)
+def srgb_icc_profile_bytes() -> bytes:
+    try:
+        from PIL import ImageCms
+
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+        return bytes(profile.tobytes())
+    except Exception:
+        return b""

@@ -6,6 +6,8 @@ import numpy as np
 
 from qnegative.core.models import AdjustmentParams, BalanceAxis, ImagePoint, ImageProcessingState
 from qnegative.core.pipeline import (
+    LAB_PRINT_AUTO_WB_MAX_OFFSET,
+    effective_lab_print_cmy_offsets,
     estimate_lab_print_auto_cmy_offsets,
     manual_printer_balance_offsets,
     suggest_printer_balance_from_log_sample,
@@ -76,6 +78,51 @@ class WhiteBalanceController:
         if self.cmy_strength != adjustments.auto_cmy_strength:
             return None
         return np.asarray(self.cmy_offsets, dtype=np.float32).reshape(3).copy()
+
+    def retarget_cmy_offsets(
+        self,
+        previous: AdjustmentParams,
+        current: AdjustmentParams,
+    ) -> bool:
+        """Keep preview/export WB stable when printer controls change.
+
+        Stored CMY offsets are the effective print filtration:
+        auto-base CMY + manual printer balance.  When the user changes the
+        printer sliders or Auto CMY strength, we can preserve the already
+        estimated auto-base and cheaply retarget it instead of forcing export
+        to re-estimate WB at full resolution.
+        """
+        if not current.auto_wb:
+            self.clear_cmy_offsets()
+            return False
+
+        effective = self.current_cmy_offsets(previous)
+        if effective is None:
+            self.clear_cmy_offsets()
+            return False
+
+        previous_manual = manual_printer_balance_offsets(previous.printer_balance)
+        auto_base = effective - previous_manual
+
+        previous_strength = max(0.0, float(previous.auto_cmy_strength) / 100.0)
+        current_strength = max(0.0, float(current.auto_cmy_strength) / 100.0)
+        if abs(previous_strength - current_strength) > 1e-6:
+            if previous_strength <= 1e-6:
+                if current_strength > 1e-6:
+                    self.clear_cmy_offsets()
+                    return False
+                auto_base = np.zeros(3, dtype=np.float32)
+            else:
+                auto_base = auto_base * np.float32(current_strength / previous_strength)
+
+        auto_base = np.clip(
+            auto_base,
+            -LAB_PRINT_AUTO_WB_MAX_OFFSET,
+            LAB_PRINT_AUTO_WB_MAX_OFFSET,
+        ).astype(np.float32, copy=False)
+        updated = effective_lab_print_cmy_offsets(auto_base, current)
+        self.set_cmy_offsets(updated, current)
+        return True
 
     def base_cmy_offsets_for_picker(
         self,

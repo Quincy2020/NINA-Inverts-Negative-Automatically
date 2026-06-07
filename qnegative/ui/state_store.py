@@ -12,6 +12,8 @@ class RestoredImageRuntime:
     mask_point: object | None
     film_rect: ImageRect | None
     white_balance_point: object | None
+    lab_print_log_floors: list[float] | None
+    lab_print_log_ceils: list[float] | None
     lab_print_cmy_offsets: list[float] | None
     lab_print_cmy_strength: int | None
     adjustments: AdjustmentParams
@@ -43,6 +45,8 @@ def restored_runtime_for_state(
             mask_point=None,
             film_rect=None,
             white_balance_point=None,
+            lab_print_log_floors=None,
+            lab_print_log_ceils=None,
             lab_print_cmy_offsets=None,
             lab_print_cmy_strength=None,
             adjustments=deepcopy(fallback_adjustments),
@@ -64,6 +68,16 @@ def restored_runtime_for_state(
         mask_point=state.mask_point,
         film_rect=state.film_rect,
         white_balance_point=state.white_balance_point,
+        lab_print_log_floors=(
+            deepcopy(state.lab_print_log_floors)
+            if state.lab_print_log_floors is not None
+            else None
+        ),
+        lab_print_log_ceils=(
+            deepcopy(state.lab_print_log_ceils)
+            if state.lab_print_log_ceils is not None
+            else None
+        ),
         lab_print_cmy_offsets=(
             deepcopy(cmy_offsets) if cmy_offsets is not None else None
         ),
@@ -101,6 +115,8 @@ def build_current_image_state(
     white_balance_point,
     adjustments: AdjustmentParams,
     lab_print_cmy_offsets: list[float] | None,
+    lab_print_log_floors: list[float] | None,
+    lab_print_log_ceils: list[float] | None,
     tone_mid_anchor: float | None,
     has_positive_result: bool,
     manual_levels_present: bool,
@@ -114,6 +130,12 @@ def build_current_image_state(
         film_rect=film_rect,
         white_balance_point=white_balance_point,
         adjustments=deepcopy(adjustments),
+        lab_print_log_floors=(
+            deepcopy(lab_print_log_floors) if lab_print_log_floors is not None else None
+        ),
+        lab_print_log_ceils=(
+            deepcopy(lab_print_log_ceils) if lab_print_log_ceils is not None else None
+        ),
         lab_print_cmy_offsets=(
             deepcopy(lab_print_cmy_offsets) if adjustments.auto_wb else None
         ),
@@ -169,6 +191,24 @@ def merge_stale_preview_result_state(
         ),
         white_balance_point=existing_state.white_balance_point if existing_state else None,
         adjustments=adjustments,
+        lab_print_log_floors=(
+            deepcopy(output.lab_print_log_floors)
+            if getattr(output, "lab_print_log_floors", None) is not None
+            else (
+                deepcopy(existing_state.lab_print_log_floors)
+                if existing_state and existing_state.lab_print_log_floors is not None
+                else None
+            )
+        ),
+        lab_print_log_ceils=(
+            deepcopy(output.lab_print_log_ceils)
+            if getattr(output, "lab_print_log_ceils", None) is not None
+            else (
+                deepcopy(existing_state.lab_print_log_ceils)
+                if existing_state and existing_state.lab_print_log_ceils is not None
+                else None
+            )
+        ),
         lab_print_cmy_offsets=(
             existing_state.lab_print_cmy_offsets
             if existing_cmy_current
@@ -205,6 +245,8 @@ def state_from_preinvert_output(output: Any) -> ImageProcessingState:
         film_rect=output.frame_rect,
         white_balance_point=None,
         adjustments=deepcopy(output.adjustments),
+        lab_print_log_floors=getattr(output, "lab_print_log_floors", None),
+        lab_print_log_ceils=getattr(output, "lab_print_log_ceils", None),
         lab_print_cmy_offsets=output.lab_print_cmy_offsets,
         lab_print_cmy_strength=getattr(output, "lab_print_cmy_strength", None),
         tone_mid_anchor=output.result.tone_mid_anchor,
