@@ -6,19 +6,24 @@
 
 NINA is a fast desktop negative conversion tool for camera-scanned film. It is inspired by the practical operating style of minilab systems such as the Frontier: load a roll, find the frame, make a clean positive, adjust quickly, and move on.
 
-The focus is **camera scanning**, not flatbed/scanner workflows. NINA is designed around camera RAW/DNG files, folder sequences, automatic frame detection, fast previewing, roll-level color correction, and lens falloff correction for copy-camera setups.
+NINA is designed around camera RAW/DNG files, folder sequences, automatic frame detection, fast previewing, roll-level color correction, and lens correction for copy-camera setups.
 
 NINA is GPLv3 licensed.
+
+## Demo
+
+| Camera-scanned negative | NINA positive preview |
+| --- | --- |
+| ![Camera-scanned negative](docs/images/demo_negative.png) | ![NINA positive preview](docs/images/demo_positive.png) |
 
 ## Highlights
 
 - **Camera RAW first**: works with RAW/DNG files supported by rawpy/LibRaw.
 - **Roll workflow**: open a folder, browse the bottom filmstrip, and keep each image's frame, adjustments, preview state, and completion status.
-- **Auto frame detection**: detects film frames, supports format hints, and can apply a small safe crop so white/black borders do not leak into the final positive.
-- **Fast Lab Print conversion**: preview uses a smaller RAW preview while export uses full-resolution RAW data.
+- **Auto frame detection**: detects film frames, supports format hints.
 - **Automatic CMY balance**: automatic printer-style color balance with manual CMY offsets for fast correction.
-- **Roll Color Analysis**: analyzes a whole roll for color bias, then applies roll-level and per-frame corrections.
-- **Lens falloff correction**: radial correction and flat-frame profiles for camera-scan vignetting.
+- **Roll Color Analysis**: analyzes a whole roll for color bias, then applies roll-level and corrections per frame.
+- **Lens falloff correction**: radial correction and flat-frame profiles for macro lens vignetting.
 - **Quick keyboard workflow**: adjust color, exposure, gray point, confirm the frame, and jump to the next image without leaving the keyboard.
 - **Batch export**: export completed images to TIFF, PNG, or JPEG with a queue window.
 
@@ -30,8 +35,9 @@ Primary input:
 
 Notes:
 
-- Lightroom panorama/HDR DNG files may not behave like normal camera RAW files and can be unsupported by LibRaw.
+- Lightroom panorama files may not behave like normal camera RAW files and can be unsupported by LibRaw.
 - NINA is not currently optimized as a general TIFF/JPEG negative converter. The intended workflow is camera RAW/DNG.
+- Black-and-white negatives can also be inverted; the current README demo simply focuses on color negative film.
 
 Output:
 
@@ -103,9 +109,7 @@ Flat-frame correction is usually the best option when the copy lens or light sou
 
 Roll Color Analysis is meant to make a whole roll feel more consistent.
 
-It analyzes completed positive previews, estimates roll-level color bias, and then applies controlled per-frame correction. This is useful when a whole roll is slightly too green, too blue, too warm, or inconsistent between frames.
-
-The goal is not to remove manual control. It gives the roll a better starting point so final tweaks are faster.
+It analyzes completed positive previews, estimates color bias, and then applies controlled correction per frame. This is useful when the roll is slightly too green, too blue, too warm, or inconsistent between frames.
 
 ## Keyboard Shortcuts
 
@@ -148,7 +152,7 @@ Per-folder roll state is saved in:
 .nina/roll_session.json
 ```
 
-The roll session stores each image's frame area, adjustments, automatic CMY offsets, preview orientation, completion state, and roll color data. Preview images are rebuilt from the original RAW files and saved parameters.
+The roll session stores each image's frame area, adjustments, automatic CMY offsets, preview orientation, completion state, and roll color data.
 
 ## Processing Outline
 
@@ -168,16 +172,13 @@ More detailed implementation notes are in [qnegative/core/PIPELINE.md](qnegative
 
 ## Project Status
 
-NINA is usable as an MVP, but still actively evolving.
+NINA is usable in current state, but still actively evolving.
 
 Current priorities:
 
 - Better automatic frame detection.
-- More reliable automatic brightness and white balance.
-- Better lens falloff profiles.
-- Faster full-resolution export.
-- Cleaner modular architecture.
-- Camera-scan stitching / panorama workflow research.
+- Better lens profiles.
+- Camera stitching / panorama workflow research.
 - Optional dust removal research.
 
 ## Dependencies

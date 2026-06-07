@@ -14,6 +14,9 @@ env/
 *.jpg
 *.jpeg
 *.png
+!docs/
+!docs/images/
+!docs/images/*.png
 *.arw
 *.ARW
 *.raw
