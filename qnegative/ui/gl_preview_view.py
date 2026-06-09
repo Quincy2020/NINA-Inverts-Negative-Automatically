@@ -59,6 +59,11 @@ class OpenGLPreviewView(QOpenGLWidget):
         self._transform_context_enabled = False
         self._wb_point: ImagePoint | None = None
         self._status_overlay_text = ""
+        self._dust_auto_mask: np.ndarray | None = None
+        self._dust_add_mask: np.ndarray | None = None
+        self._dust_protect_mask: np.ndarray | None = None
+        self._dust_overlay_image: QImage | None = None
+        self._dust_show_auto_mask = True
 
         self._zoom_factor = 1.0
         self._pan_offset = QPointF(0.0, 0.0)
@@ -147,12 +152,38 @@ class OpenGLPreviewView(QOpenGLWidget):
         self._source_size = None
         self._placeholder = text
         self._wb_point = None
+        self.clear_dust_overlay()
         self._reset_navigation()
         self.update()
         self.viewStatusChanged.emit(text)
 
     def set_status_overlay(self, text: str) -> None:
         self._status_overlay_text = text
+        self.update()
+
+    def set_dust_overlay(
+        self,
+        *,
+        auto_mask: np.ndarray | None,
+        add_mask: np.ndarray | None,
+        protect_mask: np.ndarray | None,
+    ) -> None:
+        self._dust_auto_mask = _mask_copy(auto_mask)
+        self._dust_add_mask = _mask_copy(add_mask)
+        self._dust_protect_mask = _mask_copy(protect_mask)
+        self._rebuild_dust_overlay_image()
+        self.update()
+
+    def set_dust_show_auto_mask(self, enabled: bool) -> None:
+        self._dust_show_auto_mask = bool(enabled)
+        self._rebuild_dust_overlay_image()
+        self.update()
+
+    def clear_dust_overlay(self) -> None:
+        self._dust_auto_mask = None
+        self._dust_add_mask = None
+        self._dust_protect_mask = None
+        self._dust_overlay_image = None
         self.update()
 
     def restore_selections(
@@ -202,6 +233,7 @@ class OpenGLPreviewView(QOpenGLWidget):
         else:
             if not self._gpu_preview_enabled:
                 self._paint_cpu_image(painter)
+            self._paint_dust_overlay(painter)
             self._paint_saved_selections(painter)
             self._paint_status_overlay(painter)
         painter.end()
@@ -518,6 +550,15 @@ class OpenGLPreviewView(QOpenGLWidget):
         if self._wb_point is not None:
             self._paint_image_point(painter, self._wb_point, QColor("#FFB000"))
 
+    def _paint_dust_overlay(self, painter: QPainter) -> None:
+        if self._dust_overlay_image is None:
+            return
+        if self._display_rect.isEmpty():
+            self._display_rect = self._scaled_display_rect()
+        if self._display_rect.isEmpty():
+            return
+        painter.drawImage(self._display_rect.toRect(), self._dust_overlay_image)
+
     def _paint_status_overlay(self, painter: QPainter) -> None:
         if not self._status_overlay_text:
             return
@@ -636,3 +677,54 @@ class OpenGLPreviewView(QOpenGLWidget):
             ToolMode.FILM_RECT: "Frame Area",
         }
         return labels[mode]
+
+    def _rebuild_dust_overlay_image(self) -> None:
+        height, width = self._dust_overlay_shape()
+        if height <= 0 or width <= 0:
+            self._dust_overlay_image = None
+            return
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        if self._dust_show_auto_mask:
+            _apply_overlay_color(rgba, self._dust_auto_mask, (255, 176, 0, 105))
+        _apply_overlay_color(rgba, self._dust_add_mask, (40, 220, 255, 135))
+        _apply_overlay_color(rgba, self._dust_protect_mask, (255, 70, 170, 145))
+        if not np.any(rgba[..., 3]):
+            self._dust_overlay_image = None
+            return
+        self._dust_overlay_image = QImage(
+            rgba.data,
+            width,
+            height,
+            width * 4,
+            QImage.Format_RGBA8888,
+        ).copy()
+
+    def _dust_overlay_shape(self) -> tuple[int, int]:
+        if self._source_size is not None:
+            return self._source_size.height, self._source_size.width
+        for mask in (self._dust_auto_mask, self._dust_add_mask, self._dust_protect_mask):
+            if mask is not None:
+                return mask.shape[:2]
+        return 0, 0
+
+
+def _mask_copy(mask: np.ndarray | None) -> np.ndarray | None:
+    if mask is None:
+        return None
+    return np.asarray(mask).astype(bool, copy=True)
+
+
+def _apply_overlay_color(
+    rgba: np.ndarray,
+    mask: np.ndarray | None,
+    color: tuple[int, int, int, int],
+) -> None:
+    if mask is None:
+        return
+    clean = np.asarray(mask).astype(bool)
+    if clean.shape != rgba.shape[:2] or not np.any(clean):
+        return
+    rgba[clean, 0] = color[0]
+    rgba[clean, 1] = color[1]
+    rgba[clean, 2] = color[2]
+    rgba[clean, 3] = color[3]

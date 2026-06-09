@@ -128,6 +128,28 @@ class ColorCorrectionParams:
 
 
 @dataclass
+class DustRemovalParams:
+    enabled: bool = False
+    model_id: str | None = None
+    threshold: int = 20
+    adaptive: bool = True
+    texture_penalty: int = 10
+    max_threshold: int = 75
+    inpaint_radius: int = 3
+    model_path: str | None = None
+
+
+@dataclass
+class DustMaskState:
+    manual_add_mask_path: str | None = None
+    manual_protect_mask_path: str | None = None
+    mask_width: int = 0
+    mask_height: int = 0
+    auto_mask_path: str | None = None
+    auto_mask_params_key: str | None = None
+
+
+@dataclass
 class AdjustmentParams:
     invert_mode: str = InvertMode.LAB_PRINT.value
     print_curve: str = PrintCurveMode.STANDARD.value
@@ -137,6 +159,7 @@ class AdjustmentParams:
     color_balance: ColorBalanceParams = field(default_factory=ColorBalanceParams)
     lens_correction: LensCorrectionParams = field(default_factory=LensCorrectionParams)
     color_correction: ColorCorrectionParams = field(default_factory=ColorCorrectionParams)
+    dust_removal: DustRemovalParams = field(default_factory=DustRemovalParams)
     exposure: int = 0
     highlights: int = 0
     shadows: int = 0
@@ -168,3 +191,4 @@ class ImageProcessingState:
     preview_flip_horizontal: bool = False
     preview_flip_vertical: bool = False
     preview_rotation_quarters: int = 0
+    dust_mask: DustMaskState = field(default_factory=DustMaskState)

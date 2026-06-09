@@ -5,11 +5,14 @@ from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from qnegative.core.dust_model_registry import default_dust_model_plugin, dust_model_plugin
 from qnegative.core.models import (
     AdjustmentParams,
     BalanceAxis,
     ColorBalanceParams,
     ColorCorrectionParams,
+    DustMaskState,
+    DustRemovalParams,
     ImagePoint,
     ImageProcessingState,
     ImageRect,
@@ -84,6 +87,7 @@ def state_from_json_dict(payload: dict[str, Any], source_path: Path) -> ImagePro
             preview_flip_horizontal=bool(payload.get("preview_flip_horizontal", False)),
             preview_flip_vertical=bool(payload.get("preview_flip_vertical", False)),
             preview_rotation_quarters=int(payload.get("preview_rotation_quarters", 0)) % 4,
+            dust_mask=_dust_mask_from_dict(payload.get("dust_mask") or {}),
         )
     except (TypeError, ValueError):
         return None
@@ -262,6 +266,7 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     values["color_balance"] = _color_balance_from_dict(color_balance_payload)
     values["lens_correction"] = _lens_correction_from_dict(payload.get("lens_correction") or {})
     values["color_correction"] = _color_correction_from_dict(payload.get("color_correction") or {})
+    values["dust_removal"] = _dust_removal_from_dict(payload.get("dust_removal") or {})
     return AdjustmentParams(**values)
 
 
@@ -316,4 +321,92 @@ def _color_correction_from_dict(payload: dict[str, Any]) -> ColorCorrectionParam
         tone_balance_strength=int(payload.get("tone_balance_strength", 100)),
         protection_strength=int(payload.get("protection_strength", 100)),
         exposure_match_strength=int(payload.get("exposure_match_strength", 0)),
+    )
+
+
+def _dust_removal_from_dict(payload: dict[str, Any]) -> DustRemovalParams:
+    model_id = _dust_model_id_from_payload(payload)
+    plugin = dust_model_plugin(model_id) if model_id else default_dust_model_plugin()
+    if plugin is None:
+        plugin = default_dust_model_plugin()
+        model_id = plugin.plugin_id
+
+    use_plugin_defaults = (
+        "model_id" not in payload
+        and _legacy_dust_defaults_were_saved(payload)
+    )
+    return DustRemovalParams(
+        enabled=bool(payload.get("enabled", False)),
+        model_id=model_id,
+        threshold=(
+            plugin.threshold
+            if use_plugin_defaults
+            else int(payload.get("threshold", plugin.threshold))
+        ),
+        adaptive=bool(payload.get("adaptive", True)),
+        texture_penalty=(
+            plugin.texture_penalty
+            if use_plugin_defaults
+            else int(payload.get("texture_penalty", plugin.texture_penalty))
+        ),
+        max_threshold=(
+            plugin.max_threshold
+            if use_plugin_defaults
+            else int(payload.get("max_threshold", plugin.max_threshold))
+        ),
+        inpaint_radius=(
+            plugin.inpaint_radius
+            if use_plugin_defaults
+            else int(payload.get("inpaint_radius", plugin.inpaint_radius))
+        ),
+    )
+
+
+def _dust_mask_from_dict(payload: dict[str, Any]) -> DustMaskState:
+    return DustMaskState(
+        manual_add_mask_path=(
+            str(payload["manual_add_mask_path"])
+            if payload.get("manual_add_mask_path")
+            else None
+        ),
+        manual_protect_mask_path=(
+            str(payload["manual_protect_mask_path"])
+            if payload.get("manual_protect_mask_path")
+            else None
+        ),
+        mask_width=max(0, int(payload.get("mask_width", 0) or 0)),
+        mask_height=max(0, int(payload.get("mask_height", 0) or 0)),
+        auto_mask_path=(
+            str(payload["auto_mask_path"])
+            if payload.get("auto_mask_path")
+            else None
+        ),
+        auto_mask_params_key=(
+            str(payload["auto_mask_params_key"])
+            if payload.get("auto_mask_params_key")
+            else None
+        ),
+    )
+
+
+def _dust_model_id_from_payload(payload: dict[str, Any]) -> str | None:
+    model_id = payload.get("model_id")
+    if model_id:
+        return str(model_id)
+    model_path = str(payload.get("model_path") or "").replace("\\", "/").lower()
+    if "dust_lint_ice_stage2" in model_path:
+        return "lint_ice_stage2"
+    if "dust_pro6000_stage_c" in model_path or "dust_stage_c_clean_scanner" in model_path:
+        return "stage_c_recall"
+    return None
+
+
+def _legacy_dust_defaults_were_saved(payload: dict[str, Any]) -> bool:
+    if not payload:
+        return False
+    return (
+        int(payload.get("threshold", 55)) == 55
+        and int(payload.get("texture_penalty", 25)) == 25
+        and int(payload.get("max_threshold", 88)) == 88
+        and int(payload.get("inpaint_radius", 3)) == 3
     )

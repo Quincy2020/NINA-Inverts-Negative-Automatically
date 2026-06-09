@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "stage_c_recall",
+  "name": "Stage C Recall",
+  "type": "dust-mask-unet",
+  "model_path": "best.pth",
+  "defaults": {
+    "threshold": 20,
+    "texture_penalty": 15,
+    "max_threshold": 82,
+    "inpaint_radius": 3
+  },
+  "notes": "Stronger recall model. Better at large lint, but more likely to flag texture."
+}

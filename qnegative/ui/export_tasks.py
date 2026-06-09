@@ -9,7 +9,9 @@ from time import perf_counter
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from qnegative.core.models import AdjustmentParams, ImagePoint, ImageRect
+from qnegative.core.dust_masks import dust_auto_mask_params_key, load_dust_mask
+from qnegative.core.dust_removal import apply_dust_removal_to_linear_rgb
+from qnegative.core.models import AdjustmentParams, DustMaskState, ImagePoint, ImageRect
 from qnegative.core.pipeline import (
     LabPrintBasePreview,
     analysis_inset_crop,
@@ -55,6 +57,7 @@ class ImageExportTask(QRunnable):
         preview_tone_mid_anchor: float | None = None,
         roll_color_result: dict | None = None,
         roll_color_frame: dict | None = None,
+        dust_mask: DustMaskState | None = None,
         cancel_event: Event | None = None,
     ) -> None:
         super().__init__()
@@ -90,6 +93,7 @@ class ImageExportTask(QRunnable):
         )
         self.roll_color_result = deepcopy(roll_color_result)
         self.roll_color_frame = deepcopy(roll_color_frame)
+        self.dust_mask = deepcopy(dust_mask) if dust_mask is not None else DustMaskState()
         self.cancel_event = cancel_event
         self.signals = ExportSignals()
 
@@ -134,7 +138,7 @@ class ImageExportTask(QRunnable):
             self._raise_if_cancelled()
 
             format_label = export_format_label(self.export_format)
-            self.signals.progress.emit(75, self._timed_progress_text(f"Preparing {format_label}", timings))
+            self.signals.progress.emit(70, self._timed_progress_text("Applying orientation", timings))
             stage_start = perf_counter()
             linear_rgb = transform_preview_array(
                 export_linear_rgb,
@@ -142,6 +146,28 @@ class ImageExportTask(QRunnable):
                 flip_vertical=self.flip_vertical,
                 rotation_quarters=self.rotation_quarters,
             )
+            timings["Orientation"] = perf_counter() - stage_start
+            self._raise_if_cancelled()
+
+            if self.adjustments.dust_removal.enabled:
+                self.signals.progress.emit(72, self._timed_progress_text("Removing dust", timings))
+                stage_start = perf_counter()
+                auto_mask, manual_add, manual_protect = self._load_dust_masks(linear_rgb.shape[:2])
+                linear_rgb, dust_stats = apply_dust_removal_to_linear_rgb(
+                    linear_rgb,
+                    self.adjustments.dust_removal,
+                    model_root=Path.cwd(),
+                    auto_mask=auto_mask,
+                    manual_add_mask=manual_add,
+                    manual_protect_mask=manual_protect,
+                )
+                timings["Dust removal"] = perf_counter() - stage_start
+                for key, value in dust_stats.items():
+                    timings[f"Dust {key}"] = float(value)
+                self._raise_if_cancelled()
+
+            self.signals.progress.emit(75, self._timed_progress_text(f"Preparing {format_label}", timings))
+            stage_start = perf_counter()
             encoded_rgb = encode_export_rgb(linear_rgb, self.export_format)
             timings[f"Prepare {format_label}"] = perf_counter() - stage_start
             self._raise_if_cancelled()
@@ -162,6 +188,33 @@ class ImageExportTask(QRunnable):
     def _raise_if_cancelled(self) -> None:
         if self.cancel_event is not None and self.cancel_event.is_set():
             raise ExportCancelled("Export cancelled")
+
+    def _load_dust_masks(
+        self,
+        target_shape: tuple[int, int],
+    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        auto_mask_path = self.dust_mask.auto_mask_path
+        if self.dust_mask.auto_mask_params_key != dust_auto_mask_params_key(
+            self.adjustments.dust_removal
+        ):
+            auto_mask_path = None
+        return (
+            load_dust_mask(
+                self.source_path,
+                auto_mask_path,
+                target_shape=target_shape,
+            ),
+            load_dust_mask(
+                self.source_path,
+                self.dust_mask.manual_add_mask_path,
+                target_shape=target_shape,
+            ),
+            load_dust_mask(
+                self.source_path,
+                self.dust_mask.manual_protect_mask_path,
+                target_shape=target_shape,
+            ),
+        )
 
     @staticmethod
     def _timed_progress_text(current: str, timings: dict[str, float]) -> str:

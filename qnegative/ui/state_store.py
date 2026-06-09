@@ -4,7 +4,13 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from qnegative.core.models import AdjustmentParams, ImageProcessingState, ImageRect, InvertMode
+from qnegative.core.models import (
+    AdjustmentParams,
+    DustMaskState,
+    ImageProcessingState,
+    ImageRect,
+    InvertMode,
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +28,7 @@ class RestoredImageRuntime:
     preview_flip_horizontal: bool
     preview_flip_vertical: bool
     preview_rotation_quarters: int
+    dust_mask: DustMaskState
     restored: bool
 
 
@@ -55,6 +62,7 @@ def restored_runtime_for_state(
             preview_flip_horizontal=False,
             preview_flip_vertical=False,
             preview_rotation_quarters=0,
+            dust_mask=DustMaskState(),
             restored=False,
         )
 
@@ -88,6 +96,7 @@ def restored_runtime_for_state(
         preview_flip_horizontal=state.preview_flip_horizontal,
         preview_flip_vertical=state.preview_flip_vertical,
         preview_rotation_quarters=state.preview_rotation_quarters % 4,
+        dust_mask=deepcopy(state.dust_mask),
         restored=True,
     )
 
@@ -124,6 +133,7 @@ def build_current_image_state(
     preview_flip_horizontal: bool,
     preview_flip_vertical: bool,
     preview_rotation_quarters: int,
+    dust_mask: DustMaskState | None = None,
 ) -> ImageProcessingState:
     return ImageProcessingState(
         mask_point=mask_point,
@@ -153,6 +163,7 @@ def build_current_image_state(
         preview_flip_horizontal=preview_flip_horizontal,
         preview_flip_vertical=preview_flip_vertical,
         preview_rotation_quarters=preview_rotation_quarters % 4,
+        dust_mask=deepcopy(dust_mask) if dust_mask is not None else DustMaskState(),
     )
 
 
@@ -236,6 +247,7 @@ def merge_stale_preview_result_state(
         preview_flip_horizontal=existing_state.preview_flip_horizontal if existing_state else False,
         preview_flip_vertical=existing_state.preview_flip_vertical if existing_state else False,
         preview_rotation_quarters=existing_state.preview_rotation_quarters if existing_state else 0,
+        dust_mask=deepcopy(existing_state.dust_mask) if existing_state else DustMaskState(),
     )
 
 
@@ -253,4 +265,5 @@ def state_from_preinvert_output(output: Any) -> ImageProcessingState:
         roll_color_frame=None,
         negative_preview_active=True,
         auto_levels_pending=False,
+        dust_mask=DustMaskState(),
     )

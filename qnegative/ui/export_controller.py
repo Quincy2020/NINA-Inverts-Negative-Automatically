@@ -29,7 +29,7 @@ from qnegative.ui.white_balance_controller import WhiteBalanceController
 
 def export_timing_is_top_level(name: str) -> bool:
     return (
-        name in {"RAW decode", "Build base", "Lab Print"}
+        name in {"RAW decode", "Build base", "Lab Print", "Orientation", "Dust removal"}
         or name.startswith("Prepare ")
         or name.endswith(" write")
     )
@@ -110,6 +110,8 @@ class ExportController:
             output_path = output_path.with_suffix(export_format_extension(export_format))
         window._default_export_dir = output_path.parent
         window._save_app_settings()
+        window._save_current_state()
+        current_state = window.image_states.get(window.current_path)
 
         self._export_cancel_event = Event()
         preview_log_floors, preview_log_ceils = self._current_preview_log_bounds_for_export()
@@ -130,6 +132,7 @@ class ExportController:
             preview_tone_mid_anchor=self._current_preview_tone_mid_anchor_for_export(),
             roll_color_result=window._roll_color_result,
             roll_color_frame=window._roll_color_frame_for_path(window.current_path),
+            dust_mask=deepcopy(current_state.dust_mask) if current_state is not None else None,
             cancel_event=self._export_cancel_event,
         )
         self._wire_task(task)
@@ -378,6 +381,7 @@ class ExportController:
                     "preview_tone_mid_anchor": self._preview_tone_mid_anchor_for_path(path, state),
                     "roll_color_result": window._roll_color_result,
                     "roll_color_frame": deepcopy(state.roll_color_frame),
+                    "dust_mask": deepcopy(state.dust_mask),
                 }
             )
         return items

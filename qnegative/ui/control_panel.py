@@ -5,6 +5,7 @@ from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFrame,
     QGroupBox,
@@ -21,7 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from qnegative.core.models import InvertMode, LensCorrectionParams, PrintCurveMode, ToolMode
+from qnegative.core.dust_model_registry import default_dust_model_plugin, dust_model_plugins
+from qnegative.core.models import DustRemovalParams, InvertMode, LensCorrectionParams, PrintCurveMode, ToolMode
 from qnegative.core.models import AdjustmentParams
 from qnegative.resources import resource_path
 from qnegative.ui.collapsible_section import CollapsibleSection
@@ -50,6 +52,7 @@ class ControlPanel(QWidget):
     lensApplyUnprocessedRequested = Signal()
     lensApplyCompletedRequested = Signal()
     rollColorAnalyzeRequested = Signal()
+    dustMaskEditorRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -133,6 +136,30 @@ class ControlPanel(QWidget):
         self.camera_color_panel = self._camera_color_developer_panel()
         self.white_balance_panel = WhiteBalancePanel()
         self.color_correction_panel = ColorCorrectionPanel()
+        default_dust_plugin = default_dust_model_plugin()
+        dust_plugins = dust_model_plugins()
+        if all(plugin.plugin_id != default_dust_plugin.plugin_id for plugin in dust_plugins):
+            dust_plugins.insert(0, default_dust_plugin)
+        self._dust_model_defaults = {plugin.plugin_id: plugin for plugin in dust_plugins}
+        self._dust_default_model_id = default_dust_plugin.plugin_id
+        self.dust_model_combo = QComboBox()
+        for plugin in dust_plugins:
+            self.dust_model_combo.addItem(plugin.name, plugin.plugin_id)
+        default_model_index = self.dust_model_combo.findData(self._dust_default_model_id)
+        if default_model_index >= 0:
+            self.dust_model_combo.setCurrentIndex(default_model_index)
+        self._style_combo_popup(self.dust_model_combo)
+        self.dust_enable_checkbox = QCheckBox("Enable Dust Removal")
+        self.dust_adaptive_checkbox = QCheckBox("Adaptive texture protection")
+        self.dust_adaptive_checkbox.setChecked(True)
+        self.dust_threshold_slider = self._make_slider(1, 99, default_dust_plugin.threshold)
+        self.dust_texture_penalty_slider = self._make_slider(0, 99, default_dust_plugin.texture_penalty)
+        self.dust_max_threshold_slider = self._make_slider(1, 99, default_dust_plugin.max_threshold)
+        self.dust_inpaint_radius_slider = self._make_slider(1, 16, default_dust_plugin.inpaint_radius)
+        self.dust_edit_mask_button = QPushButton("Edit Dust Mask")
+        self.dust_mask_status_label = QLabel("No dust mask preview")
+        self.dust_mask_status_label.setObjectName("mutedLabel")
+        self.dust_mask_status_label.setWordWrap(True)
 
         self._build_layout()
         self._connect()
@@ -175,6 +202,7 @@ class ControlPanel(QWidget):
         root.addWidget(self._color_correction_section())
         root.addWidget(self._white_balance_section())
         root.addWidget(self._lens_correction_section())
+        root.addWidget(self._dust_removal_section())
         root.addStretch(1)
         root.addWidget(self._output_section())
 
@@ -329,6 +357,26 @@ class ControlPanel(QWidget):
     def _color_correction_section(self) -> CollapsibleSection:
         return CollapsibleSection("Color Correction", self.color_correction_panel, expanded=False)
 
+    def _dust_removal_section(self) -> CollapsibleSection:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model"))
+        model_row.addWidget(self.dust_model_combo, 1)
+        layout.addLayout(model_row)
+        layout.addWidget(self.dust_enable_checkbox)
+        layout.addWidget(self.dust_adaptive_checkbox)
+        layout.addLayout(self._slider_row("Threshold", self.dust_threshold_slider, "1", "99"))
+        layout.addLayout(self._slider_row("Texture Guard", self.dust_texture_penalty_slider, "0", "99"))
+        layout.addLayout(self._slider_row("Max Threshold", self.dust_max_threshold_slider, "1", "99"))
+        layout.addLayout(self._slider_row("Inpaint Radius", self.dust_inpaint_radius_slider, "1", "16"))
+        layout.addWidget(self._divider())
+        layout.addWidget(self.dust_edit_mask_button)
+        layout.addWidget(self.dust_mask_status_label)
+        return CollapsibleSection("Dust Removal", panel, expanded=False)
+
     def _output_section(self) -> QGroupBox:
         group = self._section("Output")
         layout = QVBoxLayout(group)
@@ -416,6 +464,10 @@ class ControlPanel(QWidget):
             self.lens_smoothness_slider,
             self.lens_max_gain_slider,
             self.lens_flat_strength_slider,
+            self.dust_threshold_slider,
+            self.dust_texture_penalty_slider,
+            self.dust_max_threshold_slider,
+            self.dust_inpaint_radius_slider,
         ):
             slider.sliderPressed.connect(self.adjustmentInteractionStarted.emit)
             slider.sliderReleased.connect(self.adjustmentInteractionFinished.emit)
@@ -441,6 +493,10 @@ class ControlPanel(QWidget):
         self.color_correction_panel.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
         self.color_correction_panel.interactionFinished.connect(self.adjustmentInteractionFinished.emit)
         self.color_correction_panel.analyzeRequested.connect(self.rollColorAnalyzeRequested.emit)
+        self.dust_model_combo.currentIndexChanged.connect(self._dust_model_changed)
+        self.dust_enable_checkbox.toggled.connect(self._emit_adjustments)
+        self.dust_adaptive_checkbox.toggled.connect(self._emit_adjustments)
+        self.dust_edit_mask_button.clicked.connect(self.dustMaskEditorRequested.emit)
 
     def _make_tool_button(self, text: str, mode: ToolMode) -> QToolButton:
         button = QToolButton()
@@ -473,6 +529,35 @@ class ControlPanel(QWidget):
     def _current_lens_mode(self) -> str:
         return ("off", "radial", "flat_frame")[max(0, min(2, self.lens_tabs.currentIndex()))]
 
+    def _current_dust_model_id(self) -> str:
+        model_id = self.dust_model_combo.currentData()
+        return str(model_id or self._dust_default_model_id)
+
+    def _dust_model_changed(self, _index: int) -> None:
+        plugin = self._dust_model_defaults.get(self._current_dust_model_id())
+        if plugin is not None:
+            self._set_dust_defaults(plugin)
+        self._emit_adjustments()
+
+    def _set_dust_defaults(self, plugin) -> None:
+        sliders = (
+            self.dust_threshold_slider,
+            self.dust_texture_penalty_slider,
+            self.dust_max_threshold_slider,
+            self.dust_inpaint_radius_slider,
+        )
+        for slider in sliders:
+            slider.blockSignals(True)
+        try:
+            self.dust_threshold_slider.setValue(plugin.threshold)
+            self.dust_texture_penalty_slider.setValue(plugin.texture_penalty)
+            self.dust_max_threshold_slider.setValue(plugin.max_threshold)
+            self.dust_inpaint_radius_slider.setValue(plugin.inpaint_radius)
+            self._refresh_slider_value_labels()
+        finally:
+            for slider in sliders:
+                slider.blockSignals(False)
+
     def _update_lens_tabs_height(self) -> None:
         current = self.lens_tabs.currentWidget()
         if current is None:
@@ -504,6 +589,15 @@ class ControlPanel(QWidget):
                 max_gain=self.lens_max_gain_slider.value(),
                 flat_profile_path=self._flat_profile_path,
                 flat_strength=self.lens_flat_strength_slider.value(),
+            ),
+            "dust_removal": DustRemovalParams(
+                enabled=self.dust_enable_checkbox.isChecked(),
+                model_id=self._current_dust_model_id(),
+                threshold=self.dust_threshold_slider.value(),
+                adaptive=self.dust_adaptive_checkbox.isChecked(),
+                texture_penalty=self.dust_texture_penalty_slider.value(),
+                max_threshold=self.dust_max_threshold_slider.value(),
+                inpaint_radius=self.dust_inpaint_radius_slider.value(),
             ),
             "analysis_inset_percent": self.analysis_inset_spin.value(),
             "invert_mode": InvertMode.LAB_PRINT.value,
@@ -627,6 +721,7 @@ class ControlPanel(QWidget):
         self.export_button.setEnabled(loaded and not self.export_progress.isVisible())
         self.batch_export_button.setEnabled(loaded and not self.export_progress.isVisible())
         self.auto_frame_button.setEnabled(loaded)
+        self.dust_edit_mask_button.setEnabled(loaded)
 
     def auto_format(self) -> str:
         data = self.auto_format_combo.currentData()
@@ -681,6 +776,9 @@ class ControlPanel(QWidget):
     def set_roll_color_analyzing(self, analyzing: bool) -> None:
         self.color_correction_panel.set_analyzing(analyzing)
 
+    def set_dust_mask_status(self, text: str) -> None:
+        self.dust_mask_status_label.setText(text)
+
     def set_activity_progress(self, active: bool, *, text: str = "Working...") -> None:
         self.activity_progress.setVisible(active)
         if active:
@@ -707,6 +805,13 @@ class ControlPanel(QWidget):
             self.lens_smoothness_slider,
             self.lens_max_gain_slider,
             self.lens_flat_strength_slider,
+            self.dust_model_combo,
+            self.dust_enable_checkbox,
+            self.dust_adaptive_checkbox,
+            self.dust_threshold_slider,
+            self.dust_texture_penalty_slider,
+            self.dust_max_threshold_slider,
+            self.dust_inpaint_radius_slider,
             self.analysis_inset_spin,
             self.histogram_levels,
             self.white_balance_panel,
@@ -744,6 +849,17 @@ class ControlPanel(QWidget):
             self.lens_flat_strength_row.setVisible(
                 lens_mode == "flat_frame" and bool(self._flat_profile_path)
             )
+            dust_model_id = adjustments.dust_removal.model_id or self._dust_default_model_id
+            dust_model_index = self.dust_model_combo.findData(dust_model_id)
+            if dust_model_index < 0:
+                dust_model_index = self.dust_model_combo.findData(self._dust_default_model_id)
+            self.dust_model_combo.setCurrentIndex(max(0, dust_model_index))
+            self.dust_enable_checkbox.setChecked(adjustments.dust_removal.enabled)
+            self.dust_adaptive_checkbox.setChecked(adjustments.dust_removal.adaptive)
+            self.dust_threshold_slider.setValue(adjustments.dust_removal.threshold)
+            self.dust_texture_penalty_slider.setValue(adjustments.dust_removal.texture_penalty)
+            self.dust_max_threshold_slider.setValue(adjustments.dust_removal.max_threshold)
+            self.dust_inpaint_radius_slider.setValue(adjustments.dust_removal.inpaint_radius)
             self.analysis_inset_spin.setValue(adjustments.analysis_inset_percent)
             curve_index = self.print_curve_combo.findData(adjustments.print_curve)
             self.print_curve_combo.setCurrentIndex(2 if curve_index < 0 else curve_index)

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "lint_ice_stage2",
+  "name": "Lint + ICE Stage2",
+  "type": "dust-mask-unet",
+  "model_path": "best.pth",
+  "defaults": {
+    "threshold": 20,
+    "texture_penalty": 10,
+    "max_threshold": 75,
+    "inpaint_radius": 3
+  },
+  "notes": "Default safe model. Low false positives, good for small lint and dust; weaker on very large long lint."
+}

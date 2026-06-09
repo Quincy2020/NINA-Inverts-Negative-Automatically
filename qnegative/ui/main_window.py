@@ -26,6 +26,14 @@ from PySide6.QtWidgets import (
 )
 
 from qnegative.core.file_sequence import RAW_EXTENSIONS
+from qnegative.core.dust_masks import (
+    dust_auto_mask_params_key,
+    dust_mask_paths_for_source,
+    load_dust_mask,
+    resize_mask,
+    save_dust_mask,
+    stored_mask_path,
+)
 from qnegative.core.lens_profiles import (
     create_flat_frame_profile,
     default_lens_profile_dir,
@@ -38,6 +46,7 @@ from qnegative.core.auto_detect import (
 )
 from qnegative.core.models import (
     AdjustmentParams,
+    DustMaskState,
     ImagePoint,
     ImageProcessingState,
     ImageRect,
@@ -59,6 +68,7 @@ from qnegative.core.preview import DEFAULT_PREVIEW_MAX_EDGE, RawPreview
 from qnegative.core.roll_color_analysis_adapter import roll_color_result_summary
 from qnegative.ui.control_panel import ControlPanel
 from qnegative.ui.app_settings_controller import AppSettingsController
+from qnegative.ui.dust_mask_editor import DustMaskEditorDialog
 from qnegative.ui.export_controller import ExportController
 from qnegative.ui.export_dialogs import BatchExportDialog
 from qnegative.ui.frame_automation_controller import FrameAutomationController
@@ -170,9 +180,20 @@ class MainWindow(QMainWindow):
         self._settings_controller.apply_to_window(self)
         self._raw_preview_job_id = 0
         self._raw_preview_in_progress = False
+        self._auto_detect_tasks: dict[int, AutoDetectTask] = {}
         self._roll_color_result: dict | None = None
         self._roll_color_analysis_job_id = 0
         self._roll_color_analysis_in_progress = False
+        self._dust_manual_add_mask: np.ndarray | None = None
+        self._dust_manual_protect_mask: np.ndarray | None = None
+        self._dust_auto_preview_mask: np.ndarray | None = None
+        self._dust_auto_mask_params_key: str | None = None
+        self._dust_auto_preview_stats: dict | None = None
+        self._dust_mask_size: ImageSize | None = None
+        self._dust_manual_mask_dirty = False
+        self._dust_preview_mask_job_id = 0
+        self._dust_preview_mask_in_progress = False
+        self._dust_mask_editor_dialog: DustMaskEditorDialog | None = None
         self._undo_stack: list[AdjustmentParams] = []
         self._redo_stack: list[AdjustmentParams] = []
         self._applying_history = False
@@ -297,6 +318,7 @@ class MainWindow(QMainWindow):
             lambda: self.apply_lens_correction("completed")
         )
         self.control_panel.rollColorAnalyzeRequested.connect(self.analyze_roll_color)
+        self.control_panel.dustMaskEditorRequested.connect(self.open_dust_mask_editor)
         self.open_empty_button.clicked.connect(self.open_folder)
 
         self.origin_view.maskPointSelected.connect(self.mask_point_selected)
@@ -706,6 +728,7 @@ class MainWindow(QMainWindow):
             self.filmstrip.set_current(path)
             return
 
+        self._close_dust_mask_editor()
         if self.current_path is not None and self.current_path != path:
             self._save_current_state()
             self._start_pending_preview_before_switch()
@@ -728,8 +751,12 @@ class MainWindow(QMainWindow):
         self.auto_levels_pending = True
         self.white_balance.clear_point()
         self._clear_lab_print_cmy_offsets()
+        self.last_negative_result = None
         self._last_untransformed_negative_result = None
         self._reset_preview_transform()
+        self._dust_preview_mask_job_id += 1
+        self._dust_preview_mask_in_progress = False
+        self._reset_dust_runtime()
         self._invalidate_negative_base_cache()
         extension = path.suffix.lower()
         self.control_panel.set_file_status(path.name)
@@ -871,6 +898,7 @@ class MainWindow(QMainWindow):
         self.white_balance.clear_point_and_cmy()
         self.auto_levels_pending = True
         self._invalidate_negative_base_cache()
+        self._reset_dust_masks_for_geometry_change()
         self.control_panel.set_film_status(f"Frame: {rect.label()}")
         self.statusBar().showMessage("Frame area saved")
         self._schedule_preview_if_ready()
@@ -882,6 +910,7 @@ class MainWindow(QMainWindow):
         self.negative_preview_active = False
         self._last_untransformed_negative_result = None
         self._invalidate_negative_base_cache()
+        self._reset_dust_masks_for_geometry_change()
         self.control_panel.set_film_status("Not selected")
         self.preview_view.set_placeholder("Positive preview waiting")
         self.statusBar().showMessage("Frame reset")
@@ -925,6 +954,243 @@ class MainWindow(QMainWindow):
         self.control_panel.set_adjustments(updated, emit=True)
         self.preview_view.set_tool_mode(ToolMode.PAN)
         self.statusBar().showMessage(pick_result.status_text())
+
+    def open_dust_mask_editor(self) -> None:
+        if not self.negative_preview_active or self.last_negative_result is None:
+            QMessageBox.information(self, "Dust Mask Editor", "Generate a positive preview before editing dust masks.")
+            return
+        if self._dust_mask_editor_dialog is not None:
+            self._dust_mask_editor_dialog.raise_()
+            self._dust_mask_editor_dialog.activateWindow()
+            return
+
+        dialog = DustMaskEditorDialog(
+            source_path=self.current_path,
+            image_rgb8=self.last_negative_result.display_rgb8,
+            linear_rgb=self.last_negative_result.processed_linear_rgb,
+            params=self.adjustments.dust_removal,
+            auto_mask=self._dust_auto_preview_mask,
+            add_mask=self._dust_manual_add_mask,
+            protect_mask=self._dust_manual_protect_mask,
+            auto_mask_params_key=self._dust_auto_mask_params_key,
+            thread_pool=self._thread_pool,
+            params_provider=lambda: deepcopy(self.adjustments.dust_removal),
+            parent=self,
+        )
+        self._dust_mask_editor_dialog = dialog
+        dialog.accepted.connect(lambda d=dialog: self._dust_mask_editor_accepted(d))
+        dialog.rejected.connect(lambda d=dialog: self._dust_mask_editor_closed(d))
+        dialog.destroyed.connect(lambda _obj=None, d=dialog: self._dust_mask_editor_destroyed(d))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self.statusBar().showMessage("Dust mask editor opened")
+
+    def _dust_mask_editor_accepted(self, dialog: DustMaskEditorDialog) -> None:
+        if dialog is not self._dust_mask_editor_dialog:
+            return
+        self._dust_manual_add_mask = dialog.add_mask
+        self._dust_manual_protect_mask = dialog.protect_mask
+        self._dust_auto_preview_mask = dialog.auto_mask
+        self._dust_auto_mask_params_key = (
+            dialog.auto_mask_params_key if self._dust_auto_preview_mask is not None else None
+        )
+        self._dust_auto_preview_stats = None
+        self._dust_mask_size = ImageSize(
+            width=self._dust_manual_add_mask.shape[1],
+            height=self._dust_manual_add_mask.shape[0],
+        )
+        self._dust_manual_mask_dirty = True
+        self._sync_dust_overlay()
+        self._schedule_roll_session_save()
+        self.statusBar().showMessage("Dust mask updated")
+        self._dust_mask_editor_dialog = None
+        dialog.deleteLater()
+
+    def _dust_mask_editor_closed(self, dialog: DustMaskEditorDialog) -> None:
+        if dialog is not self._dust_mask_editor_dialog:
+            return
+        self._dust_mask_editor_dialog = None
+        self.statusBar().showMessage("Dust mask editor closed")
+        dialog.deleteLater()
+
+    def _dust_mask_editor_destroyed(self, dialog: DustMaskEditorDialog) -> None:
+        if dialog is self._dust_mask_editor_dialog:
+            self._dust_mask_editor_dialog = None
+
+    def _close_dust_mask_editor(self) -> None:
+        if self._dust_mask_editor_dialog is not None:
+            self._dust_mask_editor_dialog.reject()
+
+    def _current_dust_preview_size(self) -> ImageSize | None:
+        if self.last_negative_result is None:
+            return None
+        return ImageSize(width=self.last_negative_result.width, height=self.last_negative_result.height)
+
+    def _ensure_dust_mask_buffers(self, size: ImageSize) -> None:
+        target_shape = (size.height, size.width)
+        add = resize_mask(self._dust_manual_add_mask, target_shape)
+        protect = resize_mask(self._dust_manual_protect_mask, target_shape)
+        self._dust_manual_add_mask = (
+            add if add is not None else np.zeros(target_shape, dtype=bool)
+        )
+        self._dust_manual_protect_mask = (
+            protect if protect is not None else np.zeros(target_shape, dtype=bool)
+        )
+        self._dust_auto_preview_mask = resize_mask(self._dust_auto_preview_mask, target_shape)
+        self._dust_mask_size = size
+
+    def _sync_dust_overlay(self) -> None:
+        size = self._current_dust_preview_size()
+        if size is None:
+            self.preview_view.clear_dust_overlay()
+            self.control_panel.set_dust_mask_status("No dust mask preview")
+            return
+
+        self._ensure_dust_mask_buffers(size)
+        self.preview_view.set_dust_overlay(
+            auto_mask=self._dust_auto_preview_mask,
+            add_mask=self._dust_manual_add_mask,
+            protect_mask=self._dust_manual_protect_mask,
+        )
+        self.control_panel.set_dust_mask_status(self._dust_mask_status_text())
+
+    def _dust_mask_status_text(self) -> str:
+        auto_area = (
+            float(np.mean(self._dust_auto_preview_mask > 0))
+            if self._dust_auto_preview_mask is not None
+            else 0.0
+        )
+        add_area = (
+            float(np.mean(self._dust_manual_add_mask > 0))
+            if self._dust_manual_add_mask is not None
+            else 0.0
+        )
+        protect_area = (
+            float(np.mean(self._dust_manual_protect_mask > 0))
+            if self._dust_manual_protect_mask is not None
+            else 0.0
+        )
+        return (
+            f"Auto {auto_area * 100.0:.3f}% / "
+            f"Add {add_area * 100.0:.3f}% / "
+            f"Protect {protect_area * 100.0:.3f}%"
+        )
+
+    def _load_dust_masks_from_state(self, path: Path, state: ImageProcessingState | None) -> None:
+        self._dust_manual_add_mask = None
+        self._dust_manual_protect_mask = None
+        self._dust_auto_preview_mask = None
+        self._dust_auto_mask_params_key = None
+        self._dust_auto_preview_stats = None
+        self._dust_manual_mask_dirty = False
+        self._dust_mask_size = None
+        if state is None:
+            self._sync_dust_overlay()
+            return
+
+        mask_state = state.dust_mask
+        auto_mask_params_key = mask_state.auto_mask_params_key
+        if auto_mask_params_key == dust_auto_mask_params_key(self.adjustments.dust_removal):
+            self._dust_auto_preview_mask = load_dust_mask(path, mask_state.auto_mask_path)
+            self._dust_auto_mask_params_key = (
+                auto_mask_params_key
+                if self._dust_auto_preview_mask is not None
+                else None
+            )
+        self._dust_manual_add_mask = load_dust_mask(path, mask_state.manual_add_mask_path)
+        self._dust_manual_protect_mask = load_dust_mask(path, mask_state.manual_protect_mask_path)
+        if mask_state.mask_width > 0 and mask_state.mask_height > 0:
+            self._dust_mask_size = ImageSize(width=mask_state.mask_width, height=mask_state.mask_height)
+        elif self._dust_auto_preview_mask is not None:
+            self._dust_mask_size = ImageSize(
+                width=self._dust_auto_preview_mask.shape[1],
+                height=self._dust_auto_preview_mask.shape[0],
+            )
+        elif self._dust_manual_add_mask is not None:
+            self._dust_mask_size = ImageSize(
+                width=self._dust_manual_add_mask.shape[1],
+                height=self._dust_manual_add_mask.shape[0],
+            )
+        elif self._dust_manual_protect_mask is not None:
+            self._dust_mask_size = ImageSize(
+                width=self._dust_manual_protect_mask.shape[1],
+                height=self._dust_manual_protect_mask.shape[0],
+            )
+        self._sync_dust_overlay()
+
+    def _current_dust_mask_state(self) -> DustMaskState:
+        if self.current_path is None:
+            return DustMaskState()
+        auto_path, add_path, protect_path = dust_mask_paths_for_source(self.current_path)
+        auto_saved = save_dust_mask(auto_path, self._dust_auto_preview_mask)
+        add_saved = save_dust_mask(add_path, self._dust_manual_add_mask)
+        protect_saved = save_dust_mask(protect_path, self._dust_manual_protect_mask)
+        self._dust_manual_mask_dirty = False
+        size = self._dust_mask_size or self._current_dust_preview_size()
+        any_saved = auto_saved or add_saved or protect_saved
+        return DustMaskState(
+            manual_add_mask_path=stored_mask_path(self.current_path, add_path) if add_saved else None,
+            manual_protect_mask_path=stored_mask_path(self.current_path, protect_path) if protect_saved else None,
+            mask_width=size.width if any_saved and size is not None else 0,
+            mask_height=size.height if any_saved and size is not None else 0,
+            auto_mask_path=stored_mask_path(self.current_path, auto_path) if auto_saved else None,
+            auto_mask_params_key=self._dust_auto_mask_params_key if auto_saved else None,
+        )
+
+    def _reset_dust_runtime(self) -> None:
+        self._dust_manual_add_mask = None
+        self._dust_manual_protect_mask = None
+        self._dust_auto_preview_mask = None
+        self._dust_auto_mask_params_key = None
+        self._dust_auto_preview_stats = None
+        self._dust_mask_size = None
+        self._dust_manual_mask_dirty = False
+        self.preview_view.clear_dust_overlay()
+        self.control_panel.set_dust_mask_status("No dust mask preview")
+
+    def _reset_dust_masks_for_geometry_change(self) -> None:
+        self._close_dust_mask_editor()
+        self._dust_manual_add_mask = None
+        self._dust_manual_protect_mask = None
+        self._dust_auto_preview_mask = None
+        self._dust_auto_mask_params_key = None
+        self._dust_auto_preview_stats = None
+        self._dust_mask_size = None
+        self._dust_manual_mask_dirty = True
+        self.preview_view.clear_dust_overlay()
+        self.control_panel.set_dust_mask_status("No dust mask preview")
+        self._schedule_roll_session_save()
+
+    def _transform_dust_masks(self, transform: str) -> None:
+        arrays = [
+            "_dust_manual_add_mask",
+            "_dust_manual_protect_mask",
+            "_dust_auto_preview_mask",
+        ]
+        for name in arrays:
+            mask = getattr(self, name)
+            if mask is None:
+                continue
+            if transform == "flip_h":
+                updated = np.fliplr(mask)
+            elif transform == "flip_v":
+                updated = np.flipud(mask)
+            elif transform == "rotate_cw":
+                updated = np.rot90(mask, k=-1)
+            elif transform == "rotate_ccw":
+                updated = np.rot90(mask, k=1)
+            else:
+                continue
+            setattr(self, name, np.ascontiguousarray(updated))
+        if self._dust_mask_size is not None and transform in {"rotate_cw", "rotate_ccw"}:
+            self._dust_mask_size = ImageSize(
+                width=self._dust_mask_size.height,
+                height=self._dust_mask_size.width,
+            )
+        if any(getattr(self, name) is not None for name in arrays):
+            self._dust_manual_mask_dirty = True
+            self._schedule_roll_session_save()
 
     def _current_normalized_for_print(self) -> np.ndarray:
         if self._last_untransformed_negative_result is None:
@@ -997,6 +1263,7 @@ class MainWindow(QMainWindow):
         )
         task.signals.finished.connect(self._auto_detect_finished)
         task.signals.failed.connect(self._auto_detect_failed)
+        self._auto_detect_tasks[job.job_id] = task
         self._refresh_activity_progress()
         self.statusBar().showMessage(
             "Auto frame running in background..."
@@ -1006,6 +1273,7 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(task)
 
     def _auto_detect_finished(self, job_id: int, output: AutoDetectOutput) -> None:
+        self._auto_detect_tasks.pop(job_id, None)
         completion = self._frame_automation.finish_auto_detect(job_id)
         if not completion.is_current:
             return
@@ -1017,6 +1285,7 @@ class MainWindow(QMainWindow):
         self._apply_auto_detect_output(output)
 
     def _auto_detect_failed(self, job_id: int, message: str) -> None:
+        self._auto_detect_tasks.pop(job_id, None)
         completion = self._frame_automation.finish_auto_detect(job_id)
         if not completion.is_current:
             return
@@ -1135,6 +1404,10 @@ class MainWindow(QMainWindow):
         previous = self.adjustments
         values["invert_mode"] = InvertMode.LAB_PRINT.value
         self.adjustments = AdjustmentParams(**values)
+        preview_adjustments_changed = (
+            self._adjustments_preview_cache_key(previous)
+            != self._adjustments_preview_cache_key(self.adjustments)
+        )
         if not self._applying_history and previous != self.adjustments:
             self._undo_stack.append(deepcopy(previous))
             if len(self._undo_stack) > 80:
@@ -1181,11 +1454,29 @@ class MainWindow(QMainWindow):
                 self.analysis_inset_menu_spin.blockSignals(False)
         if previous.analysis_inset_percent != self.adjustments.analysis_inset_percent:
             self._save_app_settings()
+        if previous.dust_removal != self.adjustments.dust_removal:
+            current_dust_key = dust_auto_mask_params_key(self.adjustments.dust_removal)
+            if (
+                self._dust_auto_preview_mask is not None
+                and self._dust_auto_mask_params_key != current_dust_key
+            ):
+                self._dust_auto_preview_mask = None
+                self._dust_auto_mask_params_key = None
+                self._dust_auto_preview_stats = None
+                self._sync_dust_overlay()
+            if self._dust_mask_editor_dialog is not None:
+                self._dust_mask_editor_dialog.refresh_synced_params_status()
+        if preview_adjustments_changed:
+            self._close_dust_mask_editor()
+            self._dust_auto_preview_mask = None
+            self._dust_auto_mask_params_key = None
+            self._dust_auto_preview_stats = None
+            self._sync_dust_overlay()
         self._update_preview_status_overlay()
         if self._apply_gpu_display_adjustment(previous):
             self._schedule_roll_session_save()
             return
-        if self.negative_preview_active:
+        if self.negative_preview_active and preview_adjustments_changed:
             if self._render_controller.in_progress:
                 self._render_controller.defer(self.current_path, show_errors=False)
             self.preview_refresh_timer.setInterval(
@@ -1453,6 +1744,7 @@ class MainWindow(QMainWindow):
             film_rect=None,
             white_balance_point=self.white_balance.point,
         )
+        self._sync_dust_overlay()
         self.origin_view.restore_selections(
             mask_point=self.mask_point,
             film_rect=self.film_rect,
@@ -1483,24 +1775,29 @@ class MainWindow(QMainWindow):
 
     def flip_preview_horizontal(self) -> None:
         self._preview_flip_horizontal = not self._preview_flip_horizontal
+        self._transform_dust_masks("flip_h")
         self._refresh_preview_transform("Preview flipped horizontally")
 
     def flip_preview_vertical(self) -> None:
         self._preview_flip_vertical = not self._preview_flip_vertical
+        self._transform_dust_masks("flip_v")
         self._refresh_preview_transform("Preview flipped vertically")
 
     def rotate_preview_clockwise(self) -> None:
         self._preview_rotation_quarters = (self._preview_rotation_quarters + 1) % 4
+        self._transform_dust_masks("rotate_cw")
         self._refresh_preview_transform("Preview rotated 90 degrees")
 
     def rotate_preview_counterclockwise(self) -> None:
         self._preview_rotation_quarters = (self._preview_rotation_quarters - 1) % 4
+        self._transform_dust_masks("rotate_ccw")
         self._refresh_preview_transform("Preview rotated -90 degrees")
 
     def _refresh_preview_transform(self, status: str) -> None:
         if self._last_untransformed_negative_result is None:
             self.statusBar().showMessage("Generate a positive preview first")
             return
+        self._close_dust_mask_editor()
         self._update_preview_from_result(self._last_untransformed_negative_result)
         self.statusBar().showMessage(status)
 
@@ -1699,6 +1996,7 @@ class MainWindow(QMainWindow):
         return base
 
     def _invalidate_negative_base_cache(self) -> None:
+        self._close_dust_mask_editor()
         self._negative_base_cache = None
         self._negative_base_cache_key = None
         self._reset_preview_stage_caches()
@@ -1790,6 +2088,7 @@ class MainWindow(QMainWindow):
         return remaining[0]
 
     def reset_workspace(self) -> None:
+        self._close_dust_mask_editor()
         self._cancel_preview_render()
         self._cancel_raw_preview()
         self._cancel_auto_detect()
@@ -1802,6 +2101,8 @@ class MainWindow(QMainWindow):
         self.film_rect = None
         self.white_balance.clear_point_and_cmy()
         self._reset_preview_transform()
+        self._reset_dust_runtime()
+        self.last_negative_result = None
         self._last_untransformed_negative_result = None
         self._invalidate_negative_base_cache()
         self.control_panel.set_mask_status("Not selected")
@@ -1821,6 +2122,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_auto_detect(self) -> None:
         self._frame_automation.cancel_auto_detect()
+        self._auto_detect_tasks.clear()
         self._refresh_activity_progress()
 
     def _refresh_activity_progress(self) -> None:
@@ -1832,6 +2134,8 @@ class MainWindow(QMainWindow):
             self.control_panel.set_activity_progress(True, text="Pre-inverting nearby frames...")
         elif self._roll_color_analysis_in_progress:
             self.control_panel.set_activity_progress(True, text="Analyzing roll color...")
+        elif self._dust_preview_mask_in_progress:
+            self.control_panel.set_activity_progress(True, text="Generating dust mask...")
         elif self._frame_automation.model_warmup_in_progress:
             self.control_panel.set_activity_progress(True, text="Loading frame model...")
         else:
@@ -1899,6 +2203,7 @@ class MainWindow(QMainWindow):
             preview_flip_horizontal=self._preview_flip_horizontal,
             preview_flip_vertical=self._preview_flip_vertical,
             preview_rotation_quarters=self._preview_rotation_quarters,
+            dust_mask=self._current_dust_mask_state(),
         )
         self._autosave_roll_session()
 
@@ -1936,6 +2241,7 @@ class MainWindow(QMainWindow):
         self._preview_flip_horizontal = restored.preview_flip_horizontal
         self._preview_flip_vertical = restored.preview_flip_vertical
         self._preview_rotation_quarters = restored.preview_rotation_quarters
+        self._load_dust_masks_from_state(path, state if restored.restored else None)
 
         if not restored.restored:
             self._reset_preview_transform()
@@ -2154,6 +2460,7 @@ class MainWindow(QMainWindow):
         self.go_next_file()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._close_dust_mask_editor()
         self.preview_refresh_timer.stop()
         self.roll_session_save_timer.stop()
         self._cancel_preview_render()
