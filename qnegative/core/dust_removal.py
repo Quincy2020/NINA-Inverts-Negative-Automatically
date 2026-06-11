@@ -314,11 +314,40 @@ def cleanup_mask(mask: np.ndarray, *, dilate: bool = True) -> np.ndarray:
     return clean.astype(bool)
 
 
-def inpaint_srgb(srgb_rgb: np.ndarray, mask: np.ndarray, *, radius: int) -> np.ndarray:
+def inpaint_srgb(
+    srgb_rgb: np.ndarray,
+    mask: np.ndarray,
+    *,
+    radius: int,
+    feather_radius: int | None = None,
+) -> np.ndarray:
     srgb8 = np.clip(srgb_rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
     mask8 = (mask.astype(np.uint8) * 255)
+    feather = max(0, int(feather_radius if feather_radius is not None else min(3, max(1, radius // 2))))
+    mask_bool = mask.astype(bool)
+    repair_mask_bool = mask_bool
+    if feather > 0 and np.any(mask_bool):
+        kernel_size = feather * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        repair_mask_bool = cv2.dilate(mask_bool.astype(np.uint8), kernel, iterations=1).astype(bool)
+        mask8 = repair_mask_bool.astype(np.uint8) * 255
+
     repaired = cv2.inpaint(srgb8, mask8, float(radius), cv2.INPAINT_TELEA)
-    return repaired.astype(np.float32) / 255.0
+    repaired_float = repaired.astype(np.float32) / 255.0
+
+    if feather <= 0 or not np.any(mask):
+        return repaired_float
+
+    outside_distance = cv2.distanceTransform((~mask_bool).astype(np.uint8), cv2.DIST_L2, 3)
+    alpha = np.zeros(mask_bool.shape, dtype=np.float32)
+    alpha[mask_bool] = 1.0
+    blend_ring = repair_mask_bool & ~mask_bool
+    alpha[blend_ring] = np.clip(1.0 - outside_distance[blend_ring] / float(feather + 1), 0.0, 1.0)
+    alpha = cv2.GaussianBlur(alpha, (0, 0), sigmaX=max(0.5, feather * 0.5))
+    alpha[mask_bool] = 1.0
+    alpha[~repair_mask_bool] = 0.0
+    alpha = np.clip(alpha, 0.0, 1.0)[..., None]
+    return srgb_rgb * (1.0 - alpha) + repaired_float * alpha
 
 
 def linear_to_srgb_float(linear_rgb: np.ndarray) -> np.ndarray:

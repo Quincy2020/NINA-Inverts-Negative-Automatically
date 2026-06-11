@@ -9,8 +9,9 @@ from time import perf_counter
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from qnegative.core.dust_masks import compose_dust_masks
 from qnegative.core.dust_masks import dust_auto_mask_params_key, load_dust_mask
-from qnegative.core.dust_removal import apply_dust_removal_to_linear_rgb
+from qnegative.core.dust_removal import inpaint_srgb, linear_to_srgb_float, srgb_to_linear_float
 from qnegative.core.models import AdjustmentParams, DustMaskState, ImagePoint, ImageRect
 from qnegative.core.pipeline import (
     LabPrintBasePreview,
@@ -152,14 +153,13 @@ class ImageExportTask(QRunnable):
             if self.adjustments.dust_removal.enabled:
                 self.signals.progress.emit(72, self._timed_progress_text("Removing dust", timings))
                 stage_start = perf_counter()
-                auto_mask, manual_add, manual_protect = self._load_dust_masks(linear_rgb.shape[:2])
-                linear_rgb, dust_stats = apply_dust_removal_to_linear_rgb(
+                auto_mask, manual_add, manual_protect, auto_mask_status = self._load_dust_masks(linear_rgb.shape[:2])
+                linear_rgb, dust_stats = self._apply_dust_removal(
                     linear_rgb,
-                    self.adjustments.dust_removal,
-                    model_root=Path.cwd(),
                     auto_mask=auto_mask,
                     manual_add_mask=manual_add,
                     manual_protect_mask=manual_protect,
+                    auto_mask_status=auto_mask_status,
                 )
                 timings["Dust removal"] = perf_counter() - stage_start
                 for key, value in dust_stats.items():
@@ -192,18 +192,28 @@ class ImageExportTask(QRunnable):
     def _load_dust_masks(
         self,
         target_shape: tuple[int, int],
-    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, str]:
         auto_mask_path = self.dust_mask.auto_mask_path
-        if self.dust_mask.auto_mask_params_key != dust_auto_mask_params_key(
+        expected_key = dust_auto_mask_params_key(
             self.adjustments.dust_removal
-        ):
-            auto_mask_path = None
-        return (
-            load_dust_mask(
+        )
+        auto_key_matches = self.dust_mask.auto_mask_params_key == expected_key
+        if auto_key_matches and auto_mask_path is None:
+            auto_mask = np.zeros(target_shape, dtype=bool)
+            auto_mask_status = "empty_reused"
+        elif auto_key_matches:
+            loaded = load_dust_mask(
                 self.source_path,
                 auto_mask_path,
                 target_shape=target_shape,
-            ),
+            )
+            auto_mask = loaded if loaded is not None else np.zeros(target_shape, dtype=bool)
+            auto_mask_status = "reused" if loaded is not None else "missing_reused_empty"
+        else:
+            auto_mask = np.zeros(target_shape, dtype=bool)
+            auto_mask_status = "skipped_param_mismatch"
+        return (
+            auto_mask,
             load_dust_mask(
                 self.source_path,
                 self.dust_mask.manual_add_mask_path,
@@ -214,7 +224,55 @@ class ImageExportTask(QRunnable):
                 self.dust_mask.manual_protect_mask_path,
                 target_shape=target_shape,
             ),
+            auto_mask_status,
         )
+
+    def _apply_dust_removal(
+        self,
+        linear_rgb: np.ndarray,
+        *,
+        auto_mask: np.ndarray | None,
+        manual_add_mask: np.ndarray | None,
+        manual_protect_mask: np.ndarray | None,
+        auto_mask_status: str,
+    ) -> tuple[np.ndarray, dict[str, float]]:
+        srgb = linear_to_srgb_float(linear_rgb)
+        mask = auto_mask if auto_mask is not None else np.zeros(srgb.shape[:2], dtype=bool)
+        stats = {
+            "dust_auto_mask_reused": 1.0 if auto_mask_status in {"reused", "empty_reused"} else 0.0,
+            "dust_auto_mask_skipped": 1.0 if auto_mask_status.startswith("skipped") else 0.0,
+            "dust_auto_mask_missing": 1.0 if auto_mask_status.startswith("missing") else 0.0,
+        }
+        final_mask = compose_dust_masks(
+            mask,
+            manual_add_mask,
+            manual_protect_mask,
+            target_shape=srgb.shape[:2],
+        )
+        stats["dust_auto_mask_area"] = float(np.mean(mask > 0))
+        stats["dust_manual_add_area"] = (
+            float(np.mean(manual_add_mask > 0))
+            if manual_add_mask is not None and manual_add_mask.size
+            else 0.0
+        )
+        stats["dust_manual_protect_area"] = (
+            float(np.mean(manual_protect_mask > 0))
+            if manual_protect_mask is not None and manual_protect_mask.size
+            else 0.0
+        )
+        stats["dust_mask_area"] = float(np.mean(final_mask > 0))
+        stats["dust_final_mask_area"] = stats["dust_mask_area"]
+        if not np.any(final_mask):
+            stats["inpaint_area"] = 0.0
+            return linear_rgb, stats
+
+        repaired = inpaint_srgb(
+            srgb,
+            final_mask,
+            radius=max(1, int(self.adjustments.dust_removal.inpaint_radius)),
+        )
+        stats["inpaint_area"] = float(np.mean(final_mask > 0))
+        return srgb_to_linear_float(repaired).astype(np.float32, copy=False), stats
 
     @staticmethod
     def _timed_progress_text(current: str, timings: dict[str, float]) -> str:

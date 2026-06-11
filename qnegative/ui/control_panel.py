@@ -88,14 +88,10 @@ class ControlPanel(QWidget):
         self.invert_button.setEnabled(False)
         self.reset_button = QPushButton("Reset")
         self.print_curve_combo = QComboBox()
-        self.print_curve_combo.addItem("Linear", PrintCurveMode.LINEAR.value)
-        self.print_curve_combo.addItem("Filmic Hable", PrintCurveMode.FILMIC_HABLE.value)
-        self.print_curve_combo.addItem("Filmic ACES", PrintCurveMode.FILMIC_ACES.value)
         self.print_curve_combo.addItem("Soft Print", PrintCurveMode.SOFT.value)
         self.print_curve_combo.addItem("Standard Print", PrintCurveMode.STANDARD.value)
         self.print_curve_combo.addItem("Contrast Print", PrintCurveMode.CONTRAST.value)
-        self.print_curve_combo.addItem("Contrast Shoulder", PrintCurveMode.CONTRAST_SHOULDER.value)
-        self.print_curve_combo.setCurrentIndex(4)
+        self.print_curve_combo.setCurrentIndex(1)
         self.print_curve_widget = PrintCurveWidget()
         self.tone_curve_widget = ToneCurveWidget()
         self._tone_mid_anchor = 0.46
@@ -926,7 +922,12 @@ class ControlPanel(QWidget):
             self.dust_max_threshold_slider.setValue(adjustments.dust_removal.max_threshold)
             self.dust_inpaint_radius_slider.setValue(adjustments.dust_removal.inpaint_radius)
             self.analysis_inset_spin.setValue(adjustments.analysis_inset_percent)
-            curve_index = self.print_curve_combo.findData(adjustments.print_curve)
+            curve_value = (
+                PrintCurveMode.CONTRAST.value
+                if adjustments.print_curve == PrintCurveMode.CONTRAST_SHOULDER.value
+                else adjustments.print_curve
+            )
+            curve_index = self.print_curve_combo.findData(curve_value)
             standard_index = self.print_curve_combo.findData(PrintCurveMode.STANDARD.value)
             self.print_curve_combo.setCurrentIndex(standard_index if curve_index < 0 else curve_index)
             self.print_curve_widget.set_curve_mode(self.print_curve_combo.currentData())

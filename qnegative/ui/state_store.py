@@ -44,8 +44,6 @@ def lab_print_adjustments(adjustments: AdjustmentParams) -> AdjustmentParams:
 
 def restored_runtime_for_state(
     state: ImageProcessingState | None,
-    *,
-    fallback_adjustments: AdjustmentParams,
 ) -> RestoredImageRuntime:
     if state is None:
         return RestoredImageRuntime(
@@ -56,7 +54,7 @@ def restored_runtime_for_state(
             lab_print_log_ceils=None,
             lab_print_cmy_offsets=None,
             lab_print_cmy_strength=None,
-            adjustments=deepcopy(fallback_adjustments),
+            adjustments=default_adjustments(),
             negative_preview_active=False,
             auto_levels_pending=True,
             preview_flip_horizontal=False,

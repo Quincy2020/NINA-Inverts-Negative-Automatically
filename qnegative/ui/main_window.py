@@ -241,7 +241,7 @@ class MainWindow(QMainWindow):
         self.preview_view.set_gpu_preview_enabled(self._gpu_preview_enabled)
 
         self.statusBar().showMessage("Ready")
-        QTimer.singleShot(120, self._start_frame_ranker_warmup)
+        QTimer.singleShot(120, self._start_frame_model_warmup)
 
     def _save_app_settings(self) -> None:
         try:
@@ -705,15 +705,15 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Analyze Roll Color", message)
         self.statusBar().showMessage("Roll color analysis failed")
 
-    def _start_frame_ranker_warmup(self) -> None:
+    def _start_frame_model_warmup(self) -> None:
         if not self._frame_automation.begin_model_warmup():
             return
         self._refresh_activity_progress()
         task = ModelWarmupTask()
-        task.signals.finished.connect(self._frame_ranker_warmup_finished)
+        task.signals.finished.connect(self._frame_model_warmup_finished)
         self._thread_pool.start(task)
 
-    def _frame_ranker_warmup_finished(self, loaded: bool, model_name: str) -> None:
+    def _frame_model_warmup_finished(self, loaded: bool, model_name: str) -> None:
         self._frame_automation.finish_model_warmup()
         self._refresh_activity_progress()
         if loaded:
@@ -1093,11 +1093,7 @@ class MainWindow(QMainWindow):
         auto_mask_params_key = mask_state.auto_mask_params_key
         if auto_mask_params_key == dust_auto_mask_params_key(self.adjustments.dust_removal):
             self._dust_auto_preview_mask = load_dust_mask(path, mask_state.auto_mask_path)
-            self._dust_auto_mask_params_key = (
-                auto_mask_params_key
-                if self._dust_auto_preview_mask is not None
-                else None
-            )
+            self._dust_auto_mask_params_key = auto_mask_params_key
         self._dust_manual_add_mask = load_dust_mask(path, mask_state.manual_add_mask_path)
         self._dust_manual_protect_mask = load_dust_mask(path, mask_state.manual_protect_mask_path)
         if mask_state.mask_width > 0 and mask_state.mask_height > 0:
@@ -1128,14 +1124,15 @@ class MainWindow(QMainWindow):
         protect_saved = save_dust_mask(protect_path, self._dust_manual_protect_mask)
         self._dust_manual_mask_dirty = False
         size = self._dust_mask_size or self._current_dust_preview_size()
-        any_saved = auto_saved or add_saved or protect_saved
+        auto_generated = self._dust_auto_mask_params_key is not None
+        any_saved = auto_saved or add_saved or protect_saved or auto_generated
         return DustMaskState(
             manual_add_mask_path=stored_mask_path(self.current_path, add_path) if add_saved else None,
             manual_protect_mask_path=stored_mask_path(self.current_path, protect_path) if protect_saved else None,
             mask_width=size.width if any_saved and size is not None else 0,
             mask_height=size.height if any_saved and size is not None else 0,
             auto_mask_path=stored_mask_path(self.current_path, auto_path) if auto_saved else None,
-            auto_mask_params_key=self._dust_auto_mask_params_key if auto_saved else None,
+            auto_mask_params_key=self._dust_auto_mask_params_key if auto_generated else None,
         )
 
     def _reset_dust_runtime(self) -> None:
@@ -1257,7 +1254,7 @@ class MainWindow(QMainWindow):
             format_hint=self.control_panel.auto_format(),
             detect_base=self._film_base_required_for_current_mode(),
             current_film_rect=self.film_rect,
-            fallback_state=self._previous_image_state(),
+            fallback_state=None,
             auto_preview=auto_preview,
             auto_frame_inset_percent=self._auto_frame_inset_percent,
         )
@@ -1299,7 +1296,6 @@ class MainWindow(QMainWindow):
         frame_result = output.frame_result
         base_result = output.base_result
 
-        used_fallback = False
         fallback_state = output.fallback_state
         if mode in {"frame", "frame_base"} and frame_result is None and fallback_state is not None:
             frame_result = AutoFrameResult(
@@ -1309,7 +1305,6 @@ class MainWindow(QMainWindow):
                 format_hint="previous",
                 method="previous-image",
             ) if fallback_state.film_rect is not None else None
-            used_fallback = frame_result is not None
         if mode in {"base", "frame_base"} and base_result is None and fallback_state is not None:
             base_result = AutoBaseResult(
                 point=fallback_state.mask_point,
@@ -1318,7 +1313,6 @@ class MainWindow(QMainWindow):
                 confidence_level="fallback",
                 source="previous-image",
             ) if fallback_state.mask_point is not None else None
-            used_fallback = used_fallback or base_result is not None
 
         changed = False
         details: list[str] = []
@@ -1360,8 +1354,7 @@ class MainWindow(QMainWindow):
             white_balance_point=None,
         )
         self.preview_tabs.setCurrentWidget(self.origin_view)
-        suffix = " using previous image fallback" if used_fallback else ""
-        self.statusBar().showMessage(f"Auto detect applied: {', '.join(details)}{suffix}")
+        self.statusBar().showMessage(f"Auto detect applied: {', '.join(details)}")
         if output.auto_preview:
             self._render_auto_detect_preview_if_ready()
         else:
@@ -1562,8 +1555,16 @@ class MainWindow(QMainWindow):
             quality=quality,
             file_key=self._file_key_for_path(render_preview.path),
             lab_print_cmy_offsets=self.white_balance.cmy_offsets,
-            roll_color_result=self._roll_color_result,
-            roll_color_frame=self._roll_color_frame_for_path(render_preview.path),
+            roll_color_result=(
+                self._roll_color_result
+                if self.adjustments.color_correction.enabled
+                else None
+            ),
+            roll_color_frame=(
+                self._roll_color_frame_for_path(render_preview.path)
+                if self.adjustments.color_correction.enabled
+                else None
+            ),
             render_cache=self._preview_stage_caches[quality],
         )
         task.signals.finished.connect(self._preview_render_finished)
@@ -1799,6 +1800,7 @@ class MainWindow(QMainWindow):
             return
         self._close_dust_mask_editor()
         self._update_preview_from_result(self._last_untransformed_negative_result)
+        self._save_current_state()
         self.statusBar().showMessage(status)
 
     def _reset_preview_transform(self) -> None:
@@ -1829,7 +1831,11 @@ class MainWindow(QMainWindow):
             lab_print_cmy_offsets=self.white_balance.cmy_offsets,
             lab_print_log_floors=self._current_lab_print_log_floors(),
             lab_print_log_ceils=self._current_lab_print_log_ceils(),
-            roll_color_frame=self._roll_color_frame_for_path(self.current_path),
+            roll_color_frame=(
+                self._roll_color_frame_for_path(self.current_path)
+                if self.adjustments.color_correction.enabled
+                else None
+            ),
         )
 
     def _current_lab_print_log_floors(self) -> list[float] | None:
@@ -2224,10 +2230,7 @@ class MainWindow(QMainWindow):
 
     def _restore_state_for_path(self, path: Path) -> bool:
         state = self.image_states.get(path)
-        restored = restored_runtime_for_state(
-            state,
-            fallback_adjustments=self.adjustments,
-        )
+        restored = restored_runtime_for_state(state)
         self.mask_point = restored.mask_point
         self.film_rect = restored.film_rect
         self.white_balance.restore(
@@ -2327,8 +2330,8 @@ class MainWindow(QMainWindow):
                 max_size=DEFAULT_PREVIEW_MAX_EDGE,
                 format_hint=self.control_panel.auto_format(),
                 file_key=self._file_key_for_path(job.path),
-                adjustments=self.adjustments,
-                prior_frame_rect=self._preinvert_prior_frame_rect(),
+                adjustments=default_adjustments(),
+                prior_frame_rect=None,
                 auto_frame_inset_percent=self._auto_frame_inset_percent,
             )
             task.signals.finished.connect(self._preinvert_finished)
@@ -2378,31 +2381,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Auto pre-inverted {output.path.name} ({output.confidence:.2f})"
         )
-
-    def _preinvert_prior_frame_rect(self) -> ImageRect | None:
-        if self.film_rect is not None:
-            return self.film_rect
-        state = self._previous_image_state()
-        return state.film_rect if state is not None else None
-
-    def _previous_image_state(self) -> ImageProcessingState | None:
-        if not self.folder_files:
-            return None
-        candidate_paths: list[Path] = []
-        if 0 <= self.current_index < len(self.folder_files):
-            candidate_paths.extend(reversed(self.folder_files[: self.current_index]))
-            candidate_paths.extend(self.folder_files[self.current_index + 1 :])
-        candidate_paths.extend(path for path in self.image_states if path not in candidate_paths)
-
-        for path in candidate_paths:
-            if path == self.current_path:
-                continue
-            state = self.image_states.get(path)
-            if state is None:
-                continue
-            if state.film_rect is not None or state.mask_point is not None:
-                return state
-        return None
 
     def select_sequence_file(self, path: Path) -> None:
         self.load_path(path, refresh_sequence=False)

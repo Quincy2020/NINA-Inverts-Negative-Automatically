@@ -138,7 +138,7 @@ class DustRemovalParams:
     adaptive: bool = True
     texture_penalty: int = 10
     max_threshold: int = 75
-    inpaint_radius: int = 3
+    inpaint_radius: int = 5
     model_path: str | None = None
 
 

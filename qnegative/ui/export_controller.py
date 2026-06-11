@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
+import json
 from pathlib import Path
 from threading import Event
 from time import perf_counter
@@ -65,6 +67,7 @@ class ExportController:
         self._batch_export_cancel_requested = False
         self._batch_export_current_path: Path | None = None
         self._export_cancel_event: Event | None = None
+        self._batch_export_journal_path: Path | None = None
 
     @property
     def export_in_progress(self) -> bool:
@@ -318,6 +321,16 @@ class ExportController:
         self._batch_export_cancel_requested = False
         self._export_in_progress = True
         self._export_cancel_event = Event()
+        self._batch_export_journal_path = (
+            items[0]["output_path"].parent / ".nina_export_progress.jsonl"
+            if items
+            else None
+        )
+        self._write_batch_export_journal(
+            "batch_start",
+            total=len(items),
+            outputs=[str(item["output_path"]) for item in items],
+        )
         self.batch_dialog.set_jobs(
             [item["source_path"] for item in items],
             [item["output_path"] for item in items],
@@ -362,6 +375,8 @@ class ExportController:
             )
             if settings.naming_mode == "sequence":
                 sequence_index += 1
+            if output_path.exists() and not settings.overwrite_existing:
+                continue
             preview_log_floors, preview_log_ceils = self._preview_log_bounds_for_path(path, state)
             items.append(
                 {
@@ -401,9 +416,7 @@ class ExportController:
         else:
             filename = f"{settings.prefix}{sequence_index:03d}{export_format_extension(settings.export_format)}"
         output_path = settings.output_dir / filename
-        if settings.overwrite_existing:
-            return output_path
-        return self._non_conflicting_output_path(output_path)
+        return output_path
 
     @staticmethod
     def _non_conflicting_output_path(path: Path) -> Path:
@@ -483,6 +496,13 @@ class ExportController:
         self._batch_export_current_path = item["source_path"]
         self.batch_dialog.set_current(self._batch_export_current_path)
         self.batch_dialog.set_running(True, paused=False)
+        self._write_batch_export_journal(
+            "item_start",
+            source=str(item["source_path"]),
+            output=str(item["output_path"]),
+            done=self._batch_export_done,
+            total=self._batch_export_total,
+        )
         self._export_cancel_event = Event()
         item = dict(item)
         item["cancel_event"] = self._export_cancel_event
@@ -509,6 +529,13 @@ class ExportController:
         self._export_in_progress = False
         self._batch_export_current_path = None
         self._export_cancel_event = None
+        self._write_batch_export_journal(
+            "batch_finish",
+            text=text,
+            done=self._batch_export_done,
+            total=self._batch_export_total,
+        )
+        self._batch_export_journal_path = None
         self.control_panel.update_export_progress(100, text)
         self.control_panel.set_export_progress(False)
         self.control_panel.export_button.setEnabled(True)
@@ -600,6 +627,13 @@ class ExportController:
             self._batch_export_done += 1
             if self._batch_export_current_path is not None:
                 self.batch_dialog.mark_done(self._batch_export_current_path)
+                self._write_batch_export_journal(
+                    "item_done",
+                    source=str(self._batch_export_current_path),
+                    output=str(output_path),
+                    done=self._batch_export_done,
+                    total=self._batch_export_total,
+                )
             timing_text = self._format_export_timings(timings)
             if timing_text:
                 print(f"Export timings: {Path(output_path).name}: {timing_text}", flush=True)
@@ -643,6 +677,14 @@ class ExportController:
 
     def _export_failed(self, message: str) -> None:
         if self._batch_export_active:
+            if self._batch_export_current_path is not None:
+                self._write_batch_export_journal(
+                    "item_failed",
+                    source=str(self._batch_export_current_path),
+                    message=message,
+                    done=self._batch_export_done,
+                    total=self._batch_export_total,
+                )
             self._batch_export_queue = []
             self._finish_batch_export(
                 f"Batch export failed after {self._batch_export_done}/{self._batch_export_total}",
@@ -658,6 +700,23 @@ class ExportController:
             self.owner._start_next_preinvert_jobs()
         QMessageBox.warning(self.owner, "Export Failed", message)
         self.owner.statusBar().showMessage("Export failed")
+
+    def _write_batch_export_journal(self, event: str, **payload: object) -> None:
+        path = self._batch_export_journal_path
+        if path is None:
+            return
+        record = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "event": event,
+            **payload,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                handle.flush()
+        except OSError:
+            pass
 
     def _export_cancelled(self, message: str) -> None:
         if self._batch_export_active:

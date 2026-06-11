@@ -22,7 +22,7 @@ class DustModelPlugin:
     threshold: int = 20
     texture_penalty: int = 10
     max_threshold: int = 75
-    inpaint_radius: int = 3
+    inpaint_radius: int = 5
     notes: str = ""
 
 
@@ -40,7 +40,7 @@ def default_dust_model_plugin(model_root: Path | None = None) -> DustModelPlugin
         return next(iter(plugins.values()))
     return DustModelPlugin(
         plugin_id="lint_ice_stage2",
-        name="Lint + ICE Stage2",
+        name="Lint 1.0 Safe",
         model_path=(root / FALLBACK_DUST_MODEL).resolve(),
     )
 
@@ -152,7 +152,7 @@ def _plugin_from_dict(
     )
     inpaint_radius = int(defaults.get(
         "inpaint_radius",
-        existing.inpaint_radius if existing else 3,
+        existing.inpaint_radius if existing else 5,
     ))
     return DustModelPlugin(
         plugin_id=plugin_id,

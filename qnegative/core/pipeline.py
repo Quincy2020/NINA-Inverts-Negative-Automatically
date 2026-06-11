@@ -980,7 +980,7 @@ def log_print_curve_params(adjustments: AdjustmentParams) -> LogPrintCurveParams
     elif adjustments.print_curve in {PrintCurveMode.CONTRAST.value, PrintCurveMode.CONTRAST_SHOULDER.value}:
         base_density = 1.06
         base_grade = 3.35
-        highlight_bias = 0.12 if adjustments.print_curve == PrintCurveMode.CONTRAST_SHOULDER.value else 0.0
+        highlight_bias = 0.12
     else:
         base_density = 1.0
         base_grade = 2.5

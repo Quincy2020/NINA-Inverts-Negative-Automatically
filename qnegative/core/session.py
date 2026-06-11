@@ -18,6 +18,7 @@ from qnegative.core.models import (
     ImageRect,
     InvertMode,
     LensCorrectionParams,
+    PrintCurveMode,
     PrintCurveParams,
     TonalBalance,
 )
@@ -258,6 +259,7 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     allowed = {item.name for item in fields(AdjustmentParams)}
     values = {key: payload[key] for key in payload if key in allowed}
     values["invert_mode"] = InvertMode.LAB_PRINT.value
+    values["print_curve"] = _print_curve_from_payload(payload.get("print_curve"))
     color_balance_payload = payload.get("color_balance") or {}
     values["printer_balance"] = _balance_axis_from_dict(
         payload.get("printer_balance")
@@ -270,6 +272,19 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     values["dust_removal"] = _dust_removal_from_dict(payload.get("dust_removal") or {})
     values["print_curve_params"] = _print_curve_params_from_dict(payload.get("print_curve_params") or {})
     return AdjustmentParams(**values)
+
+
+def _print_curve_from_payload(value: Any) -> str:
+    curve = str(value or PrintCurveMode.STANDARD.value)
+    if curve == PrintCurveMode.CONTRAST_SHOULDER.value:
+        return PrintCurveMode.CONTRAST.value
+    if curve in {
+        PrintCurveMode.SOFT.value,
+        PrintCurveMode.STANDARD.value,
+        PrintCurveMode.CONTRAST.value,
+    }:
+        return curve
+    return PrintCurveMode.STANDARD.value
 
 
 def _print_curve_params_from_dict(payload: dict[str, Any]) -> PrintCurveParams:
