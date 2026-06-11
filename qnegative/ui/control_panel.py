@@ -258,11 +258,6 @@ class ControlPanel(QWidget):
     def _adjustment_section(self) -> QGroupBox:
         group = self._section("Basic")
         layout = QVBoxLayout(group)
-        layout.addLayout(self._slider_row("Exposure", self.exposure_slider, "-1", "+1"))
-        layout.addLayout(self._slider_row("Highlights", self.highlights_slider, "-1", "+1"))
-        layout.addLayout(self._slider_row("Shadows", self.shadows_slider, "-1", "+1"))
-        layout.addWidget(self.tone_curve_widget)
-        layout.addLayout(self._slider_row("Contrast", self.contrast_slider, "-1", "+1"))
         layout.addLayout(self._slider_row("Saturation", self.saturation_slider, "-1", "+1"))
 
         curve_row = QHBoxLayout()
@@ -286,7 +281,7 @@ class ControlPanel(QWidget):
         layout.setSpacing(8)
         layout.addWidget(self.print_curve_advanced_checkbox)
         layout.addLayout(self._slider_row("Density", self.print_density_slider, "0.50", "1.50"))
-        layout.addLayout(self._slider_row("Grade", self.print_grade_slider, "1.00", "4.50"))
+        layout.addLayout(self._slider_row("Gradient", self.print_grade_slider, "1.00", "4.50"))
         layout.addLayout(self._slider_row("Highlight Bias", self.print_highlight_bias_slider, "-0.20", "+0.30"))
         layout.addLayout(self._slider_row("Highlight Width", self.print_highlight_width_slider, "0.20", "0.90"))
         layout.addLayout(self._slider_row("Shadow Bias", self.print_shadow_bias_slider, "-0.20", "+0.30"))
