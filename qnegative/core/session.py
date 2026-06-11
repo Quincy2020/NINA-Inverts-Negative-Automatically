@@ -18,6 +18,7 @@ from qnegative.core.models import (
     ImageRect,
     InvertMode,
     LensCorrectionParams,
+    PrintCurveParams,
     TonalBalance,
 )
 
@@ -267,7 +268,20 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     values["lens_correction"] = _lens_correction_from_dict(payload.get("lens_correction") or {})
     values["color_correction"] = _color_correction_from_dict(payload.get("color_correction") or {})
     values["dust_removal"] = _dust_removal_from_dict(payload.get("dust_removal") or {})
+    values["print_curve_params"] = _print_curve_params_from_dict(payload.get("print_curve_params") or {})
     return AdjustmentParams(**values)
+
+
+def _print_curve_params_from_dict(payload: dict[str, Any]) -> PrintCurveParams:
+    return PrintCurveParams(
+        enabled=bool(payload.get("enabled", False)),
+        density=float(payload.get("density", 1.0)),
+        grade=float(payload.get("grade", 3.0)),
+        highlight_bias=float(payload.get("highlight_bias", 0.12)),
+        highlight_width=float(payload.get("highlight_width", 0.55)),
+        shadow_bias=float(payload.get("shadow_bias", 0.0)),
+        shadow_width=float(payload.get("shadow_width", 0.55)),
+    )
 
 
 def _color_balance_from_dict(payload: dict[str, Any]) -> ColorBalanceParams:

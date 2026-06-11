@@ -18,9 +18,12 @@ class InvertMode(str, Enum):
 
 class PrintCurveMode(str, Enum):
     LINEAR = "linear"
+    FILMIC_HABLE = "filmic_hable"
+    FILMIC_ACES = "filmic_aces"
     SOFT = "soft"
     STANDARD = "standard"
     CONTRAST = "contrast"
+    CONTRAST_SHOULDER = "contrast_shoulder"
 
 
 @dataclass(frozen=True)
@@ -150,9 +153,21 @@ class DustMaskState:
 
 
 @dataclass
+class PrintCurveParams:
+    enabled: bool = False
+    density: float = 1.0
+    grade: float = 3.0
+    highlight_bias: float = 0.12
+    highlight_width: float = 0.55
+    shadow_bias: float = 0.0
+    shadow_width: float = 0.55
+
+
+@dataclass
 class AdjustmentParams:
     invert_mode: str = InvertMode.LAB_PRINT.value
     print_curve: str = PrintCurveMode.STANDARD.value
+    print_curve_params: PrintCurveParams = field(default_factory=PrintCurveParams)
     auto_wb: bool = True
     auto_cmy_strength: int = 65
     printer_balance: BalanceAxis = field(default_factory=BalanceAxis)

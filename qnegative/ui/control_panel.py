@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from qnegative.core.dust_model_registry import default_dust_model_plugin, dust_model_plugins
-from qnegative.core.models import DustRemovalParams, InvertMode, LensCorrectionParams, PrintCurveMode, ToolMode
+from qnegative.core.models import DustRemovalParams, InvertMode, LensCorrectionParams, PrintCurveMode, PrintCurveParams, ToolMode
 from qnegative.core.models import AdjustmentParams
 from qnegative.resources import resource_path
 from qnegative.ui.collapsible_section import CollapsibleSection
@@ -89,14 +89,24 @@ class ControlPanel(QWidget):
         self.reset_button = QPushButton("Reset")
         self.print_curve_combo = QComboBox()
         self.print_curve_combo.addItem("Linear", PrintCurveMode.LINEAR.value)
+        self.print_curve_combo.addItem("Filmic Hable", PrintCurveMode.FILMIC_HABLE.value)
+        self.print_curve_combo.addItem("Filmic ACES", PrintCurveMode.FILMIC_ACES.value)
         self.print_curve_combo.addItem("Soft Print", PrintCurveMode.SOFT.value)
         self.print_curve_combo.addItem("Standard Print", PrintCurveMode.STANDARD.value)
         self.print_curve_combo.addItem("Contrast Print", PrintCurveMode.CONTRAST.value)
-        self.print_curve_combo.setCurrentIndex(2)
+        self.print_curve_combo.addItem("Contrast Shoulder", PrintCurveMode.CONTRAST_SHOULDER.value)
+        self.print_curve_combo.setCurrentIndex(4)
         self.print_curve_widget = PrintCurveWidget()
         self.tone_curve_widget = ToneCurveWidget()
         self._tone_mid_anchor = 0.46
         self._style_combo_popup(self.print_curve_combo)
+        self.print_curve_advanced_checkbox = QCheckBox("Custom Printer Curve")
+        self.print_density_slider = self._make_slider(50, 150, 100)
+        self.print_grade_slider = self._make_slider(100, 450, 300)
+        self.print_highlight_bias_slider = self._make_slider(-20, 30, 12)
+        self.print_highlight_width_slider = self._make_slider(20, 90, 55)
+        self.print_shadow_bias_slider = self._make_slider(-20, 30, 0)
+        self.print_shadow_width_slider = self._make_slider(20, 90, 55)
 
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
@@ -260,6 +270,7 @@ class ControlPanel(QWidget):
         curve_row.addWidget(self.print_curve_combo, 1)
         layout.addLayout(curve_row)
         layout.addWidget(self.print_curve_widget)
+        layout.addWidget(self._printer_curve_advanced_section())
 
         boundary_row = QHBoxLayout()
         boundary_row.addWidget(QLabel("Boundary"))
@@ -267,6 +278,20 @@ class ControlPanel(QWidget):
         boundary_row.addWidget(self.analysis_inset_spin)
         layout.addLayout(boundary_row)
         return group
+
+    def _printer_curve_advanced_section(self) -> CollapsibleSection:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addWidget(self.print_curve_advanced_checkbox)
+        layout.addLayout(self._slider_row("Density", self.print_density_slider, "0.50", "1.50"))
+        layout.addLayout(self._slider_row("Grade", self.print_grade_slider, "1.00", "4.50"))
+        layout.addLayout(self._slider_row("Highlight Bias", self.print_highlight_bias_slider, "-0.20", "+0.30"))
+        layout.addLayout(self._slider_row("Highlight Width", self.print_highlight_width_slider, "0.20", "0.90"))
+        layout.addLayout(self._slider_row("Shadow Bias", self.print_shadow_bias_slider, "-0.20", "+0.30"))
+        layout.addLayout(self._slider_row("Shadow Width", self.print_shadow_width_slider, "0.20", "0.90"))
+        return CollapsibleSection("Printer Curve Advanced", panel, expanded=False)
 
     def _lens_correction_section(self) -> CollapsibleSection:
         panel = QWidget()
@@ -457,6 +482,12 @@ class ControlPanel(QWidget):
             self.contrast_slider,
             self.saturation_slider,
             self.camera_color_slider,
+            self.print_density_slider,
+            self.print_grade_slider,
+            self.print_highlight_bias_slider,
+            self.print_highlight_width_slider,
+            self.print_shadow_bias_slider,
+            self.print_shadow_width_slider,
             self.lens_strength_slider,
             self.lens_radius_slider,
             self.lens_center_x_slider,
@@ -472,6 +503,7 @@ class ControlPanel(QWidget):
             slider.sliderPressed.connect(self.adjustmentInteractionStarted.emit)
             slider.sliderReleased.connect(self.adjustmentInteractionFinished.emit)
             slider.valueChanged.connect(self._emit_adjustments)
+            slider.valueChanged.connect(lambda _value, current=slider: self._refresh_slider_value_label(current))
         self.lens_tabs.currentChanged.connect(self._lens_tab_changed)
         self.lens_save_profile_button.clicked.connect(self.lensProfileSaveRequested.emit)
         self.lens_load_profile_button.clicked.connect(self.lensProfileLoadRequested.emit)
@@ -480,6 +512,7 @@ class ControlPanel(QWidget):
         self.lens_apply_unprocessed_button.clicked.connect(self.lensApplyUnprocessedRequested.emit)
         self.lens_apply_completed_button.clicked.connect(self.lensApplyCompletedRequested.emit)
         self.analysis_inset_spin.valueChanged.connect(self._emit_adjustments)
+        self.print_curve_advanced_checkbox.toggled.connect(self._emit_adjustments)
         self.white_balance_panel.balanceChanged.connect(self._emit_adjustments)
         self.white_balance_panel.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
         self.white_balance_panel.interactionFinished.connect(self.adjustmentInteractionFinished.emit)
@@ -602,6 +635,15 @@ class ControlPanel(QWidget):
             "analysis_inset_percent": self.analysis_inset_spin.value(),
             "invert_mode": InvertMode.LAB_PRINT.value,
             "print_curve": self.print_curve_combo.currentData(),
+            "print_curve_params": PrintCurveParams(
+                enabled=self.print_curve_advanced_checkbox.isChecked(),
+                density=self.print_density_slider.value() / 100.0,
+                grade=self.print_grade_slider.value() / 100.0,
+                highlight_bias=self.print_highlight_bias_slider.value() / 100.0,
+                highlight_width=self.print_highlight_width_slider.value() / 100.0,
+                shadow_bias=self.print_shadow_bias_slider.value() / 100.0,
+                shadow_width=self.print_shadow_width_slider.value() / 100.0,
+            ),
             **self.histogram_levels.levels(),
             **self.white_balance_panel.values(),
             **self.color_correction_panel.values(),
@@ -692,6 +734,15 @@ class ControlPanel(QWidget):
         return wrapper
 
     def _format_slider_value(self, slider: QSlider, value: int) -> str:
+        if slider in {
+            self.print_density_slider,
+            self.print_grade_slider,
+            self.print_highlight_width_slider,
+            self.print_shadow_width_slider,
+        }:
+            return f"{value / 100.0:.2f}"
+        if slider in {self.print_highlight_bias_slider, self.print_shadow_bias_slider}:
+            return f"{value / 100.0:+.2f}"
         if slider is self.lens_smoothness_slider:
             return f"{value / 100.0:.2f}"
         if slider is self.lens_max_gain_slider:
@@ -702,6 +753,11 @@ class ControlPanel(QWidget):
 
     def _refresh_slider_value_labels(self) -> None:
         for slider, label in self._slider_value_labels.items():
+            self._refresh_slider_value_label(slider)
+
+    def _refresh_slider_value_label(self, slider: QSlider) -> None:
+        label = self._slider_value_labels.get(slider)
+        if label is not None:
             label.setText(self._format_slider_value(slider, slider.value()))
 
     def _section(self, title: str) -> QGroupBox:
@@ -796,6 +852,13 @@ class ControlPanel(QWidget):
             self.contrast_slider,
             self.saturation_slider,
             self.camera_color_slider,
+            self.print_curve_advanced_checkbox,
+            self.print_density_slider,
+            self.print_grade_slider,
+            self.print_highlight_bias_slider,
+            self.print_highlight_width_slider,
+            self.print_shadow_bias_slider,
+            self.print_shadow_width_slider,
             self.lens_tabs,
             self.lens_create_flat_profile_button,
             self.lens_strength_slider,
@@ -827,6 +890,13 @@ class ControlPanel(QWidget):
             self.contrast_slider.setValue(adjustments.contrast)
             self.saturation_slider.setValue(adjustments.saturation)
             self.camera_color_slider.setValue(adjustments.camera_color_strength)
+            self.print_curve_advanced_checkbox.setChecked(adjustments.print_curve_params.enabled)
+            self.print_density_slider.setValue(int(round(adjustments.print_curve_params.density * 100.0)))
+            self.print_grade_slider.setValue(int(round(adjustments.print_curve_params.grade * 100.0)))
+            self.print_highlight_bias_slider.setValue(int(round(adjustments.print_curve_params.highlight_bias * 100.0)))
+            self.print_highlight_width_slider.setValue(int(round(adjustments.print_curve_params.highlight_width * 100.0)))
+            self.print_shadow_bias_slider.setValue(int(round(adjustments.print_curve_params.shadow_bias * 100.0)))
+            self.print_shadow_width_slider.setValue(int(round(adjustments.print_curve_params.shadow_width * 100.0)))
             lens_mode = (
                 adjustments.lens_correction.mode
                 if adjustments.lens_correction.enabled
@@ -862,7 +932,8 @@ class ControlPanel(QWidget):
             self.dust_inpaint_radius_slider.setValue(adjustments.dust_removal.inpaint_radius)
             self.analysis_inset_spin.setValue(adjustments.analysis_inset_percent)
             curve_index = self.print_curve_combo.findData(adjustments.print_curve)
-            self.print_curve_combo.setCurrentIndex(2 if curve_index < 0 else curve_index)
+            standard_index = self.print_curve_combo.findData(PrintCurveMode.STANDARD.value)
+            self.print_curve_combo.setCurrentIndex(standard_index if curve_index < 0 else curve_index)
             self.print_curve_widget.set_curve_mode(self.print_curve_combo.currentData())
             self._refresh_tone_curve_widget(
                 {

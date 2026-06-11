@@ -181,6 +181,7 @@ def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
     return (
         adjustments.invert_mode,
         adjustments.print_curve,
+        print_curve_params_key(adjustments),
         adjustments.auto_wb,
         adjustments.auto_cmy_strength,
         balance_axis_key(adjustments.printer_balance),
@@ -199,6 +200,19 @@ def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
         adjustments.black_point,
         adjustments.mid_point,
         adjustments.white_point,
+    )
+
+
+def print_curve_params_key(adjustments: AdjustmentParams) -> tuple:
+    params = adjustments.print_curve_params
+    return (
+        bool(params.enabled),
+        round(float(params.density), 4),
+        round(float(params.grade), 4),
+        round(float(params.highlight_bias), 4),
+        round(float(params.highlight_width), 4),
+        round(float(params.shadow_bias), 4),
+        round(float(params.shadow_width), 4),
     )
 
 
@@ -253,6 +267,7 @@ def base_stage_key(
 def lab_print_auto_key(adjustments: AdjustmentParams) -> tuple:
     return (
         adjustments.print_curve,
+        print_curve_params_key(adjustments),
         adjustments.exposure,
         adjustments.contrast,
         adjustments.analysis_inset_percent,
@@ -296,6 +311,7 @@ def lab_print_color_key(
         "lab_print_color",
         levels_key,
         adjustments.print_curve,
+        print_curve_params_key(adjustments),
         adjustments.exposure,
         adjustments.contrast,
         adjustments.soft_highlights,

@@ -65,7 +65,9 @@ FILMIC_CURVE_PRESETS: dict[str, tuple[tuple[float, float], tuple[float, float]]]
     PrintCurveMode.SOFT.value: ((0.30, 0.16), (0.74, 0.86)),
     PrintCurveMode.STANDARD.value: ((0.26, 0.11), (0.76, 0.92)),
     PrintCurveMode.CONTRAST.value: ((0.20, 0.07), (0.82, 0.97)),
+    PrintCurveMode.CONTRAST_SHOULDER.value: ((0.20, 0.07), (0.70, 0.90)),
 }
+RATIONAL_FILMIC_PRINT_MODES = {PrintCurveMode.FILMIC_HABLE.value, PrintCurveMode.FILMIC_ACES.value}
 _FILMIC_CURVE_LUTS: dict[str, np.ndarray] = {}
 _LOG_PRINT_CURVE_LUTS: dict[tuple, np.ndarray] = {}
 _TONE_MODIFIER_LUTS: dict[tuple[int, int, int, int], np.ndarray] = {}
@@ -159,6 +161,16 @@ class LabPrintColorStage:
     lab_print_log_ceils: np.ndarray
     mask_rgb: np.ndarray
     film_rect_preview: ImageRect
+
+
+@dataclass(frozen=True)
+class LogPrintCurveParams:
+    density: float
+    grade: float
+    highlight_bias: float = 0.0
+    highlight_width: float = 0.55
+    shadow_bias: float = 0.0
+    shadow_width: float = 0.55
 
 
 def process_negative_preview(
@@ -432,14 +444,19 @@ def build_lab_print_display_stage(
         frame_plan=roll_color_frame,
         settings=adjustments.color_correction,
     )
-    tone_luminance = rgb_luminance(np.maximum(corrected, 0.0))
-    tone_mid_anchor = estimate_tone_mid_anchor(tone_luminance)
-    processed = apply_highlight_shadow_adjustments(
-        corrected,
-        adjustments,
-        mid_anchor=tone_mid_anchor,
-        luminance=tone_luminance,
-    )
+    tone_active = adjustments.highlights != 0 or adjustments.shadows != 0
+    if tone_active:
+        tone_luminance = rgb_luminance(np.maximum(corrected, 0.0))
+        tone_mid_anchor = estimate_tone_mid_anchor(tone_luminance)
+        processed = apply_highlight_shadow_adjustments(
+            corrected,
+            adjustments,
+            mid_anchor=tone_mid_anchor,
+            luminance=tone_luminance,
+        )
+    else:
+        tone_mid_anchor = 0.46
+        processed = corrected
     color_balanced = processed
     processed = apply_saturation_adjustment(processed, adjustments)
     display_rgb8 = linear_to_srgb8(processed)
@@ -756,6 +773,7 @@ def log_hd_print_curve_lut(
     lut_size: int,
 ) -> np.ndarray:
     offsets = np.asarray(cmy_offsets, dtype=np.float32).reshape(3)
+    curve_params = log_print_curve_params(adjustments)
     # CMY offsets shift the log input independently for each channel, so they
     # are part of the LUT identity rather than a post-curve adjustment.
     key = (
@@ -765,6 +783,13 @@ def log_hd_print_curve_lut(
         int(adjustments.contrast),
         bool(adjustments.soft_highlights),
         bool(adjustments.soft_shadows),
+        bool(adjustments.print_curve_params.enabled),
+        round(curve_params.density, 4),
+        round(curve_params.grade, 4),
+        round(curve_params.highlight_bias, 4),
+        round(curve_params.highlight_width, 4),
+        round(curve_params.shadow_bias, 4),
+        round(curve_params.shadow_width, 4),
         tuple(round(float(value), 7) for value in offsets),
     )
     cached = _LOG_PRINT_CURVE_LUTS.get(key)
@@ -772,9 +797,16 @@ def log_hd_print_curve_lut(
         return cached
 
     samples = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
-    density, grade = log_print_density_grade(adjustments)
-    pivot = float(np.clip(1.0 - (0.01 + density * LOG_DENSITY_MULTIPLIER), 0.02, 0.98))
-    slope = float(np.clip(1.0 + grade * LOG_GRADE_MULTIPLIER, 0.1, 16.0))
+    if adjustments.print_curve in RATIONAL_FILMIC_PRINT_MODES:
+        lut = log_rational_filmic_print_curve_lut(samples, offsets, adjustments.print_curve)
+        _LOG_PRINT_CURVE_LUTS[key] = lut
+        while len(_LOG_PRINT_CURVE_LUTS) > 32:
+            oldest_key = next(iter(_LOG_PRINT_CURVE_LUTS))
+            _LOG_PRINT_CURVE_LUTS.pop(oldest_key, None)
+        return lut
+
+    pivot = float(np.clip(1.0 - (0.01 + curve_params.density * LOG_DENSITY_MULTIPLIER), 0.02, 0.98))
+    slope = float(np.clip(1.0 + curve_params.grade * LOG_GRADE_MULTIPLIER, 0.1, 16.0))
     toe = float(np.clip(0.20 if adjustments.soft_shadows else 0.0, -1.0, 1.0))
     shoulder = float(np.clip(0.20 if adjustments.soft_highlights else 0.0, -1.0, 1.0))
 
@@ -787,6 +819,10 @@ def log_hd_print_curve_lut(
             toe=toe,
             shoulder=shoulder,
             cmy_offset=float(offsets[channel]),
+            highlight_density_shift=curve_params.highlight_bias,
+            highlight_width=curve_params.highlight_width,
+            shadow_density_shift=curve_params.shadow_bias,
+            shadow_width=curve_params.shadow_width,
         )
 
     _LOG_PRINT_CURVE_LUTS[key] = lut
@@ -804,6 +840,10 @@ def log_hd_print_response_1d(
     toe: float,
     shoulder: float,
     cmy_offset: float,
+    highlight_density_shift: float = 0.0,
+    highlight_width: float = 0.55,
+    shadow_density_shift: float = 0.0,
+    shadow_width: float = 0.55,
 ) -> np.ndarray:
     value = np.clip(normalized_log, 0.0, 1.0).astype(np.float32, copy=False) + np.float32(cmy_offset)
     diff = value - np.float32(pivot)
@@ -821,6 +861,14 @@ def log_hd_print_response_1d(
         - np.float32(toe) * toe_lift_mask * 0.28
         + np.float32(shoulder) * shoulder_lift_mask * 0.25
     )
+    if highlight_density_shift != 0.0:
+        highlight_knee = np.float32(np.clip(highlight_width, 0.05, 0.95))
+        highlight_mask = smoothstep(0.0, highlight_knee, highlight_knee - np.clip(value, 0.0, 1.0))
+        diff_adjusted = diff_adjusted + np.float32(highlight_density_shift) * highlight_mask
+    if shadow_density_shift != 0.0:
+        shadow_knee = np.float32(1.0 - np.clip(shadow_width, 0.05, 0.95))
+        shadow_mask = smoothstep(shadow_knee, 1.0, np.clip(value, 0.0, 1.0))
+        diff_adjusted = diff_adjusted + np.float32(shadow_density_shift) * shadow_mask
     slope_mod = np.clip(
         1.0
         - max(toe, 0.0) * toe_transition * 0.55
@@ -841,9 +889,16 @@ def log_hd_print_response(
     *,
     cmy_offsets: np.ndarray,
 ) -> np.ndarray:
-    density, grade = log_print_density_grade(adjustments)
-    pivot_value = float(np.clip(1.0 - (0.01 + density * LOG_DENSITY_MULTIPLIER), 0.02, 0.98))
-    slope_value = float(np.clip(1.0 + grade * LOG_GRADE_MULTIPLIER, 0.1, 16.0))
+    if adjustments.print_curve in RATIONAL_FILMIC_PRINT_MODES:
+        return log_rational_filmic_print_response(
+            normalized_log,
+            cmy_offsets=cmy_offsets,
+            curve_mode=adjustments.print_curve,
+        )
+
+    curve_params = log_print_curve_params(adjustments)
+    pivot_value = float(np.clip(1.0 - (0.01 + curve_params.density * LOG_DENSITY_MULTIPLIER), 0.02, 0.98))
+    slope_value = float(np.clip(1.0 + curve_params.grade * LOG_GRADE_MULTIPLIER, 0.1, 16.0))
 
     pivot = np.array([pivot_value, pivot_value, pivot_value], dtype=np.float32).reshape(1, 1, 3)
     slope = np.array([slope_value, slope_value, slope_value], dtype=np.float32).reshape(1, 1, 3)
@@ -866,6 +921,14 @@ def log_hd_print_response(
     toe_density_offset = toe * toe_lift_mask * 0.28
     shoulder_density_offset = shoulder * shoulder_lift_mask * 0.25
     diff_adjusted = diff - toe_density_offset + shoulder_density_offset
+    if curve_params.highlight_bias != 0.0:
+        highlight_knee = np.float32(np.clip(curve_params.highlight_width, 0.05, 0.95))
+        highlight_mask = smoothstep(0.0, highlight_knee, highlight_knee - np.clip(value, 0.0, 1.0))
+        diff_adjusted = diff_adjusted + np.float32(curve_params.highlight_bias) * highlight_mask
+    if curve_params.shadow_bias != 0.0:
+        shadow_knee = np.float32(1.0 - np.clip(curve_params.shadow_width, 0.05, 0.95))
+        shadow_mask = smoothstep(shadow_knee, 1.0, np.clip(value, 0.0, 1.0))
+        diff_adjusted = diff_adjusted + np.float32(curve_params.shadow_bias) * shadow_mask
 
     slope_mod = np.clip(
         1.0
@@ -882,22 +945,116 @@ def log_hd_print_response(
 
 
 def log_print_density_grade(adjustments: AdjustmentParams) -> tuple[float, float]:
+    params = log_print_curve_params(adjustments)
+    return params.density, params.grade
+
+
+def log_print_curve_params(adjustments: AdjustmentParams) -> LogPrintCurveParams:
+    custom = adjustments.print_curve_params
+    if custom.enabled:
+        return LogPrintCurveParams(
+            density=float(np.clip(custom.density, 0.5, 1.5)),
+            grade=float(np.clip(custom.grade, 1.0, 4.5)),
+            highlight_bias=float(np.clip(custom.highlight_bias, -0.20, 0.30)),
+            highlight_width=float(np.clip(custom.highlight_width, 0.20, 0.90)),
+            shadow_bias=float(np.clip(custom.shadow_bias, -0.20, 0.30)),
+            shadow_width=float(np.clip(custom.shadow_width, 0.20, 0.90)),
+        )
+
     if adjustments.print_curve == PrintCurveMode.LINEAR.value:
         base_density = 0.82
         base_grade = 1.25
+        highlight_bias = 0.0
+    elif adjustments.print_curve in RATIONAL_FILMIC_PRINT_MODES:
+        base_density = 1.0
+        base_grade = 2.5
+        highlight_bias = 0.0
     elif adjustments.print_curve == PrintCurveMode.SOFT.value:
-        base_density = 0.92
+        base_density = 1.0
         base_grade = 1.85
-    elif adjustments.print_curve == PrintCurveMode.CONTRAST.value:
+        highlight_bias = 0.0
+    elif adjustments.print_curve == PrintCurveMode.STANDARD.value:
+        base_density = 1.0
+        base_grade = 3.0
+        highlight_bias = 0.12
+    elif adjustments.print_curve in {PrintCurveMode.CONTRAST.value, PrintCurveMode.CONTRAST_SHOULDER.value}:
         base_density = 1.06
         base_grade = 3.35
+        highlight_bias = 0.12 if adjustments.print_curve == PrintCurveMode.CONTRAST_SHOULDER.value else 0.0
     else:
         base_density = 1.0
         base_grade = 2.5
+        highlight_bias = 0.0
 
     density = base_density - adjustments.exposure / 100.0
     grade = base_grade + adjustments.contrast * 0.025
-    return float(np.clip(density, 0.05, 2.0)), float(np.clip(grade, 0.1, 6.0))
+    return LogPrintCurveParams(
+        density=float(np.clip(density, 0.05, 2.0)),
+        grade=float(np.clip(grade, 0.1, 6.0)),
+        highlight_bias=highlight_bias,
+        highlight_width=0.55,
+        shadow_bias=0.0,
+        shadow_width=0.55,
+    )
+
+
+def log_rational_filmic_print_curve_lut(
+    samples: np.ndarray,
+    offsets: np.ndarray,
+    curve_mode: str,
+) -> np.ndarray:
+    lut = np.empty((3, len(samples)), dtype=np.float32)
+    for channel in range(3):
+        positive = np.clip(1.0 - (samples + np.float32(offsets[channel])), 0.0, 1.0)
+        lut[channel] = rational_filmic_curve_values(positive, curve_mode)
+    return lut
+
+
+def log_rational_filmic_print_response(
+    normalized_log: np.ndarray,
+    *,
+    cmy_offsets: np.ndarray,
+    curve_mode: str,
+) -> np.ndarray:
+    offsets = cmy_offsets.astype(np.float32, copy=False).reshape(1, 1, 3)
+    positive = np.clip(1.0 - (np.clip(normalized_log, 0.0, 1.0) + offsets), 0.0, 1.0)
+    return rational_filmic_curve_values(positive, curve_mode)
+
+
+def rational_filmic_curve_values(values: np.ndarray, curve_mode: str) -> np.ndarray:
+    x = np.clip(np.asarray(values, dtype=np.float32), 0.0, 1.0)
+    if curve_mode == PrintCurveMode.FILMIC_HABLE.value:
+        y = hable_filmic_curve_raw(x)
+        white = float(hable_filmic_curve_raw(np.array([1.0], dtype=np.float32))[0])
+    elif curve_mode == PrintCurveMode.FILMIC_ACES.value:
+        y = aces_filmic_curve_raw(x)
+        white = float(aces_filmic_curve_raw(np.array([1.0], dtype=np.float32))[0])
+    else:
+        return x.astype(np.float32, copy=False)
+    return np.clip(y / max(white, 1.0e-6), 0.0, 1.0).astype(np.float32, copy=False)
+
+
+def hable_filmic_curve_raw(values: np.ndarray) -> np.ndarray:
+    x = np.asarray(values, dtype=np.float32)
+    a = np.float32(0.15)
+    b = np.float32(0.50)
+    c = np.float32(0.10)
+    d = np.float32(0.20)
+    e = np.float32(0.02)
+    f = np.float32(0.30)
+    numerator = x * (a * x + c * b) + d * e
+    denominator = x * (a * x + b) + d * f
+    return (numerator / np.maximum(denominator, np.float32(1.0e-6))) - e / f
+
+
+def aces_filmic_curve_raw(values: np.ndarray) -> np.ndarray:
+    x = np.asarray(values, dtype=np.float32)
+    a = np.float32(2.51)
+    b = np.float32(0.03)
+    c = np.float32(2.43)
+    d = np.float32(0.59)
+    e = np.float32(0.14)
+    return (x * (a * x + b)) / np.maximum(x * (c * x + d) + e, np.float32(1.0e-6))
 
 
 def estimate_lab_print_auto_cmy_offsets(
@@ -1226,6 +1383,8 @@ def apply_print_curve(image: np.ndarray, curve_mode: str) -> np.ndarray:
 def print_curve_values(values: np.ndarray, curve_mode: str) -> np.ndarray:
     if curve_mode == PrintCurveMode.LINEAR.value:
         return np.clip(values, 0.0, 1.0).astype(np.float32, copy=False)
+    if curve_mode in RATIONAL_FILMIC_PRINT_MODES:
+        return rational_filmic_curve_values(values, curve_mode)
     return apply_filmic_curve_lut(values, curve_mode)
 
 
@@ -1448,8 +1607,8 @@ def highlight_shadow_segment_control_points(
     shadow_amount = float(np.clip(adjustments.shadows / 100.0, -1.0, 1.0))
     if shadow_amount != 0.0:
         amount = abs(shadow_amount)
-        shadow_x = mid_anchor * 0.35
-        shadow_delta = mid_anchor * 0.26 * amount
+        shadow_x = mid_anchor * 0.62
+        shadow_delta = mid_anchor * 0.24 * amount
         if shadow_amount > 0.0:
             shadow_y = min(mid_anchor - 1e-4, shadow_x + shadow_delta)
         else:
@@ -1463,8 +1622,8 @@ def highlight_shadow_segment_control_points(
     if highlight_amount != 0.0:
         amount = abs(highlight_amount)
         highlight_span = max(1.0 - mid_anchor, 1e-5)
-        highlight_x = mid_anchor + highlight_span * 0.62
-        highlight_delta = highlight_span * 0.29 * amount
+        highlight_x = mid_anchor + highlight_span * 0.38
+        highlight_delta = highlight_span * 0.27 * amount
         if highlight_amount > 0.0:
             highlight_y = min(1.0 - 1e-5, highlight_x + highlight_delta)
         else:

@@ -63,8 +63,11 @@ class PrintCurveWidget(QWidget):
     def _label(self) -> str:
         labels = {
             PrintCurveMode.LINEAR.value: "Linear",
+            PrintCurveMode.FILMIC_HABLE.value: "Filmic Hable",
+            PrintCurveMode.FILMIC_ACES.value: "Filmic ACES",
             PrintCurveMode.SOFT.value: "Soft Print",
             PrintCurveMode.STANDARD.value: "Standard Print",
             PrintCurveMode.CONTRAST.value: "Contrast Print",
+            PrintCurveMode.CONTRAST_SHOULDER.value: "Contrast Shoulder",
         }
         return labels.get(self._curve_mode, "Standard Print")
