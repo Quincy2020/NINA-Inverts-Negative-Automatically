@@ -6,6 +6,7 @@ from time import perf_counter
 import cv2
 import numpy as np
 
+from qnegative.core.detail import apply_detail_to_linear_rgb
 from qnegative.core.geometry import clamp_rect_to_image, scale_point, scale_rect, warp_rotated_rect
 from qnegative.core.lens_profiles import effective_flat_frame_gain_for_size
 from qnegative.core.models import AdjustmentParams, BalanceAxis, ColorBalanceParams, ImagePoint, ImageRect, ImageSize, LensCorrectionParams, PrintCurveMode, TonalBalance
@@ -459,6 +460,7 @@ def build_lab_print_display_stage(
         processed = corrected
     color_balanced = processed
     processed = apply_saturation_adjustment(processed, adjustments)
+    processed = apply_detail_to_linear_rgb(processed, adjustments.detail)
     display_rgb8 = linear_to_srgb8(processed)
 
     return NegativePreviewResult(
@@ -518,6 +520,11 @@ def build_lab_print_export_linear(
     processed = apply_saturation_adjustment(processed, adjustments)
     if stage_timings is not None:
         stage_timings["Lab saturation"] = perf_counter() - stage_start
+
+    stage_start = perf_counter()
+    processed = apply_detail_to_linear_rgb(processed, adjustments.detail)
+    if stage_timings is not None:
+        stage_timings["Lab detail"] = perf_counter() - stage_start
     return processed.astype(np.float32, copy=False)
 
 

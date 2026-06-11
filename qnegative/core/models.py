@@ -164,10 +164,25 @@ class PrintCurveParams:
 
 
 @dataclass
+class DetailParams:
+    texture_enabled: bool = False
+    texture_amount: int = 40
+    texture_radius: float = 0.90
+    texture_shadow_protect: int = 65
+    texture_highlight_protect: int = 35
+    usm_enabled: bool = False
+    usm_amount: int = 100
+    usm_radius: float = 1.0
+    usm_threshold: int = 2
+    usm_luminance_only: bool = True
+
+
+@dataclass
 class AdjustmentParams:
     invert_mode: str = InvertMode.LAB_PRINT.value
     print_curve: str = PrintCurveMode.STANDARD.value
     print_curve_params: PrintCurveParams = field(default_factory=PrintCurveParams)
+    detail: DetailParams = field(default_factory=DetailParams)
     auto_wb: bool = True
     auto_cmy_strength: int = 65
     printer_balance: BalanceAxis = field(default_factory=BalanceAxis)

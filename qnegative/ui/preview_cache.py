@@ -194,6 +194,7 @@ def adjustments_preview_cache_key(adjustments: AdjustmentParams) -> tuple:
         adjustments.contrast,
         adjustments.saturation,
         adjustments.camera_color_strength,
+        detail_key(adjustments),
         adjustments.soft_highlights,
         adjustments.soft_shadows,
         adjustments.analysis_inset_percent,
@@ -213,6 +214,22 @@ def print_curve_params_key(adjustments: AdjustmentParams) -> tuple:
         round(float(params.highlight_width), 4),
         round(float(params.shadow_bias), 4),
         round(float(params.shadow_width), 4),
+    )
+
+
+def detail_key(adjustments: AdjustmentParams) -> tuple:
+    params = adjustments.detail
+    return (
+        bool(params.texture_enabled),
+        int(params.texture_amount),
+        round(float(params.texture_radius), 3),
+        int(params.texture_shadow_protect),
+        int(params.texture_highlight_protect),
+        bool(params.usm_enabled),
+        int(params.usm_amount),
+        round(float(params.usm_radius), 3),
+        int(params.usm_threshold),
+        bool(params.usm_luminance_only),
     )
 
 
@@ -339,4 +356,5 @@ def lab_print_display_key(
         adjustments.highlights,
         adjustments.shadows,
         adjustments.saturation,
+        detail_key(adjustments),
     )

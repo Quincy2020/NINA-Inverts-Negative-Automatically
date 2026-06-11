@@ -11,6 +11,7 @@ from qnegative.core.models import (
     BalanceAxis,
     ColorBalanceParams,
     ColorCorrectionParams,
+    DetailParams,
     DustMaskState,
     DustRemovalParams,
     ImagePoint,
@@ -271,6 +272,7 @@ def _adjustments_from_dict(payload: dict[str, Any]) -> AdjustmentParams:
     values["color_correction"] = _color_correction_from_dict(payload.get("color_correction") or {})
     values["dust_removal"] = _dust_removal_from_dict(payload.get("dust_removal") or {})
     values["print_curve_params"] = _print_curve_params_from_dict(payload.get("print_curve_params") or {})
+    values["detail"] = _detail_from_dict(payload.get("detail") or {})
     return AdjustmentParams(**values)
 
 
@@ -350,6 +352,21 @@ def _color_correction_from_dict(payload: dict[str, Any]) -> ColorCorrectionParam
         tone_balance_strength=int(payload.get("tone_balance_strength", 100)),
         protection_strength=int(payload.get("protection_strength", 100)),
         exposure_match_strength=int(payload.get("exposure_match_strength", 0)),
+    )
+
+
+def _detail_from_dict(payload: dict[str, Any]) -> DetailParams:
+    return DetailParams(
+        texture_enabled=bool(payload.get("texture_enabled", False)),
+        texture_amount=int(payload.get("texture_amount", 40)),
+        texture_radius=float(payload.get("texture_radius", 0.90)),
+        texture_shadow_protect=int(payload.get("texture_shadow_protect", 65)),
+        texture_highlight_protect=int(payload.get("texture_highlight_protect", 35)),
+        usm_enabled=bool(payload.get("usm_enabled", False)),
+        usm_amount=int(payload.get("usm_amount", 100)),
+        usm_radius=float(payload.get("usm_radius", 1.0)),
+        usm_threshold=int(payload.get("usm_threshold", 2)),
+        usm_luminance_only=bool(payload.get("usm_luminance_only", True)),
     )
 
 

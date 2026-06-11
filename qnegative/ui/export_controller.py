@@ -12,6 +12,7 @@ import numpy as np
 from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
+from qnegative.core.diagnostics import log_event
 from qnegative.core.file_sequence import RAW_EXTENSIONS
 from qnegative.core.models import ImageProcessingState
 from qnegative.ui.export_dialogs import (
@@ -197,6 +198,7 @@ class ExportController:
 
         completed_paths = self.completed_export_source_paths(selected_paths)
         if not completed_paths:
+            self._log_selected_export_filter("none-completed", selected_paths)
             QMessageBox.information(
                 window,
                 "Export Selected Images",
@@ -237,10 +239,21 @@ class ExportController:
         window._save_app_settings()
         items = self._completed_export_items(settings, source_paths=completed_paths)
         if not items:
+            blockers = self._selected_export_output_blockers(settings, completed_paths)
+            self._log_selected_export_filter(
+                "no-output-items",
+                completed_paths,
+                extra=f" blockers={blockers}",
+            )
+            message = (
+                "All selected exports already exist. Enable overwrite or choose a different output name/prefix."
+                if blockers and all(reason.startswith("output_exists:") for reason in blockers)
+                else "None of the selected images have completed RAW positives ready to export."
+            )
             QMessageBox.information(
                 window,
                 "Export Selected Images",
-                "None of the selected images have completed RAW positives ready to export.",
+                message,
             )
             return
 
@@ -248,13 +261,67 @@ class ExportController:
 
     def selected_export_paths(self, paths) -> list[Path]:
         if isinstance(paths, bool) or paths is None:
-            return self.owner.roll_selection.selected_paths
+            selected = self.owner.roll_selection.selected_paths
+            if selected:
+                return selected
+            current = self.owner.current_path
+            return [current] if current is not None else []
         selected: list[Path] = []
         for path in paths:
             candidate = Path(path)
             if candidate not in selected:
                 selected.append(candidate)
         return selected
+
+    def _selected_export_rejection_reason(self, path: Path) -> str:
+        state = self.owner.image_states.get(path)
+        if state is None:
+            return "no_state"
+        if not state.negative_preview_active:
+            return "not_completed"
+        if path.suffix.lower() not in RAW_EXTENSIONS:
+            return f"not_raw:{path.suffix}"
+        if state.film_rect is None:
+            return "no_frame"
+        if not state.film_rect.is_valid():
+            return "invalid_frame"
+        return "accepted"
+
+    def _selected_export_output_blockers(
+        self,
+        settings: BatchExportSettings,
+        paths: list[Path],
+    ) -> list[str]:
+        blockers: list[str] = []
+        sequence_index = int(settings.start_number)
+        for path in paths:
+            output_path = self._batch_export_output_path(
+                path,
+                settings,
+                sequence_index=sequence_index,
+            )
+            if settings.naming_mode == "sequence":
+                sequence_index += 1
+            if output_path.exists() and not settings.overwrite_existing:
+                blockers.append(f"output_exists:{output_path.name}")
+        return blockers
+
+    def _log_selected_export_filter(
+        self,
+        event: str,
+        paths: list[Path],
+        *,
+        extra: str = "",
+    ) -> None:
+        details = [
+            f"{path.name}:{self._selected_export_rejection_reason(path)}"
+            for path in paths
+        ]
+        log_event(
+            "export_selected",
+            f"{event} current={getattr(self.owner.current_path, 'name', None)} "
+            f"targets={details}{extra}",
+        )
 
     def completed_export_source_paths(self, source_paths: list[Path]) -> list[Path]:
         completed: list[Path] = []

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from qnegative.core.dust_model_registry import default_dust_model_plugin, dust_model_plugins
-from qnegative.core.models import DustRemovalParams, InvertMode, LensCorrectionParams, PrintCurveMode, PrintCurveParams, ToolMode
+from qnegative.core.models import DetailParams, DustRemovalParams, InvertMode, LensCorrectionParams, PrintCurveMode, PrintCurveParams, ToolMode
 from qnegative.core.models import AdjustmentParams
 from qnegative.resources import resource_path
 from qnegative.ui.collapsible_section import CollapsibleSection
@@ -126,6 +126,17 @@ class ControlPanel(QWidget):
         self.contrast_slider = self._make_slider(-100, 100, 0)
         self.saturation_slider = self._make_slider(-100, 100, 0)
         self.camera_color_slider = self._make_slider(0, 100, 0)
+        self.texture_enabled_checkbox = QCheckBox("Texture Preserve")
+        self.texture_amount_slider = self._make_slider(0, 100, 40)
+        self.texture_radius_slider = self._make_slider(30, 250, 90)
+        self.texture_shadow_protect_slider = self._make_slider(0, 100, 65)
+        self.texture_highlight_protect_slider = self._make_slider(0, 100, 35)
+        self.usm_enabled_checkbox = QCheckBox("USM")
+        self.usm_amount_slider = self._make_slider(0, 500, 100)
+        self.usm_radius_slider = self._make_slider(0, 1000, 100)
+        self.usm_threshold_slider = self._make_slider(0, 50, 2)
+        self.usm_luminance_only_checkbox = QCheckBox("USM luminance only")
+        self.usm_luminance_only_checkbox.setChecked(True)
         self.analysis_inset_spin = QSpinBox()
         self.analysis_inset_spin.setRange(0, 20)
         self.analysis_inset_spin.setValue(5)
@@ -205,10 +216,11 @@ class ControlPanel(QWidget):
         root.addWidget(self._histogram_section())
         root.addWidget(self._tools_section())
         root.addWidget(self._adjustment_section())
-        root.addWidget(self._color_correction_section())
         root.addWidget(self._white_balance_section())
         root.addWidget(self._lens_correction_section())
+        root.addWidget(self._color_correction_section())
         root.addWidget(self._dust_removal_section())
+        root.addWidget(self._detail_section())
         root.addStretch(1)
         root.addWidget(self._output_section())
 
@@ -283,6 +295,32 @@ class ControlPanel(QWidget):
         layout.addLayout(self._slider_row("Shadow Bias", self.print_shadow_bias_slider, "-0.20", "+0.30"))
         layout.addLayout(self._slider_row("Shadow Width", self.print_shadow_width_slider, "0.20", "0.90"))
         return CollapsibleSection("Printer Curve Advanced", panel, expanded=False)
+
+    def _detail_section(self) -> CollapsibleSection:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addWidget(self.texture_enabled_checkbox)
+        layout.addWidget(self.usm_enabled_checkbox)
+        layout.addWidget(self._detail_advanced_section())
+        return CollapsibleSection("Detail", panel, expanded=False)
+
+    def _detail_advanced_section(self) -> CollapsibleSection:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addLayout(self._slider_row("Texture Amount", self.texture_amount_slider, "0", "100"))
+        layout.addLayout(self._slider_row("Texture Radius", self.texture_radius_slider, "0.30", "2.50"))
+        layout.addLayout(self._slider_row("Shadow Protect", self.texture_shadow_protect_slider, "0", "100"))
+        layout.addLayout(self._slider_row("Highlight Protect", self.texture_highlight_protect_slider, "0", "100"))
+        layout.addWidget(self._divider())
+        layout.addLayout(self._slider_row("USM Amount", self.usm_amount_slider, "0", "500"))
+        layout.addLayout(self._slider_row("USM Radius", self.usm_radius_slider, "0.00", "10.00"))
+        layout.addLayout(self._slider_row("USM Threshold", self.usm_threshold_slider, "0", "50"))
+        layout.addWidget(self.usm_luminance_only_checkbox)
+        return CollapsibleSection("Advanced", panel, expanded=False)
 
     def _lens_correction_section(self) -> CollapsibleSection:
         panel = QWidget()
@@ -383,15 +421,22 @@ class ControlPanel(QWidget):
         model_row.addWidget(self.dust_model_combo, 1)
         layout.addLayout(model_row)
         layout.addWidget(self.dust_enable_checkbox)
+        layout.addWidget(self.dust_edit_mask_button)
+        layout.addWidget(self.dust_mask_status_label)
+        layout.addWidget(self._dust_advanced_section())
+        return CollapsibleSection("Dust Removal", panel, expanded=False)
+
+    def _dust_advanced_section(self) -> CollapsibleSection:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
         layout.addWidget(self.dust_adaptive_checkbox)
         layout.addLayout(self._slider_row("Threshold", self.dust_threshold_slider, "1", "99"))
         layout.addLayout(self._slider_row("Texture Guard", self.dust_texture_penalty_slider, "0", "99"))
         layout.addLayout(self._slider_row("Max Threshold", self.dust_max_threshold_slider, "1", "99"))
         layout.addLayout(self._slider_row("Inpaint Radius", self.dust_inpaint_radius_slider, "1", "16"))
-        layout.addWidget(self._divider())
-        layout.addWidget(self.dust_edit_mask_button)
-        layout.addWidget(self.dust_mask_status_label)
-        return CollapsibleSection("Dust Removal", panel, expanded=False)
+        return CollapsibleSection("Advanced", panel, expanded=False)
 
     def _output_section(self) -> QGroupBox:
         group = self._section("Output")
@@ -479,6 +524,13 @@ class ControlPanel(QWidget):
             self.print_highlight_width_slider,
             self.print_shadow_bias_slider,
             self.print_shadow_width_slider,
+            self.texture_amount_slider,
+            self.texture_radius_slider,
+            self.texture_shadow_protect_slider,
+            self.texture_highlight_protect_slider,
+            self.usm_amount_slider,
+            self.usm_radius_slider,
+            self.usm_threshold_slider,
             self.lens_strength_slider,
             self.lens_radius_slider,
             self.lens_center_x_slider,
@@ -504,6 +556,9 @@ class ControlPanel(QWidget):
         self.lens_apply_completed_button.clicked.connect(self.lensApplyCompletedRequested.emit)
         self.analysis_inset_spin.valueChanged.connect(self._emit_adjustments)
         self.print_curve_advanced_checkbox.toggled.connect(self._emit_adjustments)
+        self.texture_enabled_checkbox.toggled.connect(self._emit_adjustments)
+        self.usm_enabled_checkbox.toggled.connect(self._emit_adjustments)
+        self.usm_luminance_only_checkbox.toggled.connect(self._emit_adjustments)
         self.white_balance_panel.balanceChanged.connect(self._emit_adjustments)
         self.white_balance_panel.interactionStarted.connect(self.adjustmentInteractionStarted.emit)
         self.white_balance_panel.interactionFinished.connect(self.adjustmentInteractionFinished.emit)
@@ -623,6 +678,18 @@ class ControlPanel(QWidget):
                 max_threshold=self.dust_max_threshold_slider.value(),
                 inpaint_radius=self.dust_inpaint_radius_slider.value(),
             ),
+            "detail": DetailParams(
+                texture_enabled=self.texture_enabled_checkbox.isChecked(),
+                texture_amount=self.texture_amount_slider.value(),
+                texture_radius=self.texture_radius_slider.value() / 100.0,
+                texture_shadow_protect=self.texture_shadow_protect_slider.value(),
+                texture_highlight_protect=self.texture_highlight_protect_slider.value(),
+                usm_enabled=self.usm_enabled_checkbox.isChecked(),
+                usm_amount=self.usm_amount_slider.value(),
+                usm_radius=self.usm_radius_slider.value() / 100.0,
+                usm_threshold=self.usm_threshold_slider.value(),
+                usm_luminance_only=self.usm_luminance_only_checkbox.isChecked(),
+            ),
             "analysis_inset_percent": self.analysis_inset_spin.value(),
             "invert_mode": InvertMode.LAB_PRINT.value,
             "print_curve": self.print_curve_combo.currentData(),
@@ -730,6 +797,8 @@ class ControlPanel(QWidget):
             self.print_grade_slider,
             self.print_highlight_width_slider,
             self.print_shadow_width_slider,
+            self.texture_radius_slider,
+            self.usm_radius_slider,
         }:
             return f"{value / 100.0:.2f}"
         if slider in {self.print_highlight_bias_slider, self.print_shadow_bias_slider}:
@@ -850,6 +919,16 @@ class ControlPanel(QWidget):
             self.print_highlight_width_slider,
             self.print_shadow_bias_slider,
             self.print_shadow_width_slider,
+            self.texture_enabled_checkbox,
+            self.texture_amount_slider,
+            self.texture_radius_slider,
+            self.texture_shadow_protect_slider,
+            self.texture_highlight_protect_slider,
+            self.usm_enabled_checkbox,
+            self.usm_amount_slider,
+            self.usm_radius_slider,
+            self.usm_threshold_slider,
+            self.usm_luminance_only_checkbox,
             self.lens_tabs,
             self.lens_create_flat_profile_button,
             self.lens_strength_slider,
@@ -888,6 +967,16 @@ class ControlPanel(QWidget):
             self.print_highlight_width_slider.setValue(int(round(adjustments.print_curve_params.highlight_width * 100.0)))
             self.print_shadow_bias_slider.setValue(int(round(adjustments.print_curve_params.shadow_bias * 100.0)))
             self.print_shadow_width_slider.setValue(int(round(adjustments.print_curve_params.shadow_width * 100.0)))
+            self.texture_enabled_checkbox.setChecked(adjustments.detail.texture_enabled)
+            self.texture_amount_slider.setValue(adjustments.detail.texture_amount)
+            self.texture_radius_slider.setValue(int(round(adjustments.detail.texture_radius * 100.0)))
+            self.texture_shadow_protect_slider.setValue(adjustments.detail.texture_shadow_protect)
+            self.texture_highlight_protect_slider.setValue(adjustments.detail.texture_highlight_protect)
+            self.usm_enabled_checkbox.setChecked(adjustments.detail.usm_enabled)
+            self.usm_amount_slider.setValue(adjustments.detail.usm_amount)
+            self.usm_radius_slider.setValue(int(round(adjustments.detail.usm_radius * 100.0)))
+            self.usm_threshold_slider.setValue(adjustments.detail.usm_threshold)
+            self.usm_luminance_only_checkbox.setChecked(adjustments.detail.usm_luminance_only)
             lens_mode = (
                 adjustments.lens_correction.mode
                 if adjustments.lens_correction.enabled

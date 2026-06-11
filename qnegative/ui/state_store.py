@@ -133,6 +133,8 @@ def build_current_image_state(
     preview_rotation_quarters: int,
     dust_mask: DustMaskState | None = None,
 ) -> ImageProcessingState:
+    existing_positive = bool(existing_state is not None and existing_state.negative_preview_active)
+    positive_active = bool(has_positive_result or existing_positive)
     return ImageProcessingState(
         mask_point=mask_point,
         film_rect=film_rect,
@@ -154,9 +156,9 @@ def build_current_image_state(
         ),
         tone_mid_anchor=tone_mid_anchor,
         roll_color_frame=deepcopy(existing_state.roll_color_frame) if existing_state else None,
-        negative_preview_active=has_positive_result,
+        negative_preview_active=positive_active,
         auto_levels_pending=(
-            False if has_positive_result or manual_levels_present else auto_levels_pending
+            False if positive_active or manual_levels_present else auto_levels_pending
         ),
         preview_flip_horizontal=preview_flip_horizontal,
         preview_flip_vertical=preview_flip_vertical,
