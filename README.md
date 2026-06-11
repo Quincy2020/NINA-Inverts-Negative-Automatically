@@ -24,7 +24,8 @@ NINA is GPLv3 licensed.
 - **Automatic CMY balance**: automatic printer-style color balance with manual CMY offsets for fast correction.
 - **Roll Color Analysis**: analyzes a whole roll for color bias, then applies corrections per roll and per frame.
 - **Lens falloff correction**: radial correction and flat-frame profiles for copy lens vignetting.
-- **Quick keyboard workflow**: adjust color, exposure, gray point, confirm the frame, and jump to the next image without leaving the keyboard.
+- **Quick keyboard workflow**: adjust printer color, gray point, confirm the frame, and jump to the next image without leaving the keyboard.
+- **Dust removal workflow**: generate an automatic dust/lint mask in the mask editor, then add cleanup strokes or protect image detail before export.
 - **Batch export**: export completed images to TIFF, PNG, or JPEG.
 
 ## Input And Output
@@ -66,7 +67,7 @@ Basic workflow:
 
 1. Open a folder of camera-scanned negatives.
 2. Let NINA auto-detect the film frame and create an initial positive preview.
-3. Adjust exposure, gray point, CMY balance, and optional roll color correction.
+3. Adjust gray point, CMY balance, printer curve, and optional roll color correction.
 4. Press `Space` or `Enter` to confirm the current image and move to the next.
 5. Export one image or all completed images.
 
@@ -111,9 +112,31 @@ Roll Color Analysis is meant to make a whole roll feel more consistent.
 
 It analyzes completed positive previews, estimates color bias, and then applies controlled correction per frame. This is useful when the roll is slightly too green, too blue, too warm, or inconsistent between frames.
 
+## Printer Curve
+
+NINA's main tone controls are in the printer curve section. `Soft Print`, `Standard Print`, and `Contrast Print` choose the base density/gradient behavior, and `Custom Printer Curve` exposes the values directly.
+
+- **Density** shifts the print density baseline and acts like a global brightness placement in the print-curve stage.
+- **Gradient** controls the print curve steepness. Higher values increase midtone contrast.
+- **Highlight Bias** moves the highlight-side density response earlier or later. Positive values make paper density rise earlier in highlights, which can hold bright tones back before they clip.
+- **Shadow Bias** applies the same idea on the shadow side. Positive or negative values shift how quickly the curve enters the darker end.
+- **Highlight Width** and **Shadow Width** control how far each bias reaches from the tonal end toward the midtones.
+
+The older simple highlight/shadow controls are no longer part of the main Basic panel; their role is handled by these printer-curve bias controls.
+
+## Dust Removal
+
+Dust removal is mask based. Open `Edit Mask`, generate the automatic mask, inspect the overlay, then use manual brushes to add missed dust/lint or protect image detail that should not be repaired. Export reuses the saved mask and does not rerun automatic mask generation for that image.
+
+Available model styles:
+
+- **Lint 1.0 Safe**: conservative default model. It has fewer false positives and is safer around real image edges, but can miss parts of long or large fibers.
+- **Lint 2.0 Candidate**: more aggressive lint model for long, sharp, and curly fibers. It can cover difficult lint better, but may respond more strongly to line-like image detail.
+- **Dust 1.0 Recall**: higher-recall dust model. It is more willing to flag dust and lint, but can also flag texture more often.
+
 ## Keyboard Shortcuts
 
-Coarse color/exposure shortcuts use a step of `20`. Hold `Shift` for a fine step of `5`.
+Coarse printer-color shortcuts use a step of `20`. Hold `Shift` for a fine step of `5`. Gray point uses a step of `5`, or `1` with `Shift`.
 
 | Shortcut | Action |
 | --- | --- |
@@ -125,8 +148,7 @@ Coarse color/exposure shortcuts use a step of `20`. Hold `Shift` for a fine step
 | `Q` / `A` | Move printer balance toward yellow / blue. |
 | `W` / `S` | Move printer balance toward magenta / green. |
 | `E` / `D` | Move printer balance toward cyan / red. |
-| `R` / `F` | Increase / decrease exposure. |
-| `[` / `]` | Move gray point darker / brighter. |
+| `R` / `F` | Move gray point brighter / darker. |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo adjustments. |
 
 Preview right-click menu:
@@ -165,6 +187,7 @@ camera RAW
 -> Lab Print conversion
 -> auto levels and CMY balance
 -> print curve and color controls
+-> optional saved dust mask inpaint
 -> preview or export
 ```
 
@@ -179,7 +202,7 @@ Current priorities:
 - Better automatic frame detection.
 - Better lens profiles.
 - Camera stitching / panorama workflow research.
-- Optional dust removal research.
+- Better dust/lint models and mask editing ergonomics.
 
 ## Dependencies
 
